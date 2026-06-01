@@ -8,15 +8,15 @@ import fs from 'fs/promises';
 import path from 'path';
 import { normalizeModelId, getDefaultModelForCli } from '@/lib/constants/cliModels';
 import { ensureClaudeSkillsForProject } from '@/lib/services/claude-skills';
-import { buildQuantProjectSettings, getQuantCapability } from '@/lib/quant/capabilities';
-import { serializeQuantVisualizationTemplate } from '@/lib/quant/visualization-templates';
+import { buildTravelProjectSettings, getTravelCapability } from '@/lib/travel/capabilities';
+import { serializeTravelVisualizationTemplate } from '@/lib/travel/visualization-templates';
 
 const PROJECTS_DIR = process.env.PROJECTS_DIR || './data/projects';
 const PROJECTS_DIR_ABSOLUTE = path.isAbsolute(PROJECTS_DIR)
   ? PROJECTS_DIR
   : path.resolve(/*turbopackIgnore: true*/ process.cwd(), PROJECTS_DIR);
 
-function mergeProjectSettings(existing: string | null | undefined, quantCapabilityId?: string | null): string {
+function mergeProjectSettings(existing: string | null | undefined, travelCapabilityId?: string | null): string {
   let parsed: Record<string, unknown> = {};
 
   if (existing) {
@@ -32,22 +32,22 @@ function mergeProjectSettings(existing: string | null | undefined, quantCapabili
 
   return JSON.stringify({
     ...parsed,
-    quant: buildQuantProjectSettings(quantCapabilityId),
+    travel: buildTravelProjectSettings(travelCapabilityId),
   });
 }
 
-async function writeQuantPilotManifest(params: {
+async function writeTravelPilotManifest(params: {
   projectPath: string;
   projectId: string;
   projectName: string;
   preferredCli: string;
   selectedModel: string;
-  quantCapabilityId?: string | null;
+  travelCapabilityId?: string | null;
 }) {
-  const capability = getQuantCapability(params.quantCapabilityId);
-  const visualizationTemplate = serializeQuantVisualizationTemplate(capability.id);
-  const quantPilotDir = path.join(params.projectPath, '.quantpilot');
-  await fs.mkdir(quantPilotDir, { recursive: true });
+  const capability = getTravelCapability(params.travelCapabilityId);
+  const visualizationTemplate = serializeTravelVisualizationTemplate(capability.id);
+  const travelPilotDir = path.join(params.projectPath, '.travelpilot');
+  await fs.mkdir(travelPilotDir, { recursive: true });
   await Promise.all([
     fs.mkdir(path.join(params.projectPath, 'data_file', 'raw'), { recursive: true }),
     fs.mkdir(path.join(params.projectPath, 'data_file', 'intermediate'), { recursive: true }),
@@ -61,22 +61,22 @@ async function writeQuantPilotManifest(params: {
     schemaVersion: 1,
     projectId: params.projectId,
     projectName: params.projectName,
-    platform: 'QuantPilot',
+    platform: '北京旅游 Agent',
     createdAt: new Date().toISOString(),
     runtime: {
       cli: params.preferredCli,
       model: params.selectedModel,
     },
-    quant: buildQuantProjectSettings(capability.id),
+    travel: buildTravelProjectSettings(capability.id),
   };
 
   await fs.writeFile(
-    path.join(quantPilotDir, 'manifest.json'),
+    path.join(travelPilotDir, 'manifest.json'),
     `${JSON.stringify(manifest, null, 2)}\n`,
     'utf8'
   );
   await fs.writeFile(
-    path.join(quantPilotDir, 'run_plan.json'),
+    path.join(travelPilotDir, 'run_plan.json'),
     `${JSON.stringify(
       {
         schemaVersion: 1,
@@ -84,8 +84,10 @@ async function writeQuantPilotManifest(params: {
         status: 'pending',
         capabilityId: capability.id,
         question: '',
-        symbols: [],
-        timeRange: null,
+        cityId: 'beijing',
+        routeMode: capability.id === 'culture_route' || capability.id === 'efficient_route' ? 'culture' : 'mixed',
+        area: null,
+        constraints: {},
         dataRequirements: capability.dataEndpoints,
         analysisSteps: [],
         visualization: {
@@ -93,14 +95,6 @@ async function writeQuantPilotManifest(params: {
           templateId: visualizationTemplate.templateId,
           name: visualizationTemplate.name,
           scenario: visualizationTemplate.scenario,
-          variantId: visualizationTemplate.variantId,
-          variantName: visualizationTemplate.variantName,
-          variantScenario: visualizationTemplate.variantScenario,
-          layout: visualizationTemplate.layout,
-          density: visualizationTemplate.density,
-          firstViewport: visualizationTemplate.firstViewport,
-          variantGuidance: visualizationTemplate.variantGuidance,
-          matchReasons: visualizationTemplate.matchReasons,
           panels: visualizationTemplate.requiredComponents,
           painPoints: visualizationTemplate.painPoints,
           optionalPanels: visualizationTemplate.optionalComponents,
@@ -118,39 +112,106 @@ async function writeQuantPilotManifest(params: {
     'utf8'
   );
   await fs.writeFile(
-    path.join(quantPilotDir, 'events.jsonl'),
+    path.join(travelPilotDir, 'events.jsonl'),
     '',
     { encoding: 'utf8', flag: 'a' }
   );
+}
+
+function localProjectFromManifest(projectId: string, manifest: Record<string, any>, projectPath: string): Project {
+  const preferredCli = String(manifest.runtime?.cli || 'claude');
+  const selectedModel = normalizeModelId(preferredCli, manifest.runtime?.model || getDefaultModelForCli(preferredCli));
+  const now = new Date();
+  return {
+    id: projectId,
+    name: String(manifest.projectName || projectId),
+    description: 'Local Beijing travel project',
+    initialPrompt: '',
+    repoPath: projectPath,
+    preferredCli,
+    selectedModel,
+    settings: JSON.stringify({ travel: manifest.travel || buildTravelProjectSettings() }),
+    status: 'idle',
+    templateType: 'nextjs',
+    createdAt: manifest.createdAt ? new Date(manifest.createdAt) : now,
+    updatedAt: now,
+    lastActiveAt: now,
+    previewUrl: null,
+    previewPort: null,
+    activeClaudeSessionId: undefined,
+    activeCursorSessionId: undefined,
+    fallbackEnabled: true,
+  } as Project;
+}
+
+async function readLocalProject(projectId: string): Promise<Project | null> {
+  const projectPath = path.join(PROJECTS_DIR_ABSOLUTE, projectId);
+  try {
+    const raw = await fs.readFile(path.join(projectPath, '.travelpilot', 'manifest.json'), 'utf8');
+    const manifest = JSON.parse(raw);
+    return localProjectFromManifest(projectId, manifest, projectPath);
+  } catch {
+    return null;
+  }
+}
+
+async function listLocalProjects(): Promise<Project[]> {
+  try {
+    const entries = await fs.readdir(PROJECTS_DIR_ABSOLUTE, { withFileTypes: true });
+    const projects = await Promise.all(
+      entries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => readLocalProject(entry.name))
+    );
+    return projects.filter(Boolean) as Project[];
+  } catch {
+    return [];
+  }
 }
 
 /**
  * Retrieve all projects
  */
 export async function getAllProjects(): Promise<Project[]> {
-  const projects = await prisma.project.findMany({
-    orderBy: {
-      lastActiveAt: 'desc',
-    },
-  });
-  return projects.map(project => ({
-    ...project,
-    selectedModel: normalizeModelId(project.preferredCli ?? 'claude', project.selectedModel ?? undefined),
-  })) as Project[];
+  try {
+    const projects = await prisma.project.findMany({
+      orderBy: {
+        lastActiveAt: 'desc',
+      },
+    });
+    return projects.map(project => ({
+      ...project,
+      selectedModel: normalizeModelId(project.preferredCli ?? 'claude', project.selectedModel ?? undefined),
+    })) as Project[];
+  } catch (error) {
+    if (process.env.SKIP_DB_SYNC === '1') {
+      console.warn('[ProjectService] Database unavailable, using local project manifests.');
+      return listLocalProjects();
+    }
+    throw error;
+  }
 }
 
 /**
  * Retrieve project by ID
  */
 export async function getProjectById(id: string): Promise<Project | null> {
-  const project = await prisma.project.findUnique({
-    where: { id },
-  });
-  if (!project) return null;
-  return {
-    ...project,
-    selectedModel: normalizeModelId(project.preferredCli ?? 'claude', project.selectedModel ?? undefined),
-  } as Project;
+  try {
+    const project = await prisma.project.findUnique({
+      where: { id },
+    });
+    if (!project) return null;
+    return {
+      ...project,
+      selectedModel: normalizeModelId(project.preferredCli ?? 'claude', project.selectedModel ?? undefined),
+    } as Project;
+  } catch (error) {
+    if (process.env.SKIP_DB_SYNC === '1') {
+      console.warn(`[ProjectService] Database unavailable, reading local project ${id}.`);
+      return readLocalProject(id);
+    }
+    throw error;
+  }
 }
 
 /**
@@ -166,40 +227,48 @@ export async function createProject(input: CreateProjectInput): Promise<Project>
     preferredCli,
     input.selectedModel ?? getDefaultModelForCli(preferredCli)
   );
-  const quantCapability = getQuantCapability(input.quantCapabilityId);
-  await writeQuantPilotManifest({
+  const travelCapability = getTravelCapability(input.travelCapabilityId ?? input.quantCapabilityId);
+  await writeTravelPilotManifest({
     projectPath,
     projectId: input.project_id,
     projectName: input.name,
     preferredCli,
     selectedModel,
-    quantCapabilityId: quantCapability.id,
+    travelCapabilityId: travelCapability.id,
   });
 
-  // Create project in database
-  const project = await prisma.project.create({
-    data: {
-      id: input.project_id,
-      name: input.name,
-      description: input.description,
-      initialPrompt: input.initialPrompt,
-      repoPath: projectPath,
-      preferredCli,
-      selectedModel,
-      settings: mergeProjectSettings(undefined, quantCapability.id),
-      status: 'idle',
-      templateType: 'nextjs',
-      lastActiveAt: new Date(),
-      previewUrl: null,
-      previewPort: null,
-    },
-  });
+  try {
+    const project = await prisma.project.create({
+      data: {
+        id: input.project_id,
+        name: input.name,
+        description: input.description,
+        initialPrompt: input.initialPrompt,
+        repoPath: projectPath,
+        preferredCli,
+        selectedModel,
+        settings: mergeProjectSettings(undefined, travelCapability.id),
+        status: 'idle',
+        templateType: 'nextjs',
+        lastActiveAt: new Date(),
+        previewUrl: null,
+        previewPort: null,
+      },
+    });
 
-  console.log(`[ProjectService] Created project: ${project.id}`);
-  return {
-    ...project,
-    selectedModel: normalizeModelId(project.preferredCli ?? 'claude', project.selectedModel ?? undefined),
-  } as Project;
+    console.log(`[ProjectService] Created project: ${project.id}`);
+    return {
+      ...project,
+      selectedModel: normalizeModelId(project.preferredCli ?? 'claude', project.selectedModel ?? undefined),
+    } as Project;
+  } catch (error) {
+    if (process.env.SKIP_DB_SYNC === '1') {
+      console.warn(`[ProjectService] Database unavailable, created local project manifest only: ${input.project_id}`);
+      const localProject = await readLocalProject(input.project_id);
+      if (localProject) return localProject;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -242,18 +311,32 @@ export async function updateProject(
 export async function deleteProject(id: string): Promise<void> {
   // Delete project directory
   const project = await getProjectById(id);
-  if (project?.repoPath) {
+  const projectPath = project?.repoPath || path.join(PROJECTS_DIR_ABSOLUTE, id);
+  if (projectPath) {
     try {
-      await fs.rm(project.repoPath, { recursive: true, force: true });
+      await fs.rm(projectPath, { recursive: true, force: true });
     } catch (error) {
       console.warn(`[ProjectService] Failed to delete project directory:`, error);
     }
   }
 
+  if (process.env.SKIP_DB_SYNC === '1') {
+    console.log(`[ProjectService] Deleted local project: ${id}`);
+    return;
+  }
+
   // Delete project from database (related data automatically deleted via Cascade)
-  await prisma.project.delete({
-    where: { id },
-  });
+  try {
+    await prisma.project.delete({
+      where: { id },
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('Record to delete does not exist')) {
+      console.warn(`[ProjectService] Project database record already absent: ${id}`);
+      return;
+    }
+    throw error;
+  }
 
   console.log(`[ProjectService] Deleted project: ${id}`);
 }

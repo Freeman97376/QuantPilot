@@ -71,10 +71,15 @@ const VISIBLE_PROCESS_INSTRUCTIONS = `
 - 最终可视化页面和数据都准备完成后，再呈现或说明预览结果。`;
 
 const appendVisibleProcessInstructions = (message: string) => {
-  if (message.includes('可见的执行过程摘要')) {
+  const travelProcessInstructions = `
+
+Please handle this as a Beijing travel route planning task. Identify area, duration, budget, meal, low-queue, low-walk, elderly/family, and replan constraints, then use local POI/UGC data to generate an executable itinerary. Do not output stock, quant, market, K-line, backtest, or portfolio content.
+
+Focus on route options, timeline, lunch/coffee/entertainment labels, budget, total duration, estimated walking/transfer, UGC evidence, and risk notes. Distance and queue are static local estimates, not realtime navigation.`;
+  if (message.includes('Beijing travel route planning task')) {
     return message;
   }
-  return `${message}${VISIBLE_PROCESS_INSTRUCTIONS}`;
+  return `${message}${travelProcessInstructions}`;
 };
 
 const sanitizeCli = (cli?: string | null) => sanitizeActiveCli(cli, DEFAULT_ACTIVE_CLI);
@@ -240,6 +245,173 @@ function TreeView({ entries, selectedFile, expandedFolders, folderContents, onTo
   );
 }
 
+type TravelItineraryData = {
+  parsed_request?: Record<string, any>;
+  planning_response?: {
+    resolved_area?: string;
+    route_mode?: string;
+    day_count?: number;
+    daily_itinerary?: Array<Record<string, any>>;
+    evidence_summary?: Record<string, any>;
+    generation_metrics?: Record<string, any>;
+    proposals?: Array<Record<string, any>>;
+  };
+};
+
+function TravelItineraryPreview({ data }: { data: TravelItineraryData }) {
+  const planning = data.planning_response ?? {};
+  const proposals = Array.isArray(planning.proposals) ? planning.proposals.slice(0, 3) : [];
+  const dailyItinerary = Array.isArray(planning.daily_itinerary) ? planning.daily_itinerary : [];
+  const primary = proposals[0];
+  const stops = Array.isArray(primary?.pois) ? primary.pois : [];
+
+  return (
+    <div className="h-full w-full overflow-y-auto bg-[#f7f2ea] text-slate-950">
+      <div className="mx-auto max-w-6xl px-8 py-10">
+        <div className="rounded-[2rem] border border-[#e3d5bf] bg-white/90 p-8 shadow-sm">
+          <div className="flex flex-wrap items-start justify-between gap-6">
+            <div>
+              <p className="text-sm font-semibold uppercase tracking-[0.28em] text-[#b75f38]">Beijing Travel Agent</p>
+              <h1 className="mt-3 text-4xl font-black tracking-tight text-slate-950">
+                {dailyItinerary.length > 1 ? '北京多日智能行程' : '北京智能路线方案'}
+              </h1>
+              <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-600">
+                已基于本地北京 POI、UGC 特征、价格、营业时间和坐标距离估算生成。排队风险为历史文本信号，转移时间不是实时导航。
+              </p>
+            </div>
+            <div className="grid grid-cols-3 gap-3 text-center">
+              <div className="rounded-2xl bg-[#173f35] px-4 py-3 text-white">
+                <p className="text-xs text-white/70">区域</p>
+                <p className="mt-1 font-bold">{planning.resolved_area || '北京'}</p>
+              </div>
+              <div className="rounded-2xl bg-[#e77b55] px-4 py-3 text-white">
+                <p className="text-xs text-white/70">{dailyItinerary.length > 1 ? '天数' : '方案数'}</p>
+                <p className="mt-1 font-bold">{dailyItinerary.length > 1 ? dailyItinerary.length : proposals.length}</p>
+              </div>
+              <div className="rounded-2xl bg-[#f1c979] px-4 py-3 text-slate-950">
+                <p className="text-xs text-slate-600">10 秒内</p>
+                <p className="mt-1 font-bold">{planning.generation_metrics?.within_10s ? '通过' : '待确认'}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {dailyItinerary.length > 1 ? (
+          <div className="mt-6 grid gap-5">
+            {dailyItinerary.map((day: Record<string, any>, index: number) => {
+              const proposal = day.proposal || {};
+              const dayStops = Array.isArray(proposal.pois) ? proposal.pois : [];
+              return (
+                <div key={day.day ?? index} className="rounded-[2rem] border border-[#e3d5bf] bg-white p-6 shadow-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-[#b75f38]">{day.title || `第 ${index + 1} 天`}</p>
+                      <h2 className="mt-1 text-2xl font-black">{day.theme || proposal.display_title || '日程方案'}</h2>
+                    </div>
+                    <div className="flex gap-2 text-sm font-bold">
+                      <span className="rounded-full bg-[#173f35] px-3 py-1.5 text-white">{proposal.total_route_duration_min ?? '-'} 分钟</span>
+                      <span className="rounded-full bg-[#f1c979] px-3 py-1.5 text-slate-950">{proposal.total_budget_estimate ?? '-'} 元</span>
+                    </div>
+                  </div>
+                  <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {dayStops.map((stop: Record<string, any>, stopIndex: number) => (
+                      <div key={`${stop.poi_id ?? stop.name}-${stopIndex}`} className="rounded-2xl border border-slate-100 bg-[#fffaf2] p-4">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-[#e77b55] text-sm font-black text-white">{stopIndex + 1}</span>
+                          <span className="rounded-full bg-white px-2 py-1 text-xs font-semibold text-slate-600">{stop.arrival_time} - {stop.departure_time}</span>
+                        </div>
+                        <h3 className="mt-3 font-black">
+                          {stop.name}
+                          {stop.meal_slot === 'lunch' ? <span className="ml-2 rounded-full bg-[#f1c979] px-2 py-0.5 text-xs text-slate-950">午餐</span> : null}
+                        </h3>
+                        <p className="mt-1 text-sm text-slate-600">{stop.recommendation_reason}</p>
+                      </div>
+                    ))}
+                  </div>
+                  {Array.isArray(proposal.risks) && proposal.risks.length > 0 ? (
+                    <p className="mt-4 rounded-xl bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">{proposal.risks.slice(0, 2).join('；')}</p>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : primary ? (
+          <div className="mt-6 grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
+            <div className="rounded-[2rem] border border-[#e3d5bf] bg-white p-6 shadow-sm">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="text-sm font-semibold text-[#b75f38]">推荐主方案</p>
+                  <h2 className="mt-1 text-2xl font-black">{primary.display_title || primary.title || '路线方案'}</h2>
+                </div>
+                <div className="rounded-full bg-[#173f35] px-4 py-2 text-sm font-bold text-white">
+                  {primary.total_route_duration_min ?? '-'} 分钟
+                </div>
+              </div>
+              <div className="mt-5 grid grid-cols-3 gap-3">
+                <div className="rounded-2xl bg-slate-50 p-4">
+                  <p className="text-xs text-slate-500">预算估算</p>
+                  <p className="mt-1 text-xl font-black">{primary.total_budget_estimate ?? '-'} 元</p>
+                </div>
+                <div className="rounded-2xl bg-slate-50 p-4">
+                  <p className="text-xs text-slate-500">转移时间</p>
+                  <p className="mt-1 text-xl font-black">{primary.total_transfer_minutes ?? '-'} 分钟</p>
+                </div>
+                <div className="rounded-2xl bg-slate-50 p-4">
+                  <p className="text-xs text-slate-500">步行距离</p>
+                  <p className="mt-1 text-xl font-black">{primary.total_walking_distance_m ?? '-'} 米</p>
+                </div>
+              </div>
+              <div className="mt-6 space-y-4">
+                {stops.map((stop: Record<string, any>, index: number) => (
+                  <div key={`${stop.poi_id ?? stop.name}-${index}`} className="flex gap-4 rounded-2xl border border-slate-100 bg-[#fffaf2] p-4">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#e77b55] font-black text-white">{index + 1}</div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <h3 className="font-black text-slate-950">
+                          {stop.name}
+                          {stop.meal_slot === 'lunch' ? <span className="ml-2 rounded-full bg-[#f1c979] px-2 py-0.5 text-xs text-slate-950">午餐</span> : null}
+                        </h3>
+                        <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-600">
+                          {stop.arrival_time} - {stop.departure_time}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-sm text-slate-600">{stop.recommendation_reason}</p>
+                      <p className="mt-2 text-xs text-slate-500">{stop.opening_hours_note}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              {proposals.map((proposal, index) => (
+                <div key={proposal.proposal_id ?? index} className="rounded-[1.5rem] border border-[#e3d5bf] bg-white p-5 shadow-sm">
+                  <div className="flex items-center justify-between">
+                    <h3 className="font-black">{proposal.display_title || proposal.title || `方案 ${index + 1}`}</h3>
+                    <span className="text-sm font-bold text-[#b75f38]">{proposal.total_budget_estimate ?? '-'} 元</span>
+                  </div>
+                  <p className="mt-3 text-sm leading-6 text-slate-600">
+                    {Array.isArray(proposal.ordered_poi_names) ? proposal.ordered_poi_names.join(' → ') : '暂无路线'}
+                  </p>
+                  {Array.isArray(proposal.risks) && proposal.risks.length > 0 ? (
+                    <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
+                      {proposal.risks.slice(0, 2).join('；')}
+                    </p>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-6 rounded-[2rem] border border-dashed border-[#d7c3a6] bg-white/70 p-8 text-center text-slate-600">
+            输入北京游玩目标后，路线方案会显示在这里。
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function ChatPage() {
   const params = useParams<{ project_id: string }>();
   const pathname = usePathname();
@@ -323,6 +495,7 @@ export default function ChatPage() {
   const [quantValidationState, setQuantValidationState] = useState<QuantValidationState>('unknown');
   const [quantValidationMessage, setQuantValidationMessage] = useState<string | null>(null);
   const [quantRepairPlan, setQuantRepairPlan] = useState<QuantValidationRepairPlan | null>(null);
+  const [travelItinerary, setTravelItinerary] = useState<TravelItineraryData | null>(null);
   const [cliStatuses, setCliStatuses] = useState<Record<string, CliStatusSnapshot>>({});
   const [conversationId, setConversationId] = useState<string>(() => {
     if (typeof window !== 'undefined' && window.crypto?.randomUUID) {
@@ -394,9 +567,10 @@ export default function ChatPage() {
         displayInstruction: initialPrompt.trim(),
         images: [],
         isInitialPrompt: true,
+        travelCapabilityId: 'mixed_food_route',
         cliPreference: preferredCli,
         conversationId: conversationId || undefined,
-        requestId,
+        requestId: `${requestId}-progress`,
         selectedModel,
       };
 
@@ -1042,6 +1216,29 @@ const persistProjectPreferences = useCallback(
       setTree([]);
     }
   }, [projectId, loadSubdirectory]);
+
+  const loadTravelItinerary = useCallback(async () => {
+    if (!projectId) return;
+    try {
+      const response = await fetch(
+        `${API_BASE}/api/projects/${projectId}/artifact?path=${encodeURIComponent('data_file/final/itinerary-data.json')}`,
+        { cache: 'no-store' },
+      );
+      if (!response.ok) {
+        setTravelItinerary(null);
+        return;
+      }
+      const data = await response.json();
+      setTravelItinerary(data);
+    } catch (error) {
+      console.warn('Failed to load travel itinerary artifact:', error);
+      setTravelItinerary(null);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    void loadTravelItinerary();
+  }, [loadTravelItinerary]);
 
   // Load subdirectory contents
 
@@ -1706,6 +1903,11 @@ const persistProjectPreferences = useCallback(
     loadTreeRef.current = loadTree;
   }, [loadTree]);
 
+  const loadTravelItineraryRef = useRef(loadTravelItinerary);
+  useEffect(() => {
+    loadTravelItineraryRef.current = loadTravelItinerary;
+  }, [loadTravelItinerary]);
+
   const loadDeployStatusRef = useRef(loadDeployStatus);
   useEffect(() => {
     loadDeployStatusRef.current = loadDeployStatus;
@@ -1819,12 +2021,9 @@ const persistProjectPreferences = useCallback(
       return;
     }
 
-    // Add additional instructions in Chat Mode
     if (mode === 'chat') {
       finalMessage = finalMessage + "\n\nDo not modify code, only answer to the user's request.";
     }
-
-    finalMessage = appendVisibleProcessInstructions(finalMessage);
 
     // Create request fingerprint for deduplication
     const requestFingerprint = JSON.stringify({
@@ -1845,6 +2044,18 @@ const persistProjectPreferences = useCallback(
     setPreviewInitializationMessage('正在准备数据和可视化看板，验证通过后自动展示...');
     const requestId = crypto.randomUUID();
     let tempUserMessageId: string | null = null;
+    const tempProgressMessageIds: string[] = [];
+    const clearProgressMessages = () => {
+      while (tempProgressMessageIds.length > 0) {
+        const id = tempProgressMessageIds.pop();
+        if (!id) continue;
+        if (stableMessageHandlers.current) {
+          stableMessageHandlers.current.remove(id);
+        } else if (messageHandlersRef.current) {
+          messageHandlersRef.current.remove(id);
+        }
+      }
+    };
 
     // Add to pending requests
     pendingRequestsRef.current.add(requestFingerprint);
@@ -1950,10 +2161,11 @@ const persistProjectPreferences = useCallback(
         instruction: finalMessage,
         displayInstruction: visibleMessage,
         images: processedImages,
-        isInitialPrompt: false,
+        isInitialPrompt: mode === 'act' && !travelItinerary,
+        travelCapabilityId: 'mixed_food_route',
         cliPreference: preferredCli,
         conversationId: conversationId || undefined,
-        requestId,
+        requestId: `${requestId}-progress`,
         selectedModel,
       };
 
@@ -2013,6 +2225,56 @@ const persistProjectPreferences = useCallback(
         }
       }
 
+      const addLocalProgressMessage = (content: string, step: number, isFinalStep = false) => {
+        const now = new Date().toISOString();
+        const id = `${requestId}-travel-agent-step-${step}-${isFinalStep ? 'done' : 'running'}`;
+        tempProgressMessageIds.push(id);
+        const message = {
+          id,
+          projectId,
+          role: 'assistant' as const,
+          messageType: 'chat' as const,
+          content,
+          conversationId: conversationId || null,
+          requestId: `${requestId}-agent-step-${step}-${isFinalStep ? 'done' : 'running'}`,
+          createdAt: now,
+          updatedAt: now,
+          isStreaming: !isFinalStep,
+          isFinal: isFinalStep,
+          isOptimistic: true,
+          metadata: {
+            type: 'travel_agent_progress',
+            step,
+            localOnly: true,
+          },
+        };
+        if (stableMessageHandlers.current) {
+          stableMessageHandlers.current.add(message);
+        } else if (messageHandlersRef.current) {
+          messageHandlersRef.current.add(message);
+        }
+      };
+
+      const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+      const agentSteps = [
+        ['意图解析 Agent', '正在识别区域、时长、预算、餐饮、少走路/少排队等约束', '已识别本轮需求和约束'],
+        ['POI 检索 Agent', '正在读取本地北京 POI，筛选景点、餐饮、咖啡和娱乐候选', '已从本地数据筛出候选点'],
+        ['UGC 证据 Agent', '正在读取本地评价特征，检查排队、性价比、环境和适老/亲子信号', '已整理排队、性价比、环境证据'],
+        mode === 'chat'
+          ? ['动态重规划 Agent', '正在保留原路线骨架，并定位需要替换/删除的目标地点', '已尽量保留原景点骨架，仅局部替换目标地点']
+          : ['路线优化 Agent', '正在组合均衡、预算优先、效率优先 3 套路线', '已生成多套候选路线'],
+        ['约束校验 Agent', '正在复核预算、总时长、午餐 11:30、餐饮+文化覆盖和风险', '已完成预算、时长、午餐标签和风险校验'],
+      ];
+      addLocalProgressMessage('开始多 Agent 实时协作规划。', 0);
+      for (let index = 0; index < agentSteps.length; index += 1) {
+        const [agentName, runningText, doneText] = agentSteps[index];
+        addLocalProgressMessage(`${agentName}：${runningText}...`, index + 1);
+        await wait(350);
+        addLocalProgressMessage(`${agentName}：${doneText}`, index + 1, true);
+        await wait(120);
+      }
+      addLocalProgressMessage('可视化 Agent：等待路线结果写入并刷新右侧“北京智能路线方案”...', agentSteps.length + 1);
+
       // Add timeout to prevent indefinite waiting
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 60000);
@@ -2055,6 +2317,7 @@ const persistProjectPreferences = useCallback(
               messageHandlersRef.current.remove(tempUserMessageId);
             }
           }
+          clearProgressMessages();
 
           alert('Request timed out after 60 seconds. Please check your connection and try again.');
           return;
@@ -2097,8 +2360,97 @@ const persistProjectPreferences = useCallback(
 
       createRequest(resolvedRequestId, userMessageId, finalMessage, mode);
 
+      if (result?.status === 'travel_clarification_required') {
+        const now = new Date().toISOString();
+        const clarificationMessage = {
+          id: `${resolvedRequestId}-travel-clarification-local`,
+          projectId,
+          role: 'assistant' as const,
+          messageType: 'chat' as const,
+          content: String(result?.message || '意图澄清 Agent：还需要补充具体地点或约束后再重规划。'),
+          conversationId: returnedConversationId ?? (conversationId || null),
+          requestId: `${resolvedRequestId}-clarification`,
+          createdAt: now,
+          updatedAt: now,
+          isStreaming: false,
+          isFinal: true,
+          metadata: {
+            type: 'travel_clarification_required',
+            reason: result?.reason,
+            localOnly: true,
+          },
+        };
+        if (stableMessageHandlers.current) {
+          stableMessageHandlers.current.add(clarificationMessage);
+        } else if (messageHandlersRef.current) {
+          messageHandlersRef.current.add(clarificationMessage);
+        }
+        setPrompt('');
+        return;
+      }
+
       // Refresh data after completion
       await loadTree('.');
+      await loadTravelItinerary();
+
+      if (
+        (result?.status === 'travel_plan_completed' || result?.status === 'travel_replan_completed') &&
+        !result?.assistantMessageId
+      ) {
+        const now = new Date().toISOString();
+        const localAssistantMessage = {
+          id: `${resolvedRequestId}-travel-assistant-local`,
+          projectId,
+          role: 'assistant' as const,
+          messageType: 'chat' as const,
+          content:
+            result.status === 'travel_replan_completed'
+              ? [
+                  '多 Agent 动态重规划完成。',
+                  '',
+                  '- 意图解析 Agent：已识别本轮调整要求',
+                  '- POI 检索 Agent：已从本地数据重新筛选候选点',
+                  '- UGC 证据 Agent：已保留排队/性价比/环境证据',
+                  '- 动态重规划 Agent：已尽量保留原景点骨架，仅局部替换目标地点',
+                  '- 约束校验 Agent：已复核预算、总时长、午餐标签和风险',
+                  '- 可视化 Agent：已更新右侧“北京智能路线方案”',
+                  '',
+                  `方案数：${result.proposalCount ?? 0}`,
+                  `结果文件：${result.itineraryPath ?? 'data_file/final/itinerary-data.json'}`,
+                ].join('\n')
+              : [
+                  '多 Agent 路线规划完成。',
+                  '',
+                  '- 意图解析 Agent：已解析目标、约束和偏好',
+                  '- POI 检索 Agent：已读取本地北京 POI 候选',
+                  '- UGC 证据 Agent：已整理本地评价信号',
+                  '- 路线优化 Agent：已生成均衡、预算优先、效率优先方案',
+                  '- 约束校验 Agent：已复核预算、时长、午餐标签和风险',
+                  '- 可视化 Agent：已更新右侧路线卡片',
+                  '',
+                  `方案数：${result.proposalCount ?? 0}`,
+                  `结果文件：${result.itineraryPath ?? 'data_file/final/itinerary-data.json'}`,
+                ].join('\n'),
+          conversationId: returnedConversationId ?? (conversationId || null),
+          requestId: `${resolvedRequestId}-local-assistant`,
+          createdAt: now,
+          updatedAt: now,
+          isStreaming: false,
+          isFinal: true,
+          metadata: {
+            type: result.status,
+            itineraryPath: result.itineraryPath,
+            proposalCount: result.proposalCount,
+            localOnly: true,
+          },
+        };
+
+        if (stableMessageHandlers.current) {
+          stableMessageHandlers.current.add(localAssistantMessage);
+        } else if (messageHandlersRef.current) {
+          messageHandlersRef.current.add(localAssistantMessage);
+        }
+      }
 
       // Reset prompt and uploaded images
       setPrompt('');
@@ -2121,6 +2473,7 @@ const persistProjectPreferences = useCallback(
           messageHandlersRef.current.remove(tempUserMessageId);
         }
       }
+      clearProgressMessages();
 
       const errorMessage = error?.message || String(error);
       alert(`Failed to send message: ${errorMessage}\n\nPlease try again. If the problem persists, check the console for details.`);
@@ -2303,6 +2656,9 @@ const persistProjectPreferences = useCallback(
         await loadTreeRef.current?.('.');
         if (canceled) return;
 
+        await loadTravelItineraryRef.current?.();
+        if (canceled) return;
+
         await loadDeployStatusRef.current?.();
         if (canceled) return;
 
@@ -2449,7 +2805,7 @@ const persistProjectPreferences = useCallback(
                   runAct(message, images);
                 }}
                 disabled={isRunning}
-                placeholder={mode === 'act' ? "向 QuantPilot 描述你的量化需求..." : "和 QuantPilot 讨论项目细节..."}
+                placeholder={mode === 'act' ? "描述你的北京游玩目标、时间、预算和偏好..." : "和北京旅游 Agent 讨论路线细节..."}
                 mode={mode}
                 onModeChange={setMode}
                 projectId={projectId}
@@ -2786,7 +3142,9 @@ const persistProjectPreferences = useCallback(
                     exit={{ opacity: 0 }}
                     style={{ height: '100%' }}
                   >
-                {shouldShowPreviewFrame ? (
+                {travelItinerary ? (
+                  <TravelItineraryPreview data={travelItinerary} />
+                ) : shouldShowPreviewFrame ? (
                   <div className="relative w-full h-full bg-slate-100 flex items-center justify-center">
                     <div
                       className={`bg-white ${

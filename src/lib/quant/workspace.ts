@@ -1,14 +1,25 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { assessQuantIntentForClarification, QuantIntentClarification } from '@/lib/quant/intent';
-import { buildQuantProjectSettings, getExecutionQuantCapability, getQuantCapability } from '@/lib/quant/capabilities';
-import { serializeQuantVisualizationTemplate } from '@/lib/quant/visualization-templates';
+import { buildTravelProjectSettings, getExecutionTravelCapability, getTravelCapability } from '@/lib/travel/capabilities';
+import { serializeTravelVisualizationTemplate } from '@/lib/travel/visualization-templates';
 
 type QuantManifest = {
   schemaVersion?: number;
   projectId?: string;
   projectName?: string;
   quant?: {
+    capabilityId?: string;
+    agentType?: string;
+    subAgentKey?: string;
+    requiredSkills?: string[];
+    dataEndpoints?: string[];
+    expectedArtifacts?: string[];
+    validationRules?: string[];
+    executionCapabilityId?: string;
+    status?: string;
+  };
+  travel?: {
     capabilityId?: string;
     agentType?: string;
     subAgentKey?: string;
@@ -33,6 +44,10 @@ export interface QuantRunPlan {
   question: string;
   symbols: string[];
   timeRange: string | null;
+  cityId?: string;
+  routeMode?: string;
+  area?: string | null;
+  constraints?: Record<string, unknown>;
   dataRequirements: string[];
   analysisSteps: string[];
   visualization: {
@@ -40,14 +55,6 @@ export interface QuantRunPlan {
     templateId?: string;
     name?: string;
     scenario?: string;
-    variantId?: string;
-    variantName?: string;
-    variantScenario?: string;
-    layout?: string;
-    density?: string;
-    firstViewport?: string[];
-    variantGuidance?: string[];
-    matchReasons?: string[];
     panels: string[];
     painPoints?: string[];
     optionalPanels?: string[];
@@ -98,7 +105,7 @@ const KNOWN_SYMBOLS: Array<{ keyword: string; symbol: string; name: string }> = 
 ];
 
 function quantDir(projectPath: string) {
-  return path.join(projectPath, '.quantpilot');
+  return path.join(projectPath, '.travelpilot');
 }
 
 async function readJsonFile<T>(filePath: string): Promise<T | null> {
@@ -140,20 +147,6 @@ function isQuantAnalysisTask(instruction: string): boolean {
   return /股票|个股|行情|走势|K线|K 线|财务|基本面|公告|指数|对比|量化|分析|回测|策略|持仓|仓位|组合|调仓|盈亏|成本|账户|截图/i.test(instruction);
 }
 
-function shouldUseAssetComparison(instruction: string) {
-  const normalized = instruction.replace(/\s+/g, '');
-  const symbolCount = inferSymbols(instruction).length;
-  const comparisonIntent =
-    /对比|比较|多只|多支|多股票|多标的|横向|矩阵|排名|排序|推荐顺序|观察池|哪(?:个|些|几只)|谁更|更强|更稳健|候选|选股|资产池|股票池/.test(
-      normalized
-    );
-  const multiNamedStocks =
-    /、|，|,|和|与|及/.test(normalized) &&
-    KNOWN_SYMBOLS.filter((item) => normalized.includes(item.keyword)).length >= 2;
-
-  return symbolCount >= 2 || comparisonIntent || multiNamedStocks;
-}
-
 function inferCapabilityId(params: {
   requestedCapabilityId?: string | null;
   manifestCapabilityId?: string | null;
@@ -166,10 +159,6 @@ function inferCapabilityId(params: {
     (params.hasImageAttachments && /截图|图片|持仓|账户|交易|证券|盈亏|成本|仓位|调仓/.test(normalized))
   ) {
     return 'portfolio_risk';
-  }
-
-  if (shouldUseAssetComparison(params.instruction)) {
-    return 'asset_comparison';
   }
 
   if (params.requestedCapabilityId) {
@@ -250,13 +239,17 @@ function buildAnalysisSteps(capabilityId: string, hasSymbols: boolean): string[]
   ];
 }
 
+function buildVisualizationPanels(capabilityId: string): string[] {
+  return serializeTravelVisualizationTemplate(capabilityId).requiredComponents;
+}
+
 function plannedCapabilityNotice(requestedCapabilityId: string, executionCapabilityId: string): string[] {
-  if (requestedCapabilityId === executionCapabilityId || requestedCapabilityId === 'asset_comparison') {
+  if (requestedCapabilityId === executionCapabilityId) {
     return [];
   }
   return [
     `用户选择的能力为 ${requestedCapabilityId}，当前先映射到已验证执行链路 ${executionCapabilityId}。`,
-    '页面必须显式说明尚未完全接入的分析维度，避免把计划能力包装成已完成结果。',
+    '页面必须显式说明尚未完全接入的路线维度，避免把计划能力包装成已完成结果。',
   ];
 }
 
@@ -294,21 +287,20 @@ export async function writeInitialRunPlan(params: {
 }) {
   await ensureQuantWorkspace(params.projectPath);
   const manifest = await readManifest(params.projectPath);
-  const manifestQuant = manifest?.quant;
+  const manifestQuant = manifest?.travel ?? manifest?.quant;
   const inferredCapabilityId = inferCapabilityId({
     requestedCapabilityId: params.capabilityId,
     manifestCapabilityId: manifestQuant?.capabilityId,
     instruction: params.instruction,
     hasImageAttachments: params.hasImageAttachments,
   });
-  const capability = getQuantCapability(inferredCapabilityId);
-  const executionCapability = capability.id === 'asset_comparison'
-    ? capability
-    : getExecutionQuantCapability(capability.id);
-  const quantSettings = buildQuantProjectSettings(capability.id);
+  const capability = getTravelCapability(inferredCapabilityId);
+  const executionCapability = getExecutionTravelCapability(capability.id);
+  const quantSettings = buildTravelProjectSettings(capability.id);
   const now = new Date().toISOString();
-  const symbols = inferSymbols(params.instruction);
+  const symbols: string[] = [];
   const timeRange = inferTimeRange(params.instruction);
+  const routeMode = capability.id === 'culture_route' || capability.id === 'efficient_route' ? 'culture' : 'mixed';
   const clarification = assessQuantIntentForClarification({
     instruction: params.instruction,
     capabilityId: capability.id,
@@ -339,10 +331,7 @@ export async function writeInitialRunPlan(params: {
       ...(quantSettings.validationRules ?? []),
     ])
   );
-  const visualizationTemplate = serializeQuantVisualizationTemplate(capability.id, {
-    instruction: params.instruction,
-    symbolCount: symbols.length,
-  });
+  const visualizationTemplate = serializeTravelVisualizationTemplate(capability.id);
 
   const plan: QuantRunPlan = {
     schemaVersion: 1,
@@ -354,16 +343,24 @@ export async function writeInitialRunPlan(params: {
     question: params.instruction,
     symbols,
     timeRange,
+    cityId: 'beijing',
+    routeMode,
+    area: null,
+    constraints: {},
     dataRequirements,
     analysisSteps: clarification.required
       ? [
           ...plannedCapabilityNotice(capability.id, executionCapability.id),
           '补充用户缺失的关键输入。',
-          '确认标的、对比范围或投资约束后，再重新生成 planned 状态的执行计划。',
+          '确认区域、时长、预算或偏好约束后，再重新生成 planned 状态的执行计划。',
         ]
       : [
           ...plannedCapabilityNotice(capability.id, executionCapability.id),
-          ...buildAnalysisSteps(capability.id, symbols.length > 0),
+          '解析用户游玩目标中的区域、时长、预算、餐饮、少排队和少走路偏好。',
+          '调用 /api/v1/travel/parse-and-plan 生成结构化请求和三套路线方案。',
+          '写入 data_file/final/itinerary-data.json、evidence/sources.json 和 evidence/data_quality.json。',
+          '生成包含三方案对比、时间轴、POI 卡片、预算/时长/步行和 UGC 证据的路线看板。',
+          '验证 POI 数量、类别覆盖、预算/时长、营业时间风险、UGC 证据和 10 秒响应目标。',
         ],
     visualization: {
       required:
@@ -372,22 +369,14 @@ export async function writeInitialRunPlan(params: {
       templateId: visualizationTemplate.templateId,
       name: visualizationTemplate.name,
       scenario: visualizationTemplate.scenario,
-      variantId: visualizationTemplate.variantId,
-      variantName: visualizationTemplate.variantName,
-      variantScenario: visualizationTemplate.variantScenario,
-      layout: visualizationTemplate.layout,
-      density: visualizationTemplate.density,
-      firstViewport: visualizationTemplate.firstViewport,
-      variantGuidance: visualizationTemplate.variantGuidance,
-      matchReasons: visualizationTemplate.matchReasons,
-      panels: visualizationTemplate.requiredComponents,
+      panels: buildVisualizationPanels(capability.id),
       painPoints: visualizationTemplate.painPoints,
       optionalPanels: visualizationTemplate.optionalComponents,
       dataSignals: visualizationTemplate.dataSignals,
       finalDataContract: visualizationTemplate.finalDataContract,
     },
     clarification: clarification.required ? clarification : undefined,
-    expectedArtifacts: clarification.required ? ['.quantpilot/run_plan.json', '.quantpilot/events.jsonl'] : expectedArtifacts,
+    expectedArtifacts: clarification.required ? ['.travelpilot/run_plan.json', '.travelpilot/events.jsonl'] : expectedArtifacts,
     validationRules,
     createdAt: now,
     updatedAt: now,
@@ -404,10 +393,10 @@ export async function writeInitialRunPlan(params: {
     stage: 'planning',
     status: clarification.required ? 'warning' : 'success',
     run_id: params.requestId,
-    artifact_path: '.quantpilot/run_plan.json',
+    artifact_path: '.travelpilot/run_plan.json',
     summary: clarification.required
       ? `任务缺少关键输入，需要先向用户澄清：${clarification.questions.join('；')}`
-      : `已生成${capability.name}计划，下一步将按计划解析标的、获取真实数据并生成可视化产物。`,
+      : `已生成${capability.name}计划，下一步将按计划解析路线约束、获取北京 POI/UGC 数据并生成可视化产物。`,
     created_at: now,
   });
 

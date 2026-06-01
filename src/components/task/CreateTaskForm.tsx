@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import type { QuantCapabilityId } from "@/lib/quant/capabilities";
+import type { TravelCapabilityId } from "@/lib/travel/capabilities";
 import type { ActiveCliId } from "@/lib/utils/cliOptions";
 
 interface ModelOption {
@@ -30,7 +30,7 @@ interface RoleModule {
   id: string;
   name: string;
   description: string;
-  capabilityId: QuantCapabilityId;
+  capabilityId: TravelCapabilityId;
   inputPlaceholder: string;
 }
 
@@ -57,7 +57,7 @@ interface CreateTaskFormProps {
   onModelChange: (id: string) => void;
   modelOptions: ModelOption[];
   selectedRole: RoleModule;
-  onRoleChange?: (id: QuantCapabilityId) => void;
+  onRoleChange?: (id: TravelCapabilityId) => void;
 }
 
 function CreateTaskForm({

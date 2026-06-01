@@ -168,11 +168,20 @@ async function readSettingsFile(): Promise<GlobalSettings | null> {
 }
 
 async function writeSettings(settings: GlobalSettings): Promise<void> {
-  await prisma.platformSetting.upsert({
-    where: { key: GLOBAL_SETTINGS_KEY },
-    update: { value: settings as unknown as Prisma.InputJsonValue },
-    create: { key: GLOBAL_SETTINGS_KEY, value: settings as unknown as Prisma.InputJsonValue },
-  });
+  try {
+    await prisma.platformSetting.upsert({
+      where: { key: GLOBAL_SETTINGS_KEY },
+      update: { value: settings as unknown as Prisma.InputJsonValue },
+      create: { key: GLOBAL_SETTINGS_KEY, value: settings as unknown as Prisma.InputJsonValue },
+    });
+  } catch (error) {
+    if (process.env.SKIP_DB_SYNC === '1') {
+      await ensureDataDir();
+      await fs.writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf8');
+      return;
+    }
+    throw error;
+  }
 }
 
 function coerceSettings(value: unknown): GlobalSettings | null {

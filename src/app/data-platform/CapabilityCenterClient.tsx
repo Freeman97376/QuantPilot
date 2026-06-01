@@ -30,11 +30,72 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { SubNav, type SubNavItem } from "@/components/layout/SubNav";
 import { formatCompactDate as formatDate } from "@/components/quant/console-primitives";
 import { cn } from "@/lib/utils";
-import type {
-  CapabilityCenterData,
-  CapabilityCenterDataProvider,
-  CapabilityCenterItem,
-} from "@/lib/quant/capability-center";
+
+type CapabilityCenterSkillRef = {
+  id: string;
+  name: string;
+  version: string;
+  status: string;
+  health: string;
+  requestedId: string;
+  viaAlias: boolean;
+};
+
+type CapabilityCenterItem = {
+  id: string;
+  name: string;
+  shortName: string;
+  description: string;
+  inputHint: string;
+  tags: string[];
+  status: string;
+  groupId: string;
+  agentType: string;
+  executionCapabilityId: string;
+  requiredSkills: CapabilityCenterSkillRef[];
+  missingSkills: string[];
+  legacySkillAliases: Array<{ alias: string; target: string }>;
+  dataEndpoints: string[];
+  expectedArtifacts: string[];
+  validationRules: string[];
+  readiness: { status: 'ready' | 'warning' | 'blocked' | 'planned'; summary: string; score: number };
+};
+
+type CapabilityCenterDataProvider = {
+  id: string;
+  name: string;
+  category: string;
+  status: string;
+  description: string;
+  endpoints: string[];
+  cacheTtlSeconds: number | null;
+  limitations: string[];
+};
+
+type CapabilityCenterData = {
+  generatedAt: string;
+  defaultCapabilityId: string;
+  groups: Array<{ id: string; name: string; description: string }>;
+  summary: {
+    capabilities: number;
+    readyCapabilities: number;
+    plannedCapabilities: number;
+    blockedCapabilities: number;
+    skills: number;
+    skillErrors: number;
+    dataProviders: number;
+    availableProviders: number;
+    degradedProviders: number;
+    marketApiReachable: boolean;
+    poiCount?: number;
+    reviewFeatureCount?: number;
+    travelApiReachable?: boolean;
+  };
+  marketApi: { baseUrl: string; reachable: boolean; status: string; checkedAt: string; error: string | null };
+  travelApi?: { baseUrl: string; reachable: boolean; status: string; checkedAt: string; error: string | null };
+  capabilities: CapabilityCenterItem[];
+  dataProviders: CapabilityCenterDataProvider[];
+};
 
 type Props = { initialData: CapabilityCenterData };
 type TabId = "capabilities" | "sources" | "lakehouse" | "doris";
@@ -69,6 +130,9 @@ function providerLabel(s: string) {
   return s;
 }
 const CATEGORY_LABELS: Record<string, string> = {
+  "poi-data": "POI 数据",
+  "ugc-evidence": "UGC 证据",
+  "route-planning": "路线规划",
   "market-data": "行情数据",
   symbol: "证券搜索",
   indicator: "技术指标",
@@ -96,10 +160,10 @@ const SUB_NAV_ITEMS: SubNavItem[] = [
 function StatusBar({ data }: { data: CapabilityCenterData }) {
   const items = [
     {
-      label: "市场 API",
-      value: data.marketApi.reachable ? "在线" : "离线",
-      dot: data.marketApi.reachable ? "bg-emerald-500" : "bg-red-500",
-      sub: data.marketApi.baseUrl,
+      label: "旅游 API",
+      value: (data as any).travelApi?.reachable ?? data.marketApi?.reachable ? "在线" : "离线",
+      dot: (data as any).travelApi?.reachable ?? data.marketApi?.reachable ? "bg-emerald-500" : "bg-red-500",
+      sub: (data as any).travelApi?.baseUrl ?? data.marketApi?.baseUrl,
       icon: <Server className="h-3.5 w-3.5" />,
     },
     {
@@ -354,7 +418,7 @@ export default function CapabilityCenterClient({ initialData }: Props) {
     setIsRefreshing(true);
     setToast(null);
     try {
-      const r = await fetch(`${API_BASE}/api/quant/capability-center`, { cache: "no-store" });
+      const r = await fetch(`${API_BASE}/api/travel/capability-center`, { cache: "no-store" });
       const payload = await r.json();
       if (!r.ok || !payload.success) throw new Error(payload.error ?? "刷新失败");
       setData(payload.data);
@@ -373,9 +437,9 @@ export default function CapabilityCenterClient({ initialData }: Props) {
   return (
     <div className="min-h-screen bg-surface text-slate-900">
       <PageHeader
-        title="数据平台"
+        title="POI / UGC 数据平台"
         badge={<Badge variant="outline" className="bg-white text-slate-500">{data.summary.capabilities} 个能力</Badge>}
-        subtitle={`市场 API: ${data.marketApi.baseUrl} · 数据生成于 ${formatDate(data.generatedAt)}`}
+        subtitle={`旅游 API: ${(data as any).travelApi?.baseUrl ?? data.marketApi?.baseUrl} · 数据生成于 ${formatDate(data.generatedAt)}`}
       />
 
       {/* Sub‑navigation */}
@@ -462,7 +526,7 @@ export default function CapabilityCenterClient({ initialData }: Props) {
             {filteredProviders.length === 0 ? (
               <EmptyState
                 title="没有匹配的数据源"
-                description={keyword ? "尝试其他关键词" : "Market API 暂无可用数据源"}
+                description={keyword ? "尝试其他关键词" : "Travel API 暂无可用数据源"}
                 action={keyword ? { label: "清除搜索", onClick: () => setKeyword("") } : { label: "刷新状态", onClick: refresh }}
               />
             ) : (

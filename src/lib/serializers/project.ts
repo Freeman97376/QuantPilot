@@ -1,12 +1,12 @@
 import type { Project as ProjectEntity } from '@/types/backend';
 import type { Project } from '@/types';
-import { getQuantCapability } from '@/lib/quant/capabilities';
+import { getTravelCapability } from '@/lib/travel/capabilities';
 
-function readQuantCapabilityId(settings?: string | null) {
+function readTravelCapabilityId(settings?: string | null) {
   if (!settings) return null;
   try {
-    const parsed = JSON.parse(settings) as { quant?: { capabilityId?: string } };
-    return getQuantCapability(parsed.quant?.capabilityId).id;
+    const parsed = JSON.parse(settings) as { travel?: { capabilityId?: string }; quant?: { capabilityId?: string } };
+    return getTravelCapability(parsed.travel?.capabilityId ?? parsed.quant?.capabilityId).id;
   } catch {
     return null;
   }
@@ -27,7 +27,8 @@ export function serializeProject(project: ProjectEntity): Project {
     preferredCli: (project.preferredCli ?? null) as Project['preferredCli'],
     selectedModel: project.selectedModel ?? null,
     fallbackEnabled: project.fallbackEnabled,
-    quantCapabilityId: readQuantCapabilityId(project.settings),
+    travelCapabilityId: readTravelCapabilityId(project.settings),
+    quantCapabilityId: readTravelCapabilityId(project.settings),
   };
 }
 

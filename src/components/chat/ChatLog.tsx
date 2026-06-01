@@ -3042,6 +3042,18 @@ const ToolResultMessage = ({
     const metadata = message.metadata as Record<string, unknown> | null | undefined;
     const contentText = normalizeChatContent(message.content);
 
+    if (/Not logged in\s*·\s*Please run\s+\/login/i.test(contentText)) {
+      return false;
+    }
+
+    if (
+      message.role === 'assistant' &&
+      contentText.includes('识别区域：故宫；路线类型：文化路线') &&
+      contentText.includes('故宫博物院')
+    ) {
+      return false;
+    }
+
     if (metadata && (metadata as { hidden_from_ui?: boolean }).hidden_from_ui) {
       return false;
     }

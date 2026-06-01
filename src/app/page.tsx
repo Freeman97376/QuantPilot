@@ -3,7 +3,6 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { motion } from "framer-motion";
 import { useRouter } from "next/navigation";
 import {
-  BarChart3,
   Boxes,
   CheckCircle2,
   Clock3,
@@ -43,10 +42,10 @@ import {
   type ActiveCliId,
 } from "@/lib/utils/cliOptions";
 import {
-  DEFAULT_QUANT_CAPABILITY_ID,
-  getQuantCapability,
-  type QuantCapabilityId,
-} from "@/lib/quant/capabilities";
+  DEFAULT_TRAVEL_CAPABILITY_ID,
+  getTravelCapability,
+  type TravelCapabilityId,
+} from "@/lib/travel/capabilities";
 
 const fetchAPI = globalThis.fetch || fetch;
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "";
@@ -111,8 +110,11 @@ export default function HomePage() {
         selectedModel: selected,
         fallbackEnabled:
           project.fallbackEnabled ?? project.fallback_enabled ?? false,
-        quantCapabilityId: getQuantCapability(
-          project.quantCapabilityId ?? project.quant_capability_id
+        travelCapabilityId: getTravelCapability(
+          project.travelCapabilityId ?? project.travel_capability_id ?? project.quantCapabilityId ?? project.quant_capability_id
+        ).id,
+        quantCapabilityId: getTravelCapability(
+          project.travelCapabilityId ?? project.travel_capability_id ?? project.quantCapabilityId ?? project.quant_capability_id
         ).id,
       };
     },
@@ -123,7 +125,7 @@ export default function HomePage() {
     useState<ActiveCliId>(DEFAULT_ASSISTANT);
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
   const [selectedCapability, setSelectedCapability] =
-    useState<QuantCapabilityId>(DEFAULT_QUANT_CAPABILITY_ID);
+    useState<TravelCapabilityId>(DEFAULT_TRAVEL_CAPABILITY_ID);
   const [usingGlobalDefaults, setUsingGlobalDefaults] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [taskDrawerOpen, setTaskDrawerOpen] = useState(false);
@@ -309,7 +311,7 @@ export default function HomePage() {
   };
 
   const getCapabilityShortName = (capabilityId?: string | null) =>
-    getQuantCapability(capabilityId).shortName;
+    getTravelCapability(capabilityId).shortName;
 
   // --- Actions ---
   const showToast = useCallback(
@@ -395,6 +397,7 @@ export default function HomePage() {
           initialPrompt: prompt.trim(),
           preferredCli: selectedAssistant,
           selectedModel,
+          travelCapabilityId: selectedCapability,
           quantCapabilityId: selectedCapability,
         }),
       });
@@ -444,6 +447,7 @@ export default function HomePage() {
             isInitialPrompt: true,
             cliPreference: selectedAssistant,
             selectedModel,
+            travelCapabilityId: selectedCapability,
             quantCapabilityId: selectedCapability,
           }),
         }).catch(() => null);
@@ -546,7 +550,7 @@ export default function HomePage() {
               </div>
               <div className="min-w-0">
                 <h1 className="truncate text-base font-bold md:text-lg">
-                  QuantPilot
+                  北京旅游 Agent
                 </h1>
                 <div className="mt-0.5 hidden items-center gap-2 text-xs text-muted-foreground md:flex">
                   <span>任务 {projects.length}</span>
@@ -564,8 +568,8 @@ export default function HomePage() {
                 variant="ghost"
                 className="inline-flex gap-1.5 px-2 text-xs font-medium sm:gap-2 sm:px-3 sm:text-sm"
               >
-                <BarChart3 className="h-4 w-4" />
-                策略平台
+                <Clock3 className="h-4 w-4" />
+                路线方案
               </Button>
               <Button
                 type="button"
@@ -574,7 +578,7 @@ export default function HomePage() {
                 className="inline-flex gap-1.5 px-2 text-xs font-medium sm:gap-2 sm:px-3 sm:text-sm"
               >
                 <ShieldCheck className="h-4 w-4" />
-                运维平台
+                生成观测
               </Button>
               <Button
                 type="button"
@@ -583,7 +587,7 @@ export default function HomePage() {
                 className="inline-flex gap-1.5 px-2 text-xs font-medium sm:gap-2 sm:px-3 sm:text-sm"
               >
                 <Boxes className="h-4 w-4" />
-                数据平台
+                POI 数据
               </Button>
             </div>
           </header>
@@ -594,10 +598,10 @@ export default function HomePage() {
               {/* Title */}
               <div className="mb-8 text-center">
                 <h2 className="text-3xl font-bold tracking-normal text-primary md:text-5xl">
-                  QuantPilot
+                  北京旅游 Agent
                 </h2>
                 <p className="mt-3 text-sm text-muted-foreground md:text-base">
-                  选择角色模块，描述真实需求，等待任务完成并生成可验证的量化看板
+                  输入游玩目标，自动生成北京 POI 路线、UGC 证据和可调整方案
                 </p>
               </div>
 
