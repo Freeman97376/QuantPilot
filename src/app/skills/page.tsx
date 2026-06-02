@@ -1,9 +1,5 @@
-import { getSkillsDashboardData } from '@/lib/quant/skills-dashboard';
-import SkillsManagementClient from './SkillsManagementClient';
+import { redirect } from 'next/navigation';
 
-export default async function SkillsManagementPage() {
-  const data = await getSkillsDashboardData();
-  return <SkillsManagementClient initialData={data} />;
+export default function SkillsManagementPage() {
+  redirect('/strategy-platform');
 }
-
-export const dynamic = 'force-dynamic';

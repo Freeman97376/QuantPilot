@@ -1,21 +1,19 @@
 import { NextResponse } from 'next/server';
-import { getGenerationObservabilityDashboard } from '@/lib/quant/generation-observability';
+import { travelHealth } from '@/lib/travel/planner';
 
 export async function GET() {
-  try {
-    return NextResponse.json({
-      success: true,
-      data: await getGenerationObservabilityDashboard(),
-    });
-  } catch (error) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-      },
-      { status: 500 }
-    );
-  }
+  const health = await travelHealth();
+  return NextResponse.json({
+    success: true,
+    data: {
+      product: 'beijing-travel-agent',
+      status: health.status,
+      dataLoaded: health.data_loaded,
+      poiCount: health.poi_count,
+      cache: health.cache,
+      dataLoadElapsedMs: health.data_load_elapsed_ms,
+    },
+  });
 }
 
 export const runtime = 'nodejs';

@@ -42,6 +42,8 @@ async function main() {
   assert(!after.includes(before[1]), `replaced POI leaked back into route: ${before[1]}`);
   assert(after[0] === before[0], `first POI should stay unchanged: ${before[0]} -> ${after[0]}`);
   assert(after[2] === before[2], `third POI should stay unchanged: ${before[2]} -> ${after[2]}`);
+  assert(!/Temple|剧场|酒店|市民文化中心/.test(after[1]), `replacement should be a visitor-friendly indoor culture POI: ${after[1]}`);
+  assert(/博物馆|美术馆|艺术中心|展览馆/.test(after[1]), `replacement should prefer museum/gallery/art center: ${after[1]}`);
 
   console.log('[travel-targeted-replan] passed');
   console.log(`before: ${before.join(' -> ')}`);

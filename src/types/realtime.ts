@@ -50,9 +50,21 @@ export interface PreviewEventInfo {
   severity?: 'info' | 'warning' | 'error';
 }
 
+export interface TravelProgressInfo {
+  requestId: string;
+  stage: 'received' | 'parsing' | 'retrieving_poi' | 'planning' | 'writing_artifacts' | 'rendering' | 'completed';
+  message: string;
+  elapsed_ms?: number;
+  agent_key?: string;
+  status?: 'running' | 'completed' | 'clarification_required';
+  summary?: string;
+  payload_preview?: Record<string, unknown> | null;
+}
+
 export type RealtimeEvent =
   | { type: 'message'; data: RealtimeMessage }
   | { type: 'status'; data: RealtimeStatus }
+  | { type: 'travel_progress'; data: TravelProgressInfo }
   | { type: 'project_status'; data: RealtimeStatus }
   | { type: 'error'; error: string; data?: unknown }
   | { type: 'connected'; data: ConnectionInfo }

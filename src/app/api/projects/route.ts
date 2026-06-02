@@ -35,7 +35,7 @@ export async function POST(request: NextRequest) {
     const preferredCli = String(body.preferredCli || body.preferred_cli || 'claude').toLowerCase();
     const requestedModel = body.selectedModel || body.selected_model;
     const travelCapability = getTravelCapability(
-      body.travelCapabilityId || body.travel_capability_id || body.quantCapabilityId || body.quant_capability_id || body.capabilityId || body.capability_id
+      body.travelCapabilityId || body.travel_capability_id || body.capabilityId || body.capability_id
     );
 
     const input: CreateProjectInput = {
@@ -46,7 +46,6 @@ export async function POST(request: NextRequest) {
       selectedModel: normalizeModelId(preferredCli, requestedModel ?? getDefaultModelForCli(preferredCli)),
       description: body.description,
       travelCapabilityId: travelCapability.id,
-      quantCapabilityId: travelCapability.id,
     };
 
     // Validation

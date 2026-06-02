@@ -25,10 +25,20 @@ export interface TravelPlanningRequest {
   exclude_names?: string[];
   must_include_poi_ids?: string[];
   exclude_poi_ids?: string[];
+  route_order_poi_ids?: string[];
   preference_signals?: Record<string, boolean>;
 }
 
-interface Poi extends JsonRecord {
+export interface TravelCandidateBuckets {
+  request: TravelPlanningRequest;
+  resolved_area: string;
+  cultureCandidates: Poi[];
+  mealCandidates: Poi[];
+  snackCandidates: Poi[];
+  indoorCandidates: Poi[];
+}
+
+export interface Poi extends JsonRecord {
   poi_id: string;
   name: string;
   district?: string;
@@ -78,12 +88,16 @@ interface TravelData {
   plannerEntities: Poi[];
   reviewAggregates: ReviewAggregate[];
   reviewRecordsById: Map<string, ReviewRecord>;
+  poiById: Map<string, Poi>;
+  reviewAggregatesByPoiId: Map<string, ReviewAggregate[]>;
 }
 
 const DEFAULT_DATA_ROOT = path.resolve(process.cwd(), 'travel-data', 'processed');
 const DATA_ROOT = process.env.TRAVELPILOT_DATA_ROOT || DEFAULT_DATA_ROOT;
 
 let dataCache: Promise<TravelData> | null = null;
+let dataLoadedAt: string | null = null;
+let dataLoadElapsedMs: number | null = null;
 
 async function readJsonArray<T>(fileName: string): Promise<T[]> {
   const content = await fs.readFile(path.join(DATA_ROOT, fileName), 'utf8');
@@ -167,21 +181,58 @@ function normalizePoi(raw: Poi): Poi {
 
 async function loadTravelData(): Promise<TravelData> {
   if (!dataCache) {
+    const started = performance.now();
     dataCache = Promise.all([
       readJsonArray<Poi>('beijing_culture_pois.json'),
       readJsonArray<Poi>('beijing_mixed_category_pois.json'),
       readJsonArray<Poi>('beijing_planner_entities.json'),
       readJsonArray<ReviewAggregate>('beijing_poi_feature_aggregates.json'),
       readJsonArray<ReviewRecord>('beijing_review_records.json'),
-    ]).then(([culturePois, mixedPois, plannerEntities, reviewAggregates, reviewRecords]) => ({
-      culturePois: culturePois.map(normalizePoi),
-      mixedPois: mixedPois.map(normalizePoi),
-      plannerEntities: plannerEntities.map(normalizePoi),
-      reviewAggregates,
-      reviewRecordsById: new Map(reviewRecords.map((item) => [String(item.review_id), item])),
-    }));
+    ]).then(([culturePois, mixedPois, plannerEntities, reviewAggregates, reviewRecords]) => {
+      const normalizedCulturePois = culturePois.map(normalizePoi);
+      const normalizedMixedPois = mixedPois.map(normalizePoi);
+      const normalizedPlannerEntities = plannerEntities.map(normalizePoi);
+      const poiById = new Map<string, Poi>();
+      for (const poi of [...normalizedMixedPois, ...normalizedCulturePois, ...normalizedPlannerEntities]) {
+        poiById.set(poi.poi_id, poi);
+      }
+      const reviewAggregatesByPoiId = new Map<string, ReviewAggregate[]>();
+      for (const item of reviewAggregates) {
+        const group = reviewAggregatesByPoiId.get(item.poi_id) || [];
+        group.push(item);
+        reviewAggregatesByPoiId.set(item.poi_id, group);
+      }
+      const result = {
+        culturePois: normalizedCulturePois,
+        mixedPois: normalizedMixedPois,
+        plannerEntities: normalizedPlannerEntities,
+        reviewAggregates,
+        reviewRecordsById: new Map(reviewRecords.map((item) => [String(item.review_id), item])),
+        poiById,
+        reviewAggregatesByPoiId,
+      };
+      dataLoadedAt = new Date().toISOString();
+      dataLoadElapsedMs = Number((performance.now() - started).toFixed(2));
+      return result;
+    });
   }
   return dataCache;
+}
+
+export async function warmTravelData() {
+  const data = await loadTravelData();
+  return {
+    status: 'ok',
+    data_loaded: true,
+    data_loaded_at: dataLoadedAt,
+    data_load_elapsed_ms: dataLoadElapsedMs,
+    data_root: DATA_ROOT,
+    poi_count: data.plannerEntities.length,
+    cache: {
+      poi_index_ready: data.poiById.size > 0,
+      review_index_ready: data.reviewAggregatesByPoiId.size > 0,
+    },
+  };
 }
 
 function normalizePoiName(name?: string): string {
@@ -232,6 +283,34 @@ function uniqueByName(items: Poi[]): Poi[] {
   });
 }
 
+function attractionGroupKey(item: Pick<Poi, 'name' | 'area' | 'district'>): string {
+  const normalizedName = normalizePoiName(item.name);
+  if (normalizedName.includes('\u6545\u5bab\u535a\u7269\u9662')) return '\u6545\u5bab\u535a\u7269\u9662';
+  if (normalizedName.includes('\u5929\u5b89\u95e8\u5e7f\u573a')) return '\u5929\u5b89\u95e8\u5e7f\u573a';
+  if (normalizedName.includes('\u4e2d\u56fd\u56fd\u5bb6\u535a\u7269\u9986')) return '\u4e2d\u56fd\u56fd\u5bb6\u535a\u7269\u9986';
+  if (normalizedName.includes('\u5317\u6d77\u516c\u56ed')) return '\u5317\u6d77\u516c\u56ed';
+  if (normalizedName.includes('\u666f\u5c71\u516c\u56ed')) return '\u666f\u5c71\u516c\u56ed';
+  if (normalizedName.includes('故宫博物院')) return '故宫博物院';
+  if (normalizedName.includes('天安门广场')) return '天安门广场';
+  if (normalizedName.includes('中国国家博物馆')) return '中国国家博物馆';
+  if (normalizedName.includes('北海公园')) return '北海公园';
+  if (normalizedName.includes('景山公园')) return '景山公园';
+  const baseName = String(item.name || '').split(/[-—–]/)[0]?.trim();
+  return normalizePoiName(baseName || item.name || item.area || item.district || '');
+}
+
+function uniqueByAttractionGroup(items: Poi[]): Poi[] {
+  const seenIds = new Set<string>();
+  const seenGroups = new Set<string>();
+  return items.filter((item) => {
+    const group = attractionGroupKey(item);
+    if (seenIds.has(item.poi_id) || (group && seenGroups.has(group))) return false;
+    seenIds.add(item.poi_id);
+    if (group) seenGroups.add(group);
+    return true;
+  });
+}
+
 function isFoodPoi(item: Poi): boolean {
   return Boolean(item.is_meal_stop || item.is_coffee_stop);
 }
@@ -242,6 +321,31 @@ function isLunchPoi(item: Poi): boolean {
 
 function isCoffeePoi(item: Poi): boolean {
   return Boolean(item.is_coffee_stop);
+}
+
+function isSnackOrTeaPoi(item: Poi): boolean {
+  return item.meal_type === 'snack' || item.meal_type === 'coffee' || item.meal_type === 'dessert';
+}
+
+function isRecommendablePoi(item: Poi): boolean {
+  if (isFoodPoi(item)) return true;
+  const name = String(item.name || '');
+  const text = poiText(item);
+  const hasChinese = /[\u4e00-\u9fff]/.test(name);
+  const latinCount = (name.match(/[A-Za-z]/g) || []).length;
+  const weakEvidence = Number(item.review_count || 0) <= 0 && !/museum|art_gallery|attraction|scene:indoor|theme:museum|theme:art/.test(text);
+  if (!hasChinese) return false;
+  if (latinCount >= 4 && weakEvidence) return false;
+  if (/\u9152\u5e97|\u5bbe\u9986|\u6f2b\u5fc3\u5e9c|\u5ba2\u6808|\u4f4f\u5bbf/.test(name)) return false;
+  if (/\u5e02\u6c11\u6587\u5316\u4e2d\u5fc3|\u793e\u533a|\u5c45\u6c11|\u8857\u9053\u529e/.test(name)) return false;
+  if (/\u5efa\u8bbe\u4e2d|\u89c2\u4f17\u670d\u52a1\u4e2d\u5fc3|\u8bb2\u89e3\u670d\u52a1\u5904/.test(name)) return false;
+  return true;
+}
+
+function isIndoorCulturePoi(item: Poi): boolean {
+  if (isFoodPoi(item)) return false;
+  const text = poiText(item);
+  return /museum|art_gallery|exhibition|theme:museum|theme:art|\u535a\u7269\u9986|\u7f8e\u672f\u9986|\u827a\u672f\u4e2d\u5fc3|\u5c55\u89c8\u9986|\u79d1\u6559\u6587\u5316/.test(text);
 }
 
 function mealQualityScore(item: Poi): number {
@@ -264,7 +368,7 @@ function adjustmentWantsFoodChange(text: string): boolean {
 }
 
 function adjustmentWantsSnack(text: string): boolean {
-  return /小吃|预算\s*\d+\s*以内的小吃|换成.*小吃/.test(text);
+  return /小吃|下午茶|甜品|茶饮|奶茶|咖啡|预算\s*\d+\s*以内的小吃|换成.*(?:小吃|下午茶|甜品|茶饮|奶茶|咖啡)/.test(text);
 }
 
 function parseTargetedReplacementIndex(text: string, total: number): number | null {
@@ -305,6 +409,71 @@ function shouldPreservePoiOnReplan(params: {
   return true;
 }
 
+function stableWantsFreshPlan(text: string): boolean {
+  return /\u5168\u65b0|\u91cd\u65b0\u6765|\u4e0d\u4fdd\u7559|\u91cd\u65b0\u5b89\u6392\u6240\u6709|\u5168\u90e8\u91cd\u6392/.test(text);
+}
+
+function stableWantsFoodChange(text: string): boolean {
+  return /(\u5348\u9910|\u5348\u996d|\u4e2d\u5348\u5403|\u5403\u996d|\u9910\u996e|\u9910\u5385|\u996d\u5e97|\u5c0f\u5403|\u5496\u5561|\u6b63\u9910|\u7f8e\u98df|\u6362\u6210.*(?:\u5348\u9910|\u5348\u996d|\u5c0f\u5403|\u5496\u5561|\u9910\u5385|\u996d\u5e97|\u6b63\u9910|\u7f8e\u98df)|\u6539\u6210.*(?:\u5348\u9910|\u5348\u996d|\u5c0f\u5403|\u5496\u5561|\u9910\u5385|\u996d\u5e97|\u6b63\u9910|\u7f8e\u98df))/.test(text);
+}
+
+function stableWantsSnack(text: string): boolean {
+  return /\u5c0f\u5403|\u4e0b\u5348\u8336|\u751c\u54c1|\u8336\u996e|\u5976\u8336|\u5496\u5561|\u9884\u7b97\s*\d+\s*\u4ee5\u5185\u7684\u5c0f\u5403|\u6362\u6210.*(?:\u5c0f\u5403|\u4e0b\u5348\u8336|\u751c\u54c1|\u8336\u996e|\u5976\u8336|\u5496\u5561)/.test(text);
+}
+
+function stableWantsFormalMeal(text: string): boolean {
+  return /\u6b63\u9910|\u9910\u5385|\u996d\u5e97|\u9002\u5408\u5348\u9910|\u4e0d\u8981\u5496\u5561|\u522b\u8981\u5496\u5561/.test(text);
+}
+
+function stablePreservesFood(text: string): boolean {
+  return /\u5348\u9910\u4e0d\u53d8|\u9910\u996e\u4e0d\u53d8|\u5403\u996d\u4e0d\u53d8|\u996d\u5e97\u4e0d\u53d8|\u4fdd\u7559(?:\u5f53\u524d|\u539f\u6765|\u539f\u6709)?\u5348\u9910|\u4fdd\u7559(?:\u5f53\u524d|\u539f\u6765|\u539f\u6709)?\u9910\u996e|\u4fdd\u7559(?:\u5f53\u524d|\u539f\u6765|\u539f\u6709)?\u996d\u5e97/.test(text);
+}
+
+function stablePreservesCulture(text: string): boolean {
+  return /\u666f\u70b9\u4e0d\u53d8|\u6587\u5316\u70b9\u4e0d\u53d8|\u5176\u4ed6\u666f\u70b9\u4e0d\u53d8|\u4fdd\u7559\u666f\u70b9|\u4fdd\u7559\u6587\u5316\u70b9/.test(text);
+}
+
+function stablePreservesOthers(text: string): boolean {
+  return /\u5176\u4ed6\u5730\u65b9\u4e0d\u53d8|\u5176\u4ed6\u5730\u70b9\u4e0d\u53d8|\u5176\u4ed6\u4e0d\u53d8|\u4e0d\u53d8|\u4fdd\u7559\u5176\u4ed6/.test(text);
+}
+
+function stableWantsIndoor(text: string): boolean {
+  return /\u5ba4\u5185|\u4e0d\u6652|\u4e0b\u96e8|\u5c55\u9986|\u535a\u7269\u9986|\u7f8e\u672f\u9986|\u827a\u672f\u4e2d\u5fc3/.test(text);
+}
+
+function stableWantsAddStop(text: string): boolean {
+  return /\u52a0\u4e00\u4e2a|\u6dfb\u52a0|\u52a0\u4e0a|\u987a\u8def\u52a0|\u518d\u5b89\u6392\u4e00\u4e2a|\u591a\u4e00\u4e2a|\u589e\u52a0\u4e00\u4e2a|\u518d\u52a0/.test(text);
+}
+
+function stableWantsGenericAttraction(text: string): boolean {
+  return /\u666f\u70b9|\u666f\u533a|\u5730\u70b9|\u5730\u65b9|\u6587\u5316\u70b9|\u597d\u73a9\u7684|\u987a\u8def/.test(text);
+}
+
+function stableTargetedReplacementIndex(text: string, total: number): number | null {
+  if (!total || !/(\u6362\u6210|\u6362\u4e00\u4e2a|\u66ff\u6362|\u6539\u6210|\u66f4\u6362)/.test(text)) return null;
+  if (/\u6700\u540e\u4e00\u4e2a|\u6700\u540e1\u4e2a|\u672b\u5c3e|\u6700\u540e\u4e00\u7ad9|\u6700\u540e1\u7ad9/.test(text)) return total - 1;
+  const chineseNumbers: Record<string, number> = {
+    '\u4e00': 0,
+    '\u4e8c': 1,
+    '\u4e24': 1,
+    '\u4e09': 2,
+    '\u56db': 3,
+    '\u4e94': 4,
+    '\u516d': 5,
+  };
+  const chineseMatch = text.match(/\u7b2c\s*([\u4e00\u4e8c\u4e24\u4e09\u56db\u4e94\u516d])\s*(?:\u4e2a|\u7ad9|\u5904)?(?:\u70b9|\u666f\u70b9|\u5730\u70b9|\u9910\u5385|\u996d\u5e97|POI)?/);
+  if (chineseMatch?.[1] && chineseMatch[1] in chineseNumbers) {
+    const index = chineseNumbers[chineseMatch[1]];
+    return index >= 0 && index < total ? index : null;
+  }
+  const digitMatch = text.match(/\u7b2c\s*(\d+)\s*(?:\u4e2a|\u7ad9|\u5904)?(?:\u70b9|\u666f\u70b9|\u5730\u70b9|\u9910\u5385|\u996d\u5e97|POI)?/i);
+  if (digitMatch?.[1]) {
+    const index = Number(digitMatch[1]) - 1;
+    return index >= 0 && index < total ? index : null;
+  }
+  return null;
+}
+
 function normalizeRequest(payload: Partial<TravelPlanningRequest>): TravelPlanningRequest {
   return {
     goal: String(payload.goal || ''),
@@ -313,7 +482,7 @@ function normalizeRequest(payload: Partial<TravelPlanningRequest>): TravelPlanni
     categories: Array.isArray(payload.categories) ? payload.categories : [],
     start_time: payload.start_time || '09:00',
     max_budget: payload.max_budget === undefined ? null : payload.max_budget,
-    max_total_pois: Math.max(3, Math.min(6, Number(payload.max_total_pois || 4))),
+    max_total_pois: Math.max(3, Math.min(8, Number(payload.max_total_pois || 4))),
     max_duration_min: payload.max_duration_min === undefined ? null : payload.max_duration_min,
     day_count: Math.max(1, Math.min(5, Number(payload.day_count || 1))),
     pace: payload.pace || 'balanced',
@@ -323,6 +492,7 @@ function normalizeRequest(payload: Partial<TravelPlanningRequest>): TravelPlanni
     exclude_names: Array.isArray(payload.exclude_names) ? payload.exclude_names : [],
     must_include_poi_ids: Array.isArray(payload.must_include_poi_ids) ? payload.must_include_poi_ids : [],
     exclude_poi_ids: Array.isArray(payload.exclude_poi_ids) ? payload.exclude_poi_ids : [],
+    route_order_poi_ids: Array.isArray(payload.route_order_poi_ids) ? payload.route_order_poi_ids : [],
     preference_signals: payload.preference_signals || {},
   };
 }
@@ -414,7 +584,7 @@ function minutesToTime(total: number): string {
 }
 
 function aggregateMap(data: TravelData, poiId: string) {
-  const claims = data.reviewAggregates.filter((item) => item.poi_id === poiId);
+  const claims = data.reviewAggregatesByPoiId.get(poiId) || [];
   const values = Object.fromEntries(claims.map((item) => [item.feature_key, item.feature_value]));
   return { claims, values };
 }
@@ -447,6 +617,10 @@ function scorePoi(item: Poi, request: TravelPlanningRequest, strategy: Strategy,
   if (values.environment_quality === 'high') score += 2;
   if (request.walk_preference === 'low' && item.walk_intensity === 'high') score -= 8;
   if (request.preference_signals?.lunch && isFoodPoi(item) && !isLunchPoi(item)) score -= 20;
+  if (request.preference_signals?.indoor) {
+    if (/scene:indoor|museum|art_gallery|theme:museum|theme:art|\u535a\u7269\u9986|\u7f8e\u672f\u9986|\u827a\u672f\u4e2d\u5fc3|\u5c55\u89c8\u9986/.test(text)) score += 28;
+    if (/scene:outdoor|park|\u516c\u56ed|\u5e7f\u573a|\u6b65\u884c\u8857/.test(text)) score -= 18;
+  }
 
   if (request.persona_id === 'couple_romantic' || request.preference_signals?.couple) {
     if (/coffee|cafe|咖啡|甜品|下午茶/.test(text)) score += 14;
@@ -473,6 +647,52 @@ function scorePoi(item: Poi, request: TravelPlanningRequest, strategy: Strategy,
     if (item.walk_intensity === 'high') score -= 14;
   }
   return score;
+}
+
+function selectAdditionalStop(params: {
+  data: TravelData;
+  request: TravelPlanningRequest;
+  selectedPois: Poi[];
+  excludedIds: Set<string>;
+  excludedNames: string[];
+  wantsFood: boolean;
+  wantsSnack: boolean;
+  wantsIndoor: boolean;
+}): Poi | null {
+  const selectedIds = new Set(params.selectedPois.map((item) => item.poi_id));
+  const selectedGroups = new Set(params.selectedPois.map((item) => attractionGroupKey(item)).filter(Boolean));
+  const selectedAreas = new Set(params.selectedPois.flatMap((item) => [item.area, item.district]).filter(Boolean).map(String));
+  const pool = candidatePool(params.data, params.request)
+    .filter((item) => Number.isFinite(item.lng) && Number.isFinite(item.lat))
+    .filter((item) => !selectedIds.has(item.poi_id))
+    .filter((item) => !params.excludedIds.has(item.poi_id))
+    .filter((item) => !matchesExcludedName(item, params.excludedNames))
+    .filter(isRecommendablePoi)
+    .filter((item) => {
+      if (params.wantsSnack) return isSnackOrTeaPoi(item);
+      if (params.wantsFood) return isFoodPoi(item);
+      if (isFoodPoi(item)) return false;
+      if (params.wantsIndoor) return isIndoorCulturePoi(item);
+      return true;
+    })
+    .filter((item) => !selectedGroups.has(attractionGroupKey(item)));
+
+  const scored = pool.map((item) => {
+    const nearest = params.selectedPois.length
+      ? Math.min(...params.selectedPois.map((selected) => meters(selected, item)))
+      : 0;
+    const sameAreaBoost = selectedAreas.has(String(item.area || '')) || selectedAreas.has(String(item.district || '')) ? 28 : 0;
+    const proximityBoost = nearest > 0 ? Math.max(0, 30 - nearest / 120) : 0;
+    const indoorBoost = !params.wantsSnack && isIndoorCulturePoi(item) ? 8 : 0;
+    const snackBoost = params.wantsSnack && isSnackOrTeaPoi(item) ? 40 : 0;
+    const lowWalkBoost = params.request.walk_preference === 'low' && item.walk_intensity === 'low' ? 8 : 0;
+    return {
+      item,
+      score: scorePoi(item, params.request, 'balanced', params.data) + sameAreaBoost + proximityBoost + indoorBoost + snackBoost + lowWalkBoost,
+    };
+  });
+
+  return scored.sort((a, b) => b.score - a.score)[0]?.item || null;
 }
 
 function selectArea(request: TravelPlanningRequest, candidates: Poi[]): string {
@@ -584,7 +804,10 @@ function buildProposal(params: {
   const { request, strategy, selectedArea, candidates, data } = params;
   const targetCount = Math.max(3, request.max_total_pois || 4);
   const sameArea = candidates.filter((item) => item.area === selectedArea || item.district === selectedArea);
-  const pool = uniqueByName(sameArea.length >= 3 ? sameArea : candidates);
+  const sameAreaDiversified = uniqueByAttractionGroup(uniqueByName(sameArea));
+  const pool = sameAreaDiversified.length >= targetCount
+    ? sameAreaDiversified
+    : uniqueByAttractionGroup(uniqueByName(candidates));
   const excludedIds = new Set(request.exclude_poi_ids || []);
   const excludedNames = (request.exclude_names || []).map(normalizePoiName);
   const available = pool.filter((item) => {
@@ -592,9 +815,13 @@ function buildProposal(params: {
     return !matchesExcludedName(item, request.exclude_names || []);
   }).filter((item) => !String(item.poi_id).startsWith('fixture_') && !String(item.name).includes('未知'));
 
-  const food = available.filter(isFoodPoi);
+  const recommendable = available.filter(isRecommendablePoi);
+  const scopedRecommendable = request.preference_signals?.indoor && request.route_mode === 'culture'
+    ? recommendable.filter((item) => isIndoorCulturePoi(item) || (request.must_include_poi_ids || []).includes(item.poi_id))
+    : recommendable;
+  const food = scopedRecommendable.filter(isFoodPoi);
   const lunchFood = food.filter(isLunchPoi);
-  const culture = available.filter((item) => !isFoodPoi(item));
+  const culture = scopedRecommendable.filter((item) => !isFoodPoi(item));
   const ranked = (items: Poi[]) => [...items]
     .filter((item) => request.max_budget === null || request.max_budget === undefined || Number(item.avg_cost || 0) <= Number(request.max_budget))
     .sort((a, b) => scorePoi(b, request, strategy, data) - scorePoi(a, request, strategy, data));
@@ -611,18 +838,24 @@ function buildProposal(params: {
     return 0;
   });
 
-  const selected: Poi[] = [];
+  let selected: Poi[] = [];
   if (request.route_mode === 'mixed') {
     const budgetLimit = request.max_budget === null || request.max_budget === undefined ? null : Number(request.max_budget);
-    const mealPool = request.preference_signals?.lunch ? lunchFood : food;
+    const mealPool = request.preference_signals?.formal_meal
+      ? food.filter((item) => item.meal_type === 'meal' || item.meal_type === 'snack')
+      : request.preference_signals?.lunch
+        ? lunchFood
+        : food;
     const lockedCultureCost = available
       .filter((item) => (request.must_include_poi_ids || []).includes(item.poi_id) && !isFoodPoi(item))
       .reduce((sum, item) => sum + Number(item.avg_cost || 0), 0);
     const foodBudgetCap = budgetLimit === null ? null : Math.max(0, budgetLimit - lockedCultureCost);
+    const requiredFood = foodRanked(mealPool).find((item) => (request.must_include_poi_ids || []).includes(item.poi_id))
+      ?? foodRanked(food).find((item) => (request.must_include_poi_ids || []).includes(item.poi_id));
     const foodCandidates = budgetLimit
       ? foodRanked(mealPool).filter((item) => Number(item.avg_cost || 0) <= Math.max(0, foodBudgetCap ?? budgetLimit))
       : foodRanked(mealPool);
-    const selectedFood = foodCandidates[0] ?? foodRanked(mealPool)[0] ?? foodRanked(food)[0];
+    const selectedFood = requiredFood ?? foodCandidates[0] ?? foodRanked(mealPool)[0] ?? foodRanked(food)[0];
     if (selectedFood) selected.push(selectedFood);
     const remainingBudget = budgetLimit === null ? null : Math.max(0, budgetLimit - Number(selectedFood?.avg_cost || 0));
     const cultureSlots = Math.max(2, targetCount - 1);
@@ -641,17 +874,48 @@ function buildProposal(params: {
 
   const mustIds = new Set(request.must_include_poi_ids || []);
   const mustNames = new Set(request.must_include_names || []);
+  const requiredFoodIds = new Set(candidates
+    .filter((item) => mustIds.has(item.poi_id) && isFoodPoi(item))
+    .map((item) => item.poi_id));
   for (const required of candidates.filter((item) => {
     if (excludedIds.has(item.poi_id) || matchesExcludedName(item, request.exclude_names || [])) return false;
     return mustIds.has(item.poi_id) || mustNames.has(item.name);
   })) {
     if (!selected.some((item) => item.poi_id === required.poi_id)) selected.unshift(required);
   }
+  if (request.route_mode === 'mixed' && requiredFoodIds.size > 0) {
+    selected = selected.filter((item) => !isFoodPoi(item) || requiredFoodIds.has(item.poi_id));
+  }
 
-  let ordered = orderNearest(uniqueByName(selected).slice(0, targetCount));
+  const selectedUnique = uniqueByName(selected);
+  const mustSelected = selectedUnique.filter((item) => mustIds.has(item.poi_id) || mustNames.has(item.name));
+  const optionalSelected = selectedUnique.filter((item) => !mustIds.has(item.poi_id) && !mustNames.has(item.name));
+  let ordered = orderNearest([...mustSelected, ...optionalSelected].slice(0, targetCount));
+  if (request.route_order_poi_ids?.length) {
+    const byId = new Map(ordered.map((item) => [item.poi_id, item]));
+    const remaining = ordered.filter((item) => !request.route_order_poi_ids?.includes(item.poi_id));
+    const templateOrdered: Poi[] = [];
+    for (const id of request.route_order_poi_ids) {
+      const exact = byId.get(id);
+      if (exact) {
+        templateOrdered.push(exact);
+      } else {
+        const replacement = remaining.shift();
+        if (replacement) templateOrdered.push(replacement);
+      }
+    }
+    ordered = [...templateOrdered, ...remaining].slice(0, targetCount);
+  }
   if (request.route_mode === 'mixed') {
     const cultureStops = ordered.filter((item) => !isFoodPoi(item));
-    const foodStops = ordered.filter(isFoodPoi);
+    const foodStops = ordered
+      .filter(isFoodPoi)
+      .sort((a, b) => {
+        if (!request.preference_signals?.snack) return 0;
+        const aSnack = isSnackOrTeaPoi(a) ? 1 : 0;
+        const bSnack = isSnackOrTeaPoi(b) ? 1 : 0;
+        return aSnack - bSnack;
+      });
     const lunchFirst = request.preference_signals?.lunch && (parseMinutes(request.start_time) ?? 9 * 60) >= 11 * 60;
     ordered = lunchFirst ? [...foodStops, ...cultureStops] : [...cultureStops.slice(0, 1), ...foodStops, ...cultureStops.slice(1)];
   }
@@ -673,7 +937,9 @@ function buildProposal(params: {
       cursor += transfer;
     }
     const isFoodStop = isFoodPoi(item);
-    if (request.preference_signals?.lunch && isFoodStop && cursor < 11 * 60 + 30) cursor = 11 * 60 + 30;
+    const isSnackStop = Boolean(request.preference_signals?.snack && isSnackOrTeaPoi(item));
+    if (request.preference_signals?.lunch && isFoodStop && !isSnackStop && cursor < 11 * 60 + 30) cursor = 11 * 60 + 30;
+    if (isSnackStop && cursor < 13 * 60) cursor = 13 * 60;
     const arrival = cursor;
     const rawStay = Number(item.suggested_duration_min || 90);
     const shortRoute = Boolean(request.max_duration_min && request.max_duration_min <= 270);
@@ -710,7 +976,7 @@ function buildProposal(params: {
       transfer_from_previous_minutes: transfer,
       transfer_from_previous_meters: Math.round(distance),
       estimated_cost: Number(item.avg_cost || 0),
-      meal_slot: request.preference_signals?.lunch && isFoodStop ? 'lunch' : null,
+      meal_slot: isSnackStop ? 'snack' : request.preference_signals?.lunch && isFoodStop ? 'lunch' : null,
       rating: Number(item.rating || 0),
       opening_status: openingStatus,
       opening_hours_note: openingStatus === 'unknown' ? '本地数据未覆盖完整营业时间。' : openingStatus === 'ok' ? '按本地营业时间估算可访问。' : '按本地营业时间估算存在冲突。',
@@ -764,10 +1030,28 @@ function buildProposal(params: {
 
 export async function travelHealth() {
   const data = await loadTravelData();
+  const databaseSkipped = process.env.SKIP_DB_SYNC === '1';
   return {
     status: 'ok',
     city_id: 'beijing',
     data_root: DATA_ROOT,
+    data_source: 'local_json',
+    data_loaded: Boolean(dataLoadedAt),
+    data_loaded_at: dataLoadedAt,
+    data_load_elapsed_ms: dataLoadElapsedMs,
+    poi_count: data.plannerEntities.length,
+    database: {
+      required_for_planning: false,
+      skipped: databaseSkipped,
+      mode: databaseSkipped ? 'local_demo_no_postgres' : 'postgres_optional',
+      note: databaseSkipped
+        ? 'POI/UGC planning uses local JSON files; chat persistence is best-effort and does not require Postgres.'
+        : 'POI/UGC planning uses local JSON files; Postgres is only used for platform persistence when available.',
+    },
+    cache: {
+      poi_index_ready: data.poiById.size > 0,
+      review_index_ready: data.reviewAggregatesByPoiId.size > 0,
+    },
     counts: {
       culture_pois: data.culturePois.length,
       mixed_pois: data.mixedPois.length,
@@ -775,7 +1059,11 @@ export async function travelHealth() {
       review_aggregates: data.reviewAggregates.length,
       review_pois: new Set(data.reviewAggregates.map((item) => item.poi_id)).size,
     },
-    limitations: ['No realtime map, realtime queue, or external review API is used.', 'Distance and transfer time are local coordinate estimates.'],
+    limitations: [
+      'No realtime map, realtime queue, or external review API is used.',
+      'Distance and transfer time are local coordinate estimates.',
+      'Postgres is not required for POI/UGC route planning.',
+    ],
   };
 }
 
@@ -823,11 +1111,34 @@ export async function listTravelPois(query: { area?: string | null; route_mode?:
 
 export async function getTravelEvidence(poiId: string) {
   const data = await loadTravelData();
-  const poi = [...data.plannerEntities, ...data.mixedPois, ...data.culturePois].find((item) => item.poi_id === poiId);
+  const poi = data.poiById.get(poiId);
   return {
     poi,
     evidence_summary: poi ? buildStopEvidence(poi, data) : null,
-    claims: data.reviewAggregates.filter((item) => item.poi_id === poiId),
+    claims: data.reviewAggregatesByPoiId.get(poiId) || [],
+  };
+}
+
+export async function getTravelCandidateBuckets(payload: Partial<TravelPlanningRequest>): Promise<TravelCandidateBuckets> {
+  const data = await loadTravelData();
+  const request = normalizeRequest(payload);
+  const pool = candidatePool(data, request);
+  const resolvedArea = selectArea(request, pool);
+  const scoped = pool
+    .filter((item) => item.area === resolvedArea || item.district === resolvedArea)
+    .filter(isRecommendablePoi)
+    .sort((a, b) => scorePoi(b, request, 'balanced', data) - scorePoi(a, request, 'balanced', data));
+  const cultureCandidates = scoped.filter((item) => !isFoodPoi(item)).slice(0, 24);
+  const mealCandidates = scoped.filter((item) => isFoodPoi(item) && (item.meal_type === 'meal' || item.meal_type === 'snack')).slice(0, 18);
+  const snackCandidates = scoped.filter((item) => isSnackOrTeaPoi(item)).slice(0, 18);
+  const indoorCandidates = scoped.filter((item) => isIndoorCulturePoi(item)).slice(0, 18);
+  return {
+    request,
+    resolved_area: resolvedArea,
+    cultureCandidates,
+    mealCandidates,
+    snackCandidates,
+    indoorCandidates,
   };
 }
 
@@ -889,12 +1200,133 @@ export async function parseAndPlanTravel(payload: { goal?: string; defaults?: Pa
   return { ...parsed, planning_response };
 }
 
+async function stableReplanTravelRoute(payload: {
+  previous_request?: Partial<TravelPlanningRequest>;
+  selected_proposal?: { ordered_poi_ids?: string[]; ordered_poi_names?: string[] };
+  adjustment_text?: string;
+  locked_poi_ids?: string[];
+}) {
+  const data = await loadTravelData();
+  const previous = normalizeRequest(payload.previous_request || {});
+  const adjustmentText = payload.adjustment_text || '';
+  const parsed = parseGoal(adjustmentText, previous);
+  const selectedIds = payload.selected_proposal?.ordered_poi_ids || [];
+  const selectedFirst = selectedIds[0];
+  const selectedPois = selectedIds
+    .map((id) => data.poiById.get(id))
+    .filter(Boolean) as Poi[];
+  const targetedReplacementIndex = stableTargetedReplacementIndex(adjustmentText, selectedIds.length) ?? parseTargetedReplacementIndex(adjustmentText, selectedIds.length);
+  const targetedReplacementId = targetedReplacementIndex === null ? null : selectedIds[targetedReplacementIndex];
+  const excludedNames = (parsed.exclude_names || []).map(normalizePoiName);
+  const excludedIds = new Set(parsed.exclude_poi_ids || []);
+  const locked = [...(payload.locked_poi_ids || [])];
+  const wantsFoodChange = stableWantsFoodChange(adjustmentText) || adjustmentWantsFoodChange(adjustmentText);
+  const wantsSnack = stableWantsSnack(adjustmentText) || adjustmentWantsSnack(adjustmentText);
+  const wantsFormalMeal = stableWantsFormalMeal(adjustmentText);
+  const preserveFood = stablePreservesFood(adjustmentText);
+  const preserveCulture = stablePreservesCulture(adjustmentText);
+  const preserveOthers = stablePreservesOthers(adjustmentText);
+  const wantsFreshPlan = stableWantsFreshPlan(adjustmentText) || adjustmentWantsFreshPlan(adjustmentText);
+  const wantsIndoor = stableWantsIndoor(adjustmentText);
+  const wantsAddStop = stableWantsAddStop(adjustmentText);
+  const wantsGenericAttraction = stableWantsGenericAttraction(adjustmentText);
+
+  if (selectedFirst && /(\u4fdd\u7559|\u9501\u5b9a|\u4e0d\u8981\u5220)/.test(adjustmentText)) locked.push(selectedFirst);
+  if (targetedReplacementId) excludedIds.add(targetedReplacementId);
+  for (const poi of selectedPois) {
+    if (matchesExcludedName(poi, excludedNames)) excludedIds.add(poi.poi_id);
+  }
+  if (wantsFoodChange && !preserveFood) {
+    for (const poi of selectedPois.filter(isFoodPoi)) excludedIds.add(poi.poi_id);
+  }
+  const selectedFoodIds = new Set(selectedPois.filter(isFoodPoi).map((poi) => poi.poi_id));
+  parsed.must_include_poi_ids = (parsed.must_include_poi_ids || []).filter((id) => {
+    if (excludedIds.has(id)) return false;
+    return !(wantsFoodChange && !preserveFood && selectedFoodIds.has(id));
+  });
+  for (const poi of selectedPois) {
+    const targetPoi = targetedReplacementId === poi.poi_id;
+    const shouldLockFood = preserveFood && isFoodPoi(poi);
+    const shouldLockCulture = preserveCulture && !isFoodPoi(poi);
+    const shouldLockOther = (preserveOthers || wantsAddStop) && !targetPoi;
+    if (targetPoi || wantsFreshPlan) continue;
+    if (shouldLockFood || shouldLockCulture || shouldLockOther || shouldPreservePoiOnReplan({ poi, adjustmentText, excludedNames, excludedIds })) locked.push(poi.poi_id);
+  }
+  parsed.exclude_poi_ids = Array.from(new Set([...(parsed.exclude_poi_ids || []), ...excludedIds]));
+  if (wantsFoodChange || wantsSnack || wantsFormalMeal) {
+    parsed.route_mode = 'mixed';
+    parsed.preference_signals = {
+      ...(parsed.preference_signals || {}),
+      lunch: true,
+      coffee: wantsFoodChange ? false : Boolean(parsed.preference_signals?.coffee),
+      formal_meal: wantsFormalMeal,
+      snack: wantsSnack,
+    };
+  }
+  if (wantsIndoor) {
+    parsed.preference_signals = { ...(parsed.preference_signals || {}), indoor: true };
+  }
+  if (wantsAddStop && selectedIds.length > 0) {
+    parsed.max_total_pois = Math.min(8, Math.max(Number(previous.max_total_pois || selectedIds.length), selectedIds.length) + 1);
+    const explicitFoodAdd = wantsFoodChange || wantsSnack;
+    const additionalStop = selectAdditionalStop({
+      data,
+      request: parsed,
+      selectedPois,
+      excludedIds,
+      excludedNames: parsed.exclude_names || [],
+      wantsFood: explicitFoodAdd,
+      wantsSnack,
+      wantsIndoor,
+    });
+    if (additionalStop && (wantsGenericAttraction || wantsIndoor || explicitFoodAdd)) {
+      locked.push(additionalStop.poi_id);
+    }
+  }
+  parsed.must_include_poi_ids = Array.from(new Set([...(parsed.must_include_poi_ids || []), ...locked]))
+    .filter((id) => !excludedIds.has(id));
+  parsed.route_order_poi_ids = wantsAddStop
+    ? selectedIds.filter((id) => parsed.must_include_poi_ids?.includes(id))
+    : selectedIds.filter((id) => targetedReplacementId === id || parsed.must_include_poi_ids?.includes(id));
+
+  let result = await planTravelRoute(parsed);
+  const leakedNames = result.proposals
+    .flatMap((proposal) => proposal.pois || [])
+    .filter((poi: Pick<Poi, 'poi_id' | 'name'>) => excludedIds.has(poi.poi_id) || matchesExcludedName(poi, parsed.exclude_names || []))
+    .map((poi: Pick<Poi, 'name'>) => poi.name);
+  if (leakedNames.length > 0) {
+    parsed.must_include_poi_ids = (parsed.must_include_poi_ids || []).filter((id) => !excludedIds.has(id));
+    parsed.route_order_poi_ids = selectedIds.filter((id) => parsed.must_include_poi_ids?.includes(id));
+    result = await planTravelRoute(parsed);
+  }
+  return {
+    ...result,
+    replan_metadata: {
+      source_request_applied: Boolean(payload.previous_request),
+      adjustment_text: payload.adjustment_text || '',
+      locked_poi_ids: parsed.must_include_poi_ids,
+      applied_adjustments: [
+        parsed.max_budget !== previous.max_budget ? 'Budget constraint updated.' : null,
+        parsed.walk_preference !== previous.walk_preference ? 'Walking preference updated.' : null,
+        parsed.max_duration_min !== previous.max_duration_min ? 'Duration constraint updated.' : null,
+        targetedReplacementId ? `Targeted replacement applied for stop ${Number(targetedReplacementIndex) + 1}.` : null,
+        parsed.must_include_poi_ids?.length ? 'Unchanged POIs preserved for local replan.' : null,
+        wantsFoodChange ? 'Food stop replacement applied without rebuilding the full route.' : null,
+        wantsAddStop ? 'Additional stop inserted near the existing route.' : null,
+        leakedNames.length ? 'Excluded POI leak prevented by final guard.' : null,
+      ].filter(Boolean),
+    },
+  };
+}
+
 export async function replanTravelRoute(payload: {
   previous_request?: Partial<TravelPlanningRequest>;
   selected_proposal?: { ordered_poi_ids?: string[]; ordered_poi_names?: string[] };
   adjustment_text?: string;
   locked_poi_ids?: string[];
 }) {
+  return stableReplanTravelRoute(payload);
+  /*
   const data = await loadTravelData();
   const previous = normalizeRequest(payload.previous_request || {});
   const parsed = parseGoal(payload.adjustment_text || '', previous);
@@ -959,4 +1391,5 @@ export async function replanTravelRoute(payload: {
       ].filter(Boolean),
     },
   };
+  */
 }

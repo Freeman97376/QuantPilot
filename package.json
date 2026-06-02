@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "node scripts/dev/run-web.js",
     "dev:web": "node scripts/dev/run-web.js",
+    "dev:travel": "node scripts/dev/run-travel-web.js",
     "dev:desktop": "node scripts/dev/run-desktop.js",
     "dev:electron": "npm run dev:desktop",
     "ensure:env": "node scripts/dev/setup-env.js",
@@ -37,18 +38,17 @@
     "check-cli": "node scripts/checks/check-claude-cli.js",
     "doctor": "node scripts/checks/doctor.js",
     "doctor:full": "node scripts/checks/doctor.js --full",
-    "check:skills": "node scripts/checks/check-skills-registry.js --check-lock",
-    "check:skills:metadata": "node scripts/checks/check-skills-registry.js",
-    "package:skills": "node scripts/skills/package-skills.js",
-    "check:validation-repair": "node scripts/checks/check-validation-repair.js",
-    "check:validation-stale": "node scripts/checks/check-validation-stale-report.js",
-    "check:generated-artifacts": "node scripts/checks/check-generated-artifact-policy.js",
-    "check:benchmark-coverage": "node scripts/checks/check-quant-benchmark-coverage.js",
-    "check:eval-schedule": "node scripts/checks/check-eval-schedule.js",
-    "eval:ci": "node scripts/checks/check-eval-ci-gate.js",
+    "check:travel-performance": "node scripts/checks/check-travel-performance.js",
+    "check:travel-targeted-replan": "node scripts/checks/check-travel-targeted-replan.js",
+    "check:travel-samples": "node scripts/checks/check-travel-sample-suite.js",
+    "check:travel-personas": "node scripts/checks/check-travel-personas.js",
+    "check:travel-generic-additions": "node scripts/checks/check-travel-generic-additions.js",
+    "check:travel-meal-refinement": "node scripts/checks/check-travel-meal-refinement.js",
+    "check:travel-ui-sync": "node scripts/checks/check-travel-ui-sync.js",
+    "check:travel": "npm run check:travel-performance && npm run check:travel-targeted-replan && npm run check:travel-samples && npm run check:travel-personas && npm run check:travel-generic-additions && npm run check:travel-meal-refinement && npm run check:travel-ui-sync",
     "check:homepage": "node scripts/checks/check-homepage-visual.js",
     "check:project-visual": "node scripts/checks/check-project-visual.js",
-    "benchmark:quant": "node scripts/evals/run-quant-benchmarks.js",
+    "benchmark:travel": "npm run check:travel",
     "postinstall": "npm run ensure:env"
   },
   "dependencies": {
@@ -111,8 +111,8 @@
     "url": "git+ssh://git@github.com/tiammomo/QuantPilot.git"
   },
   "build": {
-    "appId": "com.quantpilot.desktop",
-    "productName": "QuantPilot",
+    "appId": "com.beijingtravelagent.desktop",
+    "productName": "北京旅游 Agent",
     "files": [
       "index.js",
       "electron/**/*",

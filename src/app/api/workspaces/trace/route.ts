@@ -1,21 +1,14 @@
 import { NextResponse } from 'next/server';
-import { getGenerationObservabilityDashboard } from '@/lib/quant/generation-observability';
 
 export async function GET() {
-  try {
-    return NextResponse.json({
-      success: true,
-      data: await getGenerationObservabilityDashboard(),
-    });
-  } catch (error) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-      },
-      { status: 500 }
-    );
-  }
+  return NextResponse.json({
+    success: true,
+    data: {
+      product: 'beijing-travel-agent',
+      stages: ['received', 'parsing', 'retrieving_poi', 'planning', 'writing_artifacts', 'rendering', 'completed'],
+      note: 'Travel progress is streamed as travel_progress events in the chat channel.',
+    },
+  });
 }
 
 export const runtime = 'nodejs';

@@ -1,21 +1,11 @@
 import { NextResponse } from 'next/server';
-import { getWorkspaceHealthDashboard } from '@/lib/quant/workspace-health';
+import { travelHealth } from '@/lib/travel/planner';
 
 export async function GET() {
-  try {
-    return NextResponse.json({
-      success: true,
-      data: await getWorkspaceHealthDashboard(),
-    });
-  } catch (error) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-      },
-      { status: 500 }
-    );
-  }
+  return NextResponse.json({
+    success: true,
+    data: await travelHealth(),
+  });
 }
 
 export const runtime = 'nodejs';

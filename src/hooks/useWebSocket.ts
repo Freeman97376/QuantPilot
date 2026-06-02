@@ -162,6 +162,22 @@ export function useWebSocket({
                 handleStatus(envelope.data.status, envelope.data, envelope.data.requestId);
               }
               break;
+            case 'travel_progress':
+              if (envelope.data && handleStatus) {
+                handleStatus(envelope.data.stage, {
+                  status: envelope.data.stage,
+                  message: envelope.data.summary || envelope.data.message,
+                  requestId: envelope.data.requestId,
+                  metadata: {
+                    type: 'travel_progress',
+                    elapsed_ms: envelope.data.elapsed_ms,
+                    agent_key: envelope.data.agent_key,
+                    status: envelope.data.status,
+                    payload_preview: envelope.data.payload_preview,
+                  },
+                }, envelope.data.requestId);
+              }
+              break;
             case 'error': {
               const message = envelope.error ?? 'Realtime bridge error';
               const rawData = envelope.data as Record<string, unknown> | undefined;

@@ -111,10 +111,7 @@ export default function HomePage() {
         fallbackEnabled:
           project.fallbackEnabled ?? project.fallback_enabled ?? false,
         travelCapabilityId: getTravelCapability(
-          project.travelCapabilityId ?? project.travel_capability_id ?? project.quantCapabilityId ?? project.quant_capability_id
-        ).id,
-        quantCapabilityId: getTravelCapability(
-          project.travelCapabilityId ?? project.travel_capability_id ?? project.quantCapabilityId ?? project.quant_capability_id
+          project.travelCapabilityId ?? project.travel_capability_id
         ).id,
       };
     },
@@ -398,7 +395,6 @@ export default function HomePage() {
           preferredCli: selectedAssistant,
           selectedModel,
           travelCapabilityId: selectedCapability,
-          quantCapabilityId: selectedCapability,
         }),
       });
       if (!r.ok) {
@@ -448,7 +444,6 @@ export default function HomePage() {
             cliPreference: selectedAssistant,
             selectedModel,
             travelCapabilityId: selectedCapability,
-            quantCapabilityId: selectedCapability,
           }),
         }).catch(() => null);
       }

@@ -1,21 +1,22 @@
 import { NextResponse } from 'next/server';
-import { getOpsPlatformDashboard } from '@/lib/ops/ops-platform';
+import { travelHealth } from '@/lib/travel/planner';
 
 export async function GET() {
-  try {
-    return NextResponse.json({
-      success: true,
-      data: await getOpsPlatformDashboard(),
-    });
-  } catch (error) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-      },
-      { status: 500 }
-    );
-  }
+  return NextResponse.json({
+    success: true,
+    data: {
+      product: 'beijing-travel-agent',
+      travel: await travelHealth(),
+      coreCapabilities: [
+        'local_poi_ugc_data',
+        'intent_parse',
+        'route_plan',
+        'dynamic_replan',
+        'constraint_validation',
+        'artifact_rendering',
+      ],
+    },
+  });
 }
 
 export const runtime = 'nodejs';

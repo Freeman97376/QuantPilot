@@ -38,6 +38,10 @@ export async function getMessagesByProjectId(
   limit: number = 50,
   offset: number = 0
 ): Promise<Message[]> {
+  if (process.env.SKIP_DB_SYNC === '1') {
+    return [];
+  }
+
   const messages = await prisma.message.findMany({
     where: { projectId },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
@@ -57,6 +61,10 @@ export async function getMessagesByProjectIdAfter(
   afterId?: string,
   limit: number = 100
 ): Promise<Message[]> {
+  if (process.env.SKIP_DB_SYNC === '1') {
+    return [];
+  }
+
   const messages = await prisma.message.findMany({
     where: {
       projectId,
@@ -83,6 +91,25 @@ export async function getMessagesByProjectIdAfter(
  * Create new message
  */
 export async function createMessage(input: CreateMessageInput): Promise<Message> {
+  if (process.env.SKIP_DB_SYNC === '1') {
+    const now = new Date();
+    return {
+      id: input.id ?? `local-message-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      projectId: input.projectId,
+      conversationId: input.conversationId ?? null,
+      sessionId: input.sessionId ?? null,
+      role: input.role,
+      content: input.content,
+      messageType: input.messageType,
+      metadataJson: input.metadata ? JSON.stringify({ ...input.metadata, localOnly: true }) : JSON.stringify({ localOnly: true }),
+      parentMessageId: null,
+      cliSource: input.cliSource ?? null,
+      createdAt: now,
+      updatedAt: now,
+      requestId: input.requestId ?? null,
+    };
+  }
+
   const metadataJson = input.metadata ? JSON.stringify(input.metadata) : undefined;
   const metadataLength = metadataJson ? metadataJson.length : 0;
   const metadataPreview =
@@ -157,6 +184,10 @@ export async function createMessage(input: CreateMessageInput): Promise<Message>
  * Get total count of messages for a project
  */
 export async function getMessagesCountByProjectId(projectId: string): Promise<number> {
+  if (process.env.SKIP_DB_SYNC === '1') {
+    return 0;
+  }
+
   const count = await prisma.message.count({
     where: { projectId },
   });
@@ -168,6 +199,10 @@ export async function getMessagesCountByProjectId(projectId: string): Promise<nu
  * Delete all project messages
  */
 export async function deleteMessagesByProjectId(projectId: string, conversationId?: string): Promise<number> {
+  if (process.env.SKIP_DB_SYNC === '1') {
+    return 0;
+  }
+
   const result = await prisma.message.deleteMany({
     where: {
       projectId,

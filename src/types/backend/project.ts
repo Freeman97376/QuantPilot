@@ -45,7 +45,6 @@ export interface CreateProjectInput {
   selectedModel?: string;
   description?: string;
   travelCapabilityId?: string;
-  quantCapabilityId?: string;
 }
 
 export interface UpdateProjectInput {

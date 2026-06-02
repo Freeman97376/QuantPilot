@@ -2073,6 +2073,22 @@ export default function ChatLog({ projectId, onSessionStatusChange, onProjectSta
           handleRealtimeStatus(data.status ?? envelope.type, data, data.requestId);
           break;
         }
+        case 'travel_progress': {
+          const data = envelope.data;
+          handleRealtimeStatus(data.stage, {
+            status: data.stage,
+            message: data.summary || data.message,
+            requestId: data.requestId,
+            metadata: {
+              type: 'travel_progress',
+              elapsed_ms: data.elapsed_ms,
+              agent_key: data.agent_key,
+              status: data.status,
+              payload_preview: data.payload_preview,
+            },
+          }, data.requestId);
+          break;
+        }
         case 'error': {
           const message = envelope.error ?? 'Realtime bridge error';
           const rawData = (envelope.data as Record<string, unknown> | undefined) ?? undefined;

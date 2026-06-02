@@ -5,8 +5,8 @@ import { getTravelCapability } from '@/lib/travel/capabilities';
 function readTravelCapabilityId(settings?: string | null) {
   if (!settings) return null;
   try {
-    const parsed = JSON.parse(settings) as { travel?: { capabilityId?: string }; quant?: { capabilityId?: string } };
-    return getTravelCapability(parsed.travel?.capabilityId ?? parsed.quant?.capabilityId).id;
+    const parsed = JSON.parse(settings) as { travel?: { capabilityId?: string } };
+    return getTravelCapability(parsed.travel?.capabilityId).id;
   } catch {
     return null;
   }
@@ -28,7 +28,6 @@ export function serializeProject(project: ProjectEntity): Project {
     selectedModel: project.selectedModel ?? null,
     fallbackEnabled: project.fallbackEnabled,
     travelCapabilityId: readTravelCapabilityId(project.settings),
-    quantCapabilityId: readTravelCapabilityId(project.settings),
   };
 }
 

@@ -196,6 +196,10 @@ export async function getAllProjects(): Promise<Project[]> {
  * Retrieve project by ID
  */
 export async function getProjectById(id: string): Promise<Project | null> {
+  if (process.env.SKIP_DB_SYNC === '1') {
+    return readLocalProject(id);
+  }
+
   try {
     const project = await prisma.project.findUnique({
       where: { id },
@@ -227,7 +231,7 @@ export async function createProject(input: CreateProjectInput): Promise<Project>
     preferredCli,
     input.selectedModel ?? getDefaultModelForCli(preferredCli)
   );
-  const travelCapability = getTravelCapability(input.travelCapabilityId ?? input.quantCapabilityId);
+  const travelCapability = getTravelCapability(input.travelCapabilityId);
   await writeTravelPilotManifest({
     projectPath,
     projectId: input.project_id,
@@ -345,6 +349,10 @@ export async function deleteProject(id: string): Promise<void> {
  * Update project activity time
  */
 export async function updateProjectActivity(id: string): Promise<void> {
+  if (process.env.SKIP_DB_SYNC === '1') {
+    return;
+  }
+
   await prisma.project.update({
     where: { id },
     data: {

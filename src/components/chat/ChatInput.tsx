@@ -53,7 +53,7 @@ interface ChatInputProps {
 export default function ChatInput({
   onSendMessage,
   disabled = false,
-  placeholder = "向 QuantPilot 描述你的量化需求...",
+  placeholder = "描述你的北京游玩目标，例如：前门附近玩4小时，中午吃饭，预算200以内，少走路",
   mode = 'act',
   onModeChange,
   projectId,

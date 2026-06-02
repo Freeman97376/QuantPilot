@@ -2,9 +2,12 @@
 
 import { useRouter } from "next/navigation";
 import {
+  BarChart3,
+  Database,
   Gauge,
+  Map,
   Menu,
-  PackageCheck,
+  Route,
   Settings,
   X,
 } from "lucide-react";
@@ -24,48 +27,42 @@ const ROLE_MODULES: Array<{
     name: "餐饮文化混排",
     description: "组合餐饮、文化和娱乐 POI，兼顾预算、排队和步行",
     capabilityId: "mixed_food_route",
-    inputPlaceholder:
-      "前门附近玩4小时，中午吃饭，想吃好但不想排队，预算200以内，少走路",
+    inputPlaceholder: "前门附近玩4小时，中午吃饭，想吃好但不想排队，预算200以内，少走路",
   },
   {
     id: "culture-route",
     name: "北京文化路线",
-    description: "串联博物馆、景点、剧场和美术馆，生成可执行路线",
+    description: "串联博物馆、古建、剧场和美术馆，生成可执行路线",
     capabilityId: "culture_route",
-    inputPlaceholder:
-      "故宫附近安排4个文化点，预算200以内，少走路",
+    inputPlaceholder: "故宫附近安排4小时文化路线，少走路，预算100以内，不吃饭",
   },
   {
     id: "family-low-queue",
     name: "亲子低排队",
     description: "提高亲子友好、环境质量和低排队 UGC 信号权重",
     capabilityId: "family_low_queue",
-    inputPlaceholder:
-      "带孩子在什刹海附近轻松玩，安排吃饭，不想排队",
+    inputPlaceholder: "带孩子在什刹海附近轻松玩，安排吃饭，不想排队",
   },
   {
     id: "budget-route",
     name: "预算优先",
     description: "在预算上限内保留高性价比、低成本 POI",
     capabilityId: "budget_route",
-    inputPlaceholder:
-      "预算100以内，前门附近吃逛路线，尽量不排队",
+    inputPlaceholder: "预算100以内，前门附近吃逛路线，尽量不排队",
   },
   {
     id: "efficient-route",
     name: "效率优先",
     description: "优先缩短转移距离和总时长，降低回头路",
     capabilityId: "efficient_route",
-    inputPlaceholder:
-      "天坛附近3小时高效串联3个点，少走路",
+    inputPlaceholder: "天坛附近3小时高效串联3个点，少走路",
   },
   {
     id: "replan-compare",
     name: "动态重规划",
-    description: "基于上一轮路线追加预算、步行、保留或排除约束",
+    description: "基于上一轮路线追加、删除、替换或保留地点",
     capabilityId: "replan_compare",
-    inputPlaceholder:
-      "预算降到100以内，保留第一个点，少走路一点",
+    inputPlaceholder: "预算降到100，保留第一个点，重新规划",
   },
 ];
 
@@ -74,7 +71,6 @@ interface SidebarProps {
   onSelectCapability: (id: TravelCapabilityId) => void;
   onOpenTaskDrawer: () => void;
   onShowSettings: () => void;
-  /** Mobile only */
   isMobile?: boolean;
   onCloseMobile?: () => void;
 }
@@ -93,7 +89,7 @@ function Sidebar({
     <aside
       className={cn(
         "flex h-full flex-col border-r bg-background/95",
-        isMobile ? "w-[286px]" : "w-[260px]"
+        isMobile ? "w-[286px]" : "w-[260px]",
       )}
     >
       <div className="flex h-14 items-center justify-between border-b px-4">
@@ -123,7 +119,7 @@ function Sidebar({
       <div className="flex-1 overflow-y-auto px-3 py-4">
         <div className="mb-2 px-2">
           <span className="text-xs font-semibold tracking-wide text-muted-foreground">
-            北京旅游能力
+            北京旅游核心能力
           </span>
         </div>
 
@@ -142,25 +138,15 @@ function Sidebar({
                   "w-full rounded-md border px-3 py-3 text-left transition-colors",
                   active
                     ? "border-primary/20 bg-primary/10 text-primary"
-                    : "border-transparent text-foreground hover:border-border hover:bg-muted/60"
+                    : "border-transparent text-foreground hover:border-border hover:bg-muted/60",
                 )}
                 title={role.description}
                 aria-pressed={active}
               >
-                <span
-                  className={cn(
-                    "text-sm font-semibold",
-                    active ? "text-primary" : "text-foreground"
-                  )}
-                >
+                <span className={cn("text-sm font-semibold", active ? "text-primary" : "text-foreground")}>
                   {role.name}
                 </span>
-                <p
-                  className={cn(
-                    "mt-1 text-xs leading-5",
-                    active ? "text-primary/80" : "text-muted-foreground"
-                  )}
-                >
+                <p className={cn("mt-1 text-xs leading-5", active ? "text-primary/80" : "text-muted-foreground")}>
                   {role.description}
                 </p>
               </button>
@@ -169,32 +155,28 @@ function Sidebar({
         </div>
       </div>
 
-      {/* Platform navigation */}
       <div className="border-t p-3">
-        <Button
-          type="button"
-          onClick={() => router.push("/eval-platform")}
-          variant="ghost"
-          className="mb-0.5 w-full justify-start"
-        >
+        <Button type="button" onClick={() => router.push("/strategy-platform")} variant="ghost" className="mb-0.5 w-full justify-start">
+          <Route className="h-4 w-4" />
+          路线方案
+        </Button>
+        <Button type="button" onClick={() => router.push("/data-platform")} variant="ghost" className="mb-0.5 w-full justify-start">
+          <Database className="h-4 w-4" />
+          POI/UGC 数据
+        </Button>
+        <Button type="button" onClick={() => router.push("/eval-platform")} variant="ghost" className="mb-0.5 w-full justify-start">
           <Gauge className="h-4 w-4" />
           路线评测
         </Button>
-        <Button
-          type="button"
-          onClick={() => router.push("/skills")}
-          variant="ghost"
-          className="mb-0.5 w-full justify-start"
-        >
-          <PackageCheck className="h-4 w-4" />
-          Skills 管理
+        <Button type="button" onClick={() => router.push("/ops-platform")} variant="ghost" className="mb-0.5 w-full justify-start">
+          <BarChart3 className="h-4 w-4" />
+          运行观测
         </Button>
-        <Button
-          type="button"
-          onClick={onShowSettings}
-          variant="ghost"
-          className="w-full justify-start"
-        >
+        <Button type="button" onClick={() => router.push("/")} variant="ghost" className="mb-0.5 w-full justify-start">
+          <Map className="h-4 w-4" />
+          回到首页
+        </Button>
+        <Button type="button" onClick={onShowSettings} variant="ghost" className="w-full justify-start">
           <Settings className="h-4 w-4" />
           设置
         </Button>

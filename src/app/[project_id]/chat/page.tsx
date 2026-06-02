@@ -247,6 +247,8 @@ function TreeView({ entries, selectedFile, expandedFolders, folderContents, onTo
 
 type TravelItineraryData = {
   parsed_request?: Record<string, any>;
+  agent_trace?: Array<Record<string, any>>;
+  session_state_summary?: Record<string, any>;
   planning_response?: {
     resolved_area?: string;
     route_mode?: string;
@@ -255,6 +257,8 @@ type TravelItineraryData = {
     evidence_summary?: Record<string, any>;
     generation_metrics?: Record<string, any>;
     proposals?: Array<Record<string, any>>;
+    route_patch_summary?: Record<string, any>;
+    constraint_judgement?: Record<string, any>;
   };
 };
 
@@ -264,6 +268,17 @@ function TravelItineraryPreview({ data }: { data: TravelItineraryData }) {
   const dailyItinerary = Array.isArray(planning.daily_itinerary) ? planning.daily_itinerary : [];
   const primary = proposals[0];
   const stops = Array.isArray(primary?.pois) ? primary.pois : [];
+  const routePatchSummary = planning.route_patch_summary;
+  const selectedReasons = Array.isArray(primary?.selection_reasons) ? primary.selection_reasons : [];
+  const agentTrace = Array.isArray(data.agent_trace) ? data.agent_trace : [];
+  const constraintJudgement =
+    (primary?.constraint_judgement as Record<string, any> | undefined) ??
+    (planning.constraint_judgement as Record<string, any> | undefined) ??
+    null;
+  const keptStops = Array.isArray(routePatchSummary?.kept) ? routePatchSummary.kept : [];
+  const removedStops = Array.isArray(routePatchSummary?.removed) ? routePatchSummary.removed : [];
+  const addedStops = Array.isArray(routePatchSummary?.added) ? routePatchSummary.added : [];
+  const hasRouteDiff = keptStops.length > 0 || removedStops.length > 0 || addedStops.length > 0 || Boolean(routePatchSummary?.reordered);
 
   return (
     <div className="h-full w-full overflow-y-auto bg-[#f7f2ea] text-slate-950">
@@ -323,6 +338,7 @@ function TravelItineraryPreview({ data }: { data: TravelItineraryData }) {
                         <h3 className="mt-3 font-black">
                           {stop.name}
                           {stop.meal_slot === 'lunch' ? <span className="ml-2 rounded-full bg-[#f1c979] px-2 py-0.5 text-xs text-slate-950">午餐</span> : null}
+                          {stop.meal_slot === 'snack' ? <span className="ml-2 rounded-full bg-[#ffe7c2] px-2 py-0.5 text-xs text-slate-950">下午茶</span> : null}
                         </h3>
                         <p className="mt-1 text-sm text-slate-600">{stop.recommendation_reason}</p>
                       </div>
@@ -361,6 +377,73 @@ function TravelItineraryPreview({ data }: { data: TravelItineraryData }) {
                   <p className="mt-1 text-xl font-black">{primary.total_walking_distance_m ?? '-'} 米</p>
                 </div>
               </div>
+              {hasRouteDiff ? (
+                <div className="mt-5 rounded-2xl border border-[#f1d2bf] bg-[#fff6ed] p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#b75f38]">Route Diff</p>
+                  <div className="mt-3 space-y-2 text-sm text-slate-700">
+                    {keptStops.length > 0 ? (
+                      <p>
+                        <span className="font-semibold text-slate-950">保留：</span>
+                        {keptStops.join('、')}
+                      </p>
+                    ) : null}
+                    {removedStops.length > 0 ? (
+                      <p>
+                        <span className="font-semibold text-slate-950">删除：</span>
+                        {removedStops.join('、')}
+                      </p>
+                    ) : null}
+                    {addedStops.length > 0 ? (
+                      <p>
+                        <span className="font-semibold text-slate-950">新增：</span>
+                        {addedStops.join('、')}
+                      </p>
+                    ) : null}
+                    {routePatchSummary?.reordered ? (
+                      <p>
+                        <span className="font-semibold text-slate-950">调整：</span>
+                        为了满足少走路、预算或室内偏好，系统对顺序做了局部重排。
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+              {constraintJudgement ? (
+                <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Constraint Judge</p>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <div className="rounded-2xl bg-white p-3">
+                      <p className="text-xs text-slate-500">校验结果</p>
+                      <p className="mt-1 text-sm font-black text-slate-950">
+                        {constraintJudgement.passes ? '通过' : '需关注风险'}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl bg-white p-3">
+                      <p className="text-xs text-slate-500">覆盖要求</p>
+                      <p className="mt-1 text-sm font-black text-slate-950">
+                        {constraintJudgement.coverage_passes ? '满足' : '部分缺失'}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl bg-white p-3">
+                      <p className="text-xs text-slate-500">预算约束</p>
+                      <p className="mt-1 text-sm font-black text-slate-950">
+                        {constraintJudgement.budget_passes ? '满足' : '可能超预算'}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl bg-white p-3">
+                      <p className="text-xs text-slate-500">时长约束</p>
+                      <p className="mt-1 text-sm font-black text-slate-950">
+                        {constraintJudgement.duration_passes ? '满足' : '可能超时'}
+                      </p>
+                    </div>
+                  </div>
+                  {Array.isArray(constraintJudgement.notes) && constraintJudgement.notes.length > 0 ? (
+                    <p className="mt-3 text-xs leading-5 text-slate-600">
+                      {constraintJudgement.notes.join('；')}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
               <div className="mt-6 space-y-4">
                 {stops.map((stop: Record<string, any>, index: number) => (
                   <div key={`${stop.poi_id ?? stop.name}-${index}`} className="flex gap-4 rounded-2xl border border-slate-100 bg-[#fffaf2] p-4">
@@ -370,6 +453,7 @@ function TravelItineraryPreview({ data }: { data: TravelItineraryData }) {
                         <h3 className="font-black text-slate-950">
                           {stop.name}
                           {stop.meal_slot === 'lunch' ? <span className="ml-2 rounded-full bg-[#f1c979] px-2 py-0.5 text-xs text-slate-950">午餐</span> : null}
+                          {stop.meal_slot === 'snack' ? <span className="ml-2 rounded-full bg-[#ffe7c2] px-2 py-0.5 text-xs text-slate-950">下午茶</span> : null}
                         </h3>
                         <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-600">
                           {stop.arrival_time} - {stop.departure_time}
@@ -377,6 +461,11 @@ function TravelItineraryPreview({ data }: { data: TravelItineraryData }) {
                       </div>
                       <p className="mt-1 text-sm text-slate-600">{stop.recommendation_reason}</p>
                       <p className="mt-2 text-xs text-slate-500">{stop.opening_hours_note}</p>
+                      {selectedReasons.find((item: Record<string, any>) => item.poi_id === stop.poi_id)?.reason ? (
+                        <p className="mt-2 text-xs text-[#b75f38]">
+                          入选原因：{selectedReasons.find((item: Record<string, any>) => item.poi_id === stop.poi_id)?.reason}
+                        </p>
+                      ) : null}
                     </div>
                   </div>
                 ))}
@@ -384,6 +473,18 @@ function TravelItineraryPreview({ data }: { data: TravelItineraryData }) {
             </div>
 
             <div className="space-y-6">
+              {agentTrace.length > 0 ? (
+                <div className="rounded-[1.5rem] border border-[#e3d5bf] bg-white p-5 shadow-sm">
+                  <h3 className="font-black">Agent Trace</h3>
+                  <div className="mt-3 space-y-2 text-sm text-slate-600">
+                    {agentTrace.slice(0, 6).map((entry: Record<string, any>, index: number) => (
+                      <p key={`${entry.agent_key ?? 'agent'}-${index}`}>
+                        {entry.agent_key}: {entry.summary}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               {proposals.map((proposal, index) => (
                 <div key={proposal.proposal_id ?? index} className="rounded-[1.5rem] border border-[#e3d5bf] bg-white p-5 shadow-sm">
                   <div className="flex items-center justify-between">
@@ -1220,8 +1321,12 @@ const persistProjectPreferences = useCallback(
   const loadTravelItinerary = useCallback(async () => {
     if (!projectId) return;
     try {
+      const params = new URLSearchParams({
+        path: 'data_file/final/itinerary-data.json',
+        ts: Date.now().toString(),
+      });
       const response = await fetch(
-        `${API_BASE}/api/projects/${projectId}/artifact?path=${encodeURIComponent('data_file/final/itinerary-data.json')}`,
+        `${API_BASE}/api/projects/${projectId}/artifact?${params.toString()}`,
         { cache: 'no-store' },
       );
       if (!response.ok) {
@@ -1235,6 +1340,16 @@ const persistProjectPreferences = useCallback(
       setTravelItinerary(null);
     }
   }, [projectId]);
+
+  const scheduleTravelItineraryRefresh = useCallback(() => {
+    void loadTravelItinerary();
+    const timers = [350, 1200, 2500].map((delay) =>
+      window.setTimeout(() => {
+        void loadTravelItinerary();
+      }, delay),
+    );
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [loadTravelItinerary]);
 
   useEffect(() => {
     void loadTravelItinerary();
@@ -2228,13 +2343,16 @@ const persistProjectPreferences = useCallback(
       const addLocalProgressMessage = (content: string, step: number, isFinalStep = false) => {
         const now = new Date().toISOString();
         const id = `${requestId}-travel-agent-step-${step}-${isFinalStep ? 'done' : 'running'}`;
+        const displayContent = step === 0
+          ? '多 Agent 任务已提交，等待后端实时进度...'
+          : content;
         tempProgressMessageIds.push(id);
         const message = {
           id,
           projectId,
           role: 'assistant' as const,
           messageType: 'chat' as const,
-          content,
+          content: displayContent,
           conversationId: conversationId || null,
           requestId: `${requestId}-agent-step-${step}-${isFinalStep ? 'done' : 'running'}`,
           createdAt: now,
@@ -2255,7 +2373,7 @@ const persistProjectPreferences = useCallback(
         }
       };
 
-      const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+      const wait = (_ms: number) => Promise.resolve();
       const agentSteps = [
         ['意图解析 Agent', '正在识别区域、时长、预算、餐饮、少走路/少排队等约束', '已识别本轮需求和约束'],
         ['POI 检索 Agent', '正在读取本地北京 POI，筛选景点、餐饮、咖啡和娱乐候选', '已从本地数据筛出候选点'],
@@ -2266,7 +2384,7 @@ const persistProjectPreferences = useCallback(
         ['约束校验 Agent', '正在复核预算、总时长、午餐 11:30、餐饮+文化覆盖和风险', '已完成预算、时长、午餐标签和风险校验'],
       ];
       addLocalProgressMessage('开始多 Agent 实时协作规划。', 0);
-      for (let index = 0; index < agentSteps.length; index += 1) {
+      for (let index = 0; false && index < agentSteps.length; index += 1) {
         const [agentName, runningText, doneText] = agentSteps[index];
         addLocalProgressMessage(`${agentName}：${runningText}...`, index + 1);
         await wait(350);
@@ -2389,9 +2507,16 @@ const persistProjectPreferences = useCallback(
         return;
       }
 
+      if (
+        (result?.status === 'travel_plan_completed' || result?.status === 'travel_replan_completed') &&
+        result?.travelItinerary
+      ) {
+        setTravelItinerary(result.travelItinerary as TravelItineraryData);
+      }
+
       // Refresh data after completion
       await loadTree('.');
-      await loadTravelItinerary();
+      scheduleTravelItineraryRefresh();
 
       if (
         (result?.status === 'travel_plan_completed' || result?.status === 'travel_replan_completed') &&
@@ -2524,6 +2649,15 @@ const persistProjectPreferences = useCallback(
   // Handle project status updates via callback from ChatLog
   const handleProjectStatusUpdate = (status: string, message?: string) => {
     const previousStatus = projectStatus;
+
+    if (
+      status === 'travel_plan_completed' ||
+      status === 'travel_replan_completed' ||
+      status === 'completed' ||
+      status === 'rendering'
+    ) {
+      scheduleTravelItineraryRefresh();
+    }
 
     if (status === 'validation_running') {
       setQuantValidationState('running');

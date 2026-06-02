@@ -1,103 +1,33 @@
 import { NextResponse } from 'next/server';
-import {
-  cancelQuantEvalRun,
-  checkQuantEvalSchedule,
-  getQuantEvalDashboardData,
-  simulateQuantEvalFlow,
-  startQuantEvalRun,
-  updateQuantEvalSchedule,
-} from '@/lib/quant/evals';
+import { travelHealth } from '@/lib/travel/planner';
 
 export async function GET() {
-  try {
-    return NextResponse.json({
-      success: true,
-      data: await getQuantEvalDashboardData(),
-    });
-  } catch (error) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-      },
-      { status: 500 }
-    );
-  }
+  const health = await travelHealth();
+  return NextResponse.json({
+    success: true,
+    data: {
+      product: 'beijing-travel-agent',
+      checks: [
+        '至少 3 个 POI',
+        '混合路线包含餐饮 + 文化/娱乐',
+        '预算与总时长约束',
+        'UGC 排队/性价比证据',
+        '动态重规划成功率',
+        '生成耗时小于 10 秒',
+      ],
+      health,
+    },
+  });
 }
 
-export async function POST(request: Request) {
-  try {
-    const body = await request.json().catch(() => ({}));
-    const action = String(body.action ?? '');
-    if (action === 'start-benchmark') {
-      const item = await startQuantEvalRun({
-        cli: typeof body.cli === 'string' ? body.cli : undefined,
-        model: typeof body.model === 'string' ? body.model : undefined,
-        reasoningEffort: typeof body.reasoningEffort === 'string' ? body.reasoningEffort : undefined,
-        selectedCases: Array.isArray(body.selectedCases) ? body.selectedCases.map(String) : [],
-        limit: typeof body.limit === 'number' ? body.limit : null,
-        keepProjects: Boolean(body.keepProjects),
-      });
-
-      return NextResponse.json({ success: true, data: item });
-    }
-
-    if (action === 'simulate-flow') {
-      const simulation = await simulateQuantEvalFlow({
-        cli: typeof body.cli === 'string' ? body.cli : undefined,
-        model: typeof body.model === 'string' ? body.model : undefined,
-        reasoningEffort: typeof body.reasoningEffort === 'string' ? body.reasoningEffort : undefined,
-        selectedCases: Array.isArray(body.selectedCases) ? body.selectedCases.map(String) : [],
-        limit: typeof body.limit === 'number' ? body.limit : null,
-        keepProjects: Boolean(body.keepProjects),
-      });
-
-      return NextResponse.json({ success: true, data: simulation });
-    }
-
-    if (action === 'cancel-benchmark') {
-      const item = await cancelQuantEvalRun(String(body.queueId ?? ''));
-      return NextResponse.json({ success: true, data: item });
-    }
-
-    if (action === 'update-schedule') {
-      const schedule = await updateQuantEvalSchedule({
-        enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
-        intervalHours: typeof body.intervalHours === 'number' ? body.intervalHours : undefined,
-        cli: typeof body.cli === 'string' ? body.cli : undefined,
-        model: typeof body.model === 'string' ? body.model : undefined,
-        reasoningEffort: typeof body.reasoningEffort === 'string' ? body.reasoningEffort : undefined,
-        selectedCases: Array.isArray(body.selectedCases) ? body.selectedCases.map(String) : undefined,
-        limit: typeof body.limit === 'number' || body.limit === null ? body.limit : undefined,
-        keepProjects: typeof body.keepProjects === 'boolean' ? body.keepProjects : undefined,
-        nextRunAt: typeof body.nextRunAt === 'string' || body.nextRunAt === null ? body.nextRunAt : undefined,
-      });
-      return NextResponse.json({ success: true, data: schedule });
-    }
-
-    if (action === 'check-schedule') {
-      const result = await checkQuantEvalSchedule();
-      return NextResponse.json({ success: true, data: result });
-    }
-
+export async function POST() {
+  return NextResponse.json(
     {
-      return NextResponse.json(
-        {
-          success: false,
-          error: '不支持的评测 action。',
-        },
-        { status: 400 }
-      );
-    }
-  } catch (error) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-      },
-      { status: 400 }
-    );
-  }
+      success: false,
+      error: 'Benchmark queue has been removed. Use scripts/checks/check-travel-*.js for local route QA.',
+    },
+    { status: 410 },
+  );
 }
 
 export const runtime = 'nodejs';
