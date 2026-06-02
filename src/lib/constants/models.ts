@@ -49,10 +49,12 @@ export interface CodexModelDefinition {
 export const CODEX_DEFAULT_MODEL = "gpt-5.5";
 export const CODEX_MODEL_DEFINITIONS: CodexModelDefinition[] = [
   { id: "gpt-5.5", name: "GPT-5.5", description: "Third-party OpenAI-compatible GPT model for Codex CLI", supportsImages: true, provider: "OpenAI Compatible", runtime: "Codex CLI", external: true },
+  { id: "mimo-v2.5-pro", name: "MiMo V2.5 Pro", description: "OpenAI-compatible MiMo model for Codex CLI", supportsImages: false, provider: "OpenAI Compatible", runtime: "Codex CLI", external: true },
 ];
 
 const CODEX_ALIAS_MAP: Record<string, string> = {
   gpt55: "gpt-5.5", gpt_5_5: "gpt-5.5", "gpt-5-5": "gpt-5.5", "gpt5.5": "gpt-5.5",
+  mimo: "mimo-v2.5-pro", mimo25pro: "mimo-v2.5-pro", "mimo-v2-5-pro": "mimo-v2.5-pro", "mimo-v2.5": "mimo-v2.5-pro",
   gpt5: CODEX_DEFAULT_MODEL, gpt_5: CODEX_DEFAULT_MODEL, "gpt-5": CODEX_DEFAULT_MODEL, "gpt-5.0": CODEX_DEFAULT_MODEL,
   "gpt-4o": CODEX_DEFAULT_MODEL, gpt4o: CODEX_DEFAULT_MODEL, "gpt-4o-mini": CODEX_DEFAULT_MODEL,
   "gpt-4o-mini-high": CODEX_DEFAULT_MODEL, "gpt-4o-mini-low": CODEX_DEFAULT_MODEL,

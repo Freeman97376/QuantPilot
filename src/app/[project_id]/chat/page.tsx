@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState, useRef, useCallback, useMemo, type ChangeEvent, type KeyboardEvent, type UIEvent } from 'react';
 import { AnimatePresence } from 'framer-motion';
-import { MotionDiv, MotionH3, MotionP, MotionButton } from '@/lib/motion';
+import { MotionDiv, panelTransition } from '@/lib/motion';
 import { useRouter, useSearchParams, useParams, usePathname } from 'next/navigation';
 import dynamic from 'next/dynamic';
 import { FaCode, FaDesktop, FaMobileAlt, FaPlay, FaStop, FaSync, FaCog, FaRocket, FaFolder, FaFolderOpen, FaFile, FaFileCode, FaCss3Alt, FaHtml5, FaJs, FaReact, FaPython, FaDocker, FaGitAlt, FaMarkdown, FaDatabase, FaPhp, FaJava, FaRust, FaVuejs, FaLock, FaHome, FaChevronUp, FaChevronRight, FaChevronDown, FaArrowLeft, FaArrowRight, FaRedo } from 'react-icons/fa';
@@ -14,8 +14,9 @@ import { ChatErrorBoundary } from '@/components/ErrorBoundary';
 import { useUserRequests } from '@/hooks/useUserRequests';
 import { useGlobalSettings } from '@/contexts/GlobalSettingsContext';
 import { getDefaultModelForCli, getModelDisplayName } from '@/lib/constants/cliModels';
+import { getTaskVisualState } from '@/lib/quant/task-experience';
+import { cn } from '@/lib/utils';
 import {
-  ACTIVE_CLI_BRAND_COLORS,
   ACTIVE_CLI_IDS,
   ACTIVE_CLI_MODEL_OPTIONS,
   ACTIVE_CLI_NAME_MAP,
@@ -27,11 +28,7 @@ import {
   type ActiveModelOption,
 } from '@/lib/utils/cliOptions';
 
-// No longer loading ProjectSettings (managed by global settings on main page)
-
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? '';
-
-const assistantBrandColors = ACTIVE_CLI_BRAND_COLORS;
 
 const CLI_LABELS = ACTIVE_CLI_NAME_MAP;
 
@@ -342,9 +339,15 @@ export default function ChatPage() {
   const lineNumberRef = useRef<HTMLDivElement>(null);
   const editedContentRef = useRef<string>('');
   const [isFileUpdating, setIsFileUpdating] = useState(false);
-  const activeBrandColor =
-    assistantBrandColors[preferredCli] || assistantBrandColors[DEFAULT_ACTIVE_CLI];
+  const previewAccentColor = '#2563eb';
   const modelOptions = useMemo(() => buildModelOptions(cliStatuses), [cliStatuses]);
+  const taskVisualState = getTaskVisualState({
+    status: projectStatus,
+    hasPreview: Boolean(previewUrl),
+    validationState: quantValidationState,
+    isRunning,
+  });
+  const selectedModelLabel = getModelDisplayName(preferredCli, selectedModel);
   const cliOptions = useMemo(
     () => CLI_ORDER.map(cli => ({
       id: cli,
@@ -984,6 +987,15 @@ const persistProjectPreferences = useCallback(
       console.warn('Failed to refresh preview iframe:', error);
     }
   }, [previewUrl, currentRoute]);
+
+  const openPreviewPanel = useCallback(() => {
+    setShowPreview(true);
+    if (previewUrl) {
+      setTimeout(() => refreshPreview(), 0);
+      return;
+    }
+    void start({ requireValidation: false });
+  }, [previewUrl, refreshPreview, start]);
 
 
   const stop = useCallback(async () => {
@@ -2373,38 +2385,78 @@ const persistProjectPreferences = useCallback(
         }
       `}</style>
 
-      <div className="h-screen bg-white flex relative overflow-hidden">
-        <div className="h-full w-full flex">
+      <div className="h-screen bg-slate-50 flex relative overflow-hidden">
+        <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.88),rgba(248,250,252,0.96))]" />
+        <div className="relative h-full w-full flex gap-3 p-3">
           {/* Left: Chat window */}
           <div
-            style={{ width: '22%' }}
-            className="h-full border-r border-slate-200 flex flex-col"
+            style={{ width: '24%' }}
+            className="h-full min-w-[340px] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-[0_22px_70px_-58px_rgba(15,23,42,0.45)] backdrop-blur-xl flex flex-col"
           >
             {/* Chat header */}
-            <div className="bg-white border-b border-slate-200 p-4 h-[73px] flex items-center">
-              <div className="flex items-center gap-3">
+            <div className="border-b border-slate-200 bg-slate-50/95 px-4 py-3 min-h-[96px]">
+              <div className="flex items-start gap-3">
                 <button
                   onClick={() => router.push('/')}
-                  className="flex items-center justify-center w-8 h-8 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-full transition-colors"
+                  className="flex items-center justify-center w-8 h-8 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-full transition-colors"
                   title="Back to home"
                 >
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                     <path d="M19 12H5M12 19L5 12L12 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
                   </svg>
                 </button>
-                <div>
-                  <h1 className="text-lg font-semibold text-slate-900 ">{projectName || 'Loading...'}</h1>
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <h1 className="truncate text-base font-semibold text-slate-950">{projectName || 'Loading...'}</h1>
+                    <span
+                      className={cn(
+                        'inline-flex shrink-0 items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-medium',
+                        taskVisualState.className
+                      )}
+                    >
+                      <span className={cn('h-1.5 w-1.5 rounded-full', taskVisualState.dotClassName)} />
+                      {taskVisualState.label}
+                    </span>
+                  </div>
+                  <p className="mt-1 truncate text-sm text-slate-500">
+                    {CLI_LABELS[preferredCli] || preferredCli} · {selectedModelLabel}
+                  </p>
                   {projectDescription && (
-                    <p className="text-sm text-slate-500 ">
+                    <p className="mt-1 truncate text-sm text-slate-400">
                       {projectDescription}
                     </p>
                   )}
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={openPreviewPanel}
+                      disabled={isStartingPreview}
+                      className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-slate-950 px-3 text-sm font-medium text-white shadow-sm transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <FaDesktop size={12} />
+                      {previewUrl ? '打开看板' : isStartingPreview ? '启动中' : '启动预览'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void readQuantValidationStatus()}
+                      className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
+                    >
+                      <FaSync size={11} />
+                      {quantValidationState === 'passed'
+                        ? '验证通过'
+                        : quantValidationState === 'failed'
+                        ? '查看验证'
+                        : quantValidationState === 'running'
+                        ? '验证中'
+                        : '检查验证'}
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
 
             {/* Chat log area */}
-            <div className="flex-1 min-h-0">
+            <div className="flex-1 min-h-0 bg-white">
               <ChatErrorBoundary>
                 <ChatLog
                   projectId={projectId}
@@ -2442,7 +2494,7 @@ const persistProjectPreferences = useCallback(
             </div>
 
             {/* Simple input area */}
-            <div className="p-4 rounded-bl-2xl">
+            <div className="border-t border-slate-200 bg-slate-50/95 p-3">
               <ChatInput
                 onSendMessage={(message, images) => {
                   // Pass images to runAct
@@ -2469,19 +2521,19 @@ const persistProjectPreferences = useCallback(
           </div>
 
           {/* Right: Preview/Code area */}
-          <div className="h-full flex flex-col bg-black" style={{ width: '78%' }}>
+          <div className="h-full min-w-0 flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-[0_24px_80px_-58px_rgba(15,23,42,0.45)]" style={{ width: '76%' }}>
             {/* Content area */}
             <div className="flex-1 min-h-0 flex flex-col">
               {/* Controls Bar */}
-              <div className="bg-white border-b border-slate-200 px-4 h-[73px] flex items-center justify-between">
+              <div className="bg-slate-50/95 border-b border-slate-200 px-4 h-[64px] flex items-center justify-between backdrop-blur-xl">
                 <div className="flex items-center gap-3">
                   {/* Toggle switch */}
                   <div className="flex items-center bg-slate-100 rounded-lg p-1">
                     <button
                       className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
                         showPreview
-                          ? 'bg-white text-slate-900 '
-                          : 'text-slate-600 hover:text-slate-900 '
+                          ? 'bg-white text-slate-950 shadow-sm '
+                          : 'text-slate-600 hover:text-slate-950 '
                       }`}
                       onClick={() => setShowPreview(true)}
                     >
@@ -2490,8 +2542,8 @@ const persistProjectPreferences = useCallback(
                     <button
                       className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
                         !showPreview
-                          ? 'bg-white text-slate-900 '
-                          : 'text-slate-600 hover:text-slate-900 '
+                          ? 'bg-white text-slate-950 shadow-sm '
+                          : 'text-slate-600 hover:text-slate-950 '
                       }`}
                       onClick={() => setShowPreview(false)}
                     >
@@ -2503,7 +2555,7 @@ const persistProjectPreferences = useCallback(
                   {showPreview && shouldShowPreviewFrame && (
                     <div className="flex items-center gap-3">
                       {/* Route Navigation */}
-                      <div className="h-9 flex items-center bg-slate-100 rounded-lg px-3 border border-slate-200 ">
+                      <div className="h-9 flex items-center bg-white rounded-lg px-3 border border-slate-200 ">
                         <span className="text-slate-400 mr-2">
                           <FaHome size={12} />
                         </span>
@@ -2534,7 +2586,7 @@ const persistProjectPreferences = useCallback(
                       {/* Action Buttons Group */}
                       <div className="flex items-center gap-1.5">
                         <button
-                          className="h-9 w-9 flex items-center justify-center bg-slate-100 text-slate-600 hover:text-slate-900 hover:bg-slate-200 rounded-lg transition-colors"
+                          className="h-9 w-9 flex items-center justify-center bg-white text-slate-600 hover:text-slate-950 hover:bg-slate-100 rounded-lg border border-slate-200 transition-colors"
                           onClick={() => {
                             const iframe = document.querySelector('iframe');
                             if (iframe) {
@@ -2547,12 +2599,12 @@ const persistProjectPreferences = useCallback(
                         </button>
 
                         {/* Device Mode Toggle */}
-                        <div className="h-9 flex items-center gap-1 bg-slate-100 rounded-lg px-1 border border-slate-200 ">
+                        <div className="h-9 flex items-center gap-1 bg-white rounded-lg px-1 border border-slate-200 ">
                           <button
                             aria-label="Desktop preview"
                             className={`h-7 w-7 flex items-center justify-center rounded transition-colors ${
                               deviceMode === 'desktop'
-                                ? 'text-blue-600 bg-blue-50 '
+                                ? 'text-blue-600 bg-blue-50 shadow-sm '
                                 : 'text-slate-400 hover:text-slate-600 '
                             }`}
                             onClick={() => setDeviceMode('desktop')}
@@ -2563,7 +2615,7 @@ const persistProjectPreferences = useCallback(
                             aria-label="Mobile preview"
                             className={`h-7 w-7 flex items-center justify-center rounded transition-colors ${
                               deviceMode === 'mobile'
-                                ? 'text-blue-600 bg-blue-50 '
+                                ? 'text-blue-600 bg-blue-50 shadow-sm '
                                 : 'text-slate-400 hover:text-slate-600 '
                             }`}
                             onClick={() => setDeviceMode('mobile')}
@@ -2580,7 +2632,7 @@ const persistProjectPreferences = useCallback(
                   {/* Settings Button */}
                   <button
                     onClick={() => setShowGlobalSettings(true)}
-                    className="h-9 w-9 flex items-center justify-center bg-slate-100 text-slate-600 hover:text-slate-900 hover:bg-slate-200 rounded-lg transition-colors"
+                    className="h-9 w-9 flex items-center justify-center bg-white text-slate-600 hover:text-slate-950 hover:bg-slate-100 rounded-lg border border-slate-200 transition-colors"
                     title="Settings"
                   >
                     <FaCog size={16} />
@@ -2601,7 +2653,7 @@ const persistProjectPreferences = useCallback(
                   {showPreview && shouldShowPreviewFrame && (
                     <div className="relative">
                     <button
-                      className="h-9 flex items-center gap-2 px-3 bg-black text-white rounded-lg text-sm font-medium transition-colors hover:bg-slate-900 border border-black/10 shadow-sm"
+                      className="h-9 flex items-center gap-2 px-3 bg-slate-950 text-white rounded-lg text-sm font-medium transition-colors hover:bg-slate-800 border border-black/10 shadow-sm"
                       onClick={() => setShowPublishPanel(true)}
                     >
                       <FaRocket size={14} />
@@ -2613,170 +2665,13 @@ const persistProjectPreferences = useCallback(
                         <span className="ml-2 inline-block w-2 h-2 rounded-full bg-emerald-400"></span>
                       )}
                     </button>
-                    {false && showPublishPanel && (
-                      <div className="absolute right-0 mt-2 w-80 bg-white rounded-xl shadow-xl border border-slate-200 z-50 p-5">
-                        <h3 className="text-lg font-semibold text-slate-900 mb-4">Publish Project</h3>
-
-                        {/* Deployment Status Display */}
-                        {deploymentStatus === 'deploying' && (
-                          <div className="mb-4 p-4 bg-blue-50 rounded-lg border border-blue-200 ">
-                            <div className="flex items-center gap-2 mb-2">
-                              <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-                              <p className="text-sm font-medium text-blue-700 ">Deployment in progress...</p>
-                            </div>
-                            <p className="text-xs text-blue-600 ">Building and deploying your project. This may take a few minutes.</p>
-                          </div>
-                        )}
-
-                        {deploymentStatus === 'ready' && publishedUrl && (
-                          <div className="mb-4 p-4 bg-green-50 rounded-lg border border-green-200 ">
-                            <p className="text-sm font-medium text-green-700 mb-2">Currently published at:</p>
-                            <a
-                              href={publishedUrl ?? undefined}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-sm text-green-600 font-mono hover:underline break-all"
-                            >
-                              {publishedUrl}
-                            </a>
-                          </div>
-                        )}
-
-                        {deploymentStatus === 'error' && (
-                          <div className="mb-4 p-4 bg-red-50 rounded-lg border border-red-200 ">
-                            <p className="text-sm font-medium text-red-700 mb-2">Deployment failed</p>
-                            <p className="text-xs text-red-600 ">There was an error during deployment. Please try again.</p>
-                          </div>
-                        )}
-
-                        <div className="space-y-4">
-                          {!githubConnected || !vercelConnected ? (
-                            <div className="p-4 bg-amber-50 rounded-lg border border-amber-200 ">
-                              <p className="text-sm font-medium text-slate-900 mb-3">To publish, connect the following services:</p>
-                              <div className="space-y-2">
-                                {!githubConnected && (
-                                  <div className="flex items-center gap-2 text-amber-700 ">
-                                    <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                                      <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-                                    </svg>
-                                    <span className="text-sm">GitHub repository not connected</span>
-                                  </div>
-                                )}
-                                {!vercelConnected && (
-                                  <div className="flex items-center gap-2 text-amber-700 ">
-                                    <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                                      <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-                                    </svg>
-                                    <span className="text-sm">Vercel project not connected</span>
-                                  </div>
-                                )}
-                              </div>
-                              <p className="mt-3 text-sm text-slate-600 ">
-                                Go to
-                                <button
-                                  onClick={() => {
-                                    setShowPublishPanel(false);
-                                    setShowGlobalSettings(true);
-                                  }}
-                                  className="text-indigo-600 hover:text-indigo-500 underline font-medium mx-1"
-                                >
-                                  Settings → Service Integrations
-                                </button>
-                                to connect.
-                              </p>
-                            </div>
-                          ) : null}
-
-                          <button
-                            disabled={publishLoading || deploymentStatus === 'deploying' || !githubConnected || !vercelConnected}
-                            onClick={async () => {
-                              console.log('🚀 Publish started');
-
-                              setPublishLoading(true);
-                              try {
-                                // Push to GitHub
-                                console.log('🚀 Pushing to GitHub...');
-                                const pushRes = await fetch(`${API_BASE}/api/projects/${projectId}/github/push`, { method: 'POST' });
-                                if (!pushRes.ok) {
-                                  const errorText = await pushRes.text();
-                                  console.error('🚀 GitHub push failed:', errorText);
-                                  throw new Error(errorText);
-                                }
-
-                                // Deploy to Vercel
-                                console.log('🚀 Deploying to Vercel...');
-                                const deployUrl = `${API_BASE}/api/projects/${projectId}/vercel/deploy`;
-
-                                const vercelRes = await fetch(deployUrl, {
-                                  method: 'POST'
-                                });
-                                if (!vercelRes.ok) {
-                                  const responseText = await vercelRes.text();
-                                  console.error('🚀 Vercel deploy failed:', responseText);
-                                }
-                                if (vercelRes.ok) {
-                                  const data = await vercelRes.json();
-                                  console.log('🚀 Deployment started, polling for status...');
-
-                                  // Set deploying status BEFORE ending publishLoading to prevent gap
-                                  setDeploymentStatus('deploying');
-
-                                  if (data.deployment_id) {
-                                    startDeploymentPolling(data.deployment_id);
-                                  }
-
-                                  // Only set URL if deployment is already ready
-                                  if (data.status === 'READY' && data.deployment_url) {
-                                    const url = data.deployment_url.startsWith('http') ? data.deployment_url : `https://${data.deployment_url}`;
-                                    setPublishedUrl(url);
-                                    setDeploymentStatus('ready');
-                                  }
-                                } else {
-                                  const errorText = await vercelRes.text();
-                                  console.error('🚀 Vercel deploy failed:', vercelRes.status, errorText);
-                                  // if Vercel not connected, just close
-                                  setDeploymentStatus('idle');
-                                  setPublishLoading(false); // Stop loading even on Vercel deployment failure
-                                }
-                                // Keep panel open to show deployment progress
-                              } catch (e) {
-                                console.error('🚀 Publish failed:', e);
-                                alert('Publish failed. Check Settings and tokens.');
-                                setDeploymentStatus('idle');
-                                setPublishLoading(false); // Stop loading on error
-                                // Close panel after error
-                                setTimeout(() => {
-                                  setShowPublishPanel(false);
-                                }, 1000);
-                              } finally {
-                                loadDeployStatus();
-                              }
-                            }}
-                            className={`w-full px-4 py-3 rounded-lg font-medium text-white transition-colors ${
-                              publishLoading || deploymentStatus === 'deploying' || !githubConnected || !vercelConnected
-                                ? 'bg-slate-400 cursor-not-allowed'
-                                : 'bg-indigo-600 hover:bg-indigo-700 '
-                            }`}
-                          >
-                            {publishLoading
-                              ? 'Publishing...'
-                              : deploymentStatus === 'deploying'
-                              ? 'Deploying...'
-                              : !githubConnected || !vercelConnected
-                              ? 'Connect Services First'
-                              : deploymentStatus === 'ready' && publishedUrl ? 'Update' : 'Publish'
-                            }
-                          </button>
-                        </div>
-                      </div>
-                    )}
                   </div>
                   )}
                 </div>
               </div>
 
               {/* Content Area */}
-              <div className="flex-1 relative bg-black overflow-hidden">
+              <div className="flex-1 relative bg-slate-100 overflow-hidden">
                 <AnimatePresence initial={false}>
                   {showPreview ? (
                   <MotionDiv
@@ -2784,6 +2679,7 @@ const persistProjectPreferences = useCallback(
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     exit={{ opacity: 0 }}
+                    transition={panelTransition}
                     style={{ height: '100%' }}
                   >
                 {shouldShowPreviewFrame ? (
@@ -2826,7 +2722,7 @@ const persistProjectPreferences = useCallback(
                           The preview couldn&apos;t load properly. Try clicking the refresh button to reload the page.
                         </p>
                         <button
-                          className="flex items-center gap-2 mx-auto px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
+                          className="flex items-center gap-2 mx-auto px-4 py-2 bg-slate-950 hover:bg-slate-800 text-white rounded-lg transition-colors"
                           onClick={() => {
                             const iframe = document.querySelector('iframe');
                             if (iframe) {
@@ -2848,29 +2744,9 @@ const persistProjectPreferences = useCallback(
                   </div>
                 ) : (
                   <div className="h-full w-full flex items-center justify-center bg-slate-50 relative">
-                    {/* Gradient background similar to main page */}
                     <div className="absolute inset-0">
-                      <div className="absolute inset-0 bg-white " />
-                      <div
-                        className="absolute inset-0 hidden transition-all duration-1000 ease-in-out"
-                        style={{
-                          background: `radial-gradient(circle at 50% 100%,
-                            ${activeBrandColor}66 0%,
-                            ${activeBrandColor}4D 25%,
-                            ${activeBrandColor}33 50%,
-                            transparent 70%)`
-                        }}
-                      />
-                      {/* Light mode gradient - subtle */}
-                      <div
-                        className="absolute inset-0 block transition-all duration-1000 ease-in-out"
-                        style={{
-                          background: `radial-gradient(circle at 50% 100%,
-                            ${activeBrandColor}40 0%,
-                            ${activeBrandColor}26 25%,
-                            transparent 50%)`
-                        }}
-                      />
+                      <div className="absolute inset-0 bg-white" />
+                      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_86%,rgba(37,99,235,0.10),transparent_38%),linear-gradient(180deg,rgba(248,250,252,0.96),rgba(241,245,249,0.92))]" />
                     </div>
 
                     {/* Content with z-index to be above gradient */}
@@ -2879,6 +2755,7 @@ const persistProjectPreferences = useCallback(
                       <MotionDiv
                         initial={{ opacity: 0, scale: 0.9 }}
                         animate={{ opacity: 1, scale: 1 }}
+                        transition={panelTransition}
                         className="text-center"
                       >
                         {/* QuantPilot 图标与加载状态 */}
@@ -2886,7 +2763,7 @@ const persistProjectPreferences = useCallback(
                           <div
                             className="w-full h-full"
                             style={{
-                              backgroundColor: activeBrandColor,
+                              backgroundColor: previewAccentColor,
                               mask: 'url(/Symbol_white.png) no-repeat center/contain',
                               WebkitMask: 'url(/Symbol_white.png) no-repeat center/contain',
                               opacity: 0.9
@@ -2899,9 +2776,9 @@ const persistProjectPreferences = useCallback(
                               className="w-14 h-14 border-4 rounded-full animate-spin"
                               style={{
                                 borderTopColor: 'transparent',
-                                borderRightColor: activeBrandColor,
-                                borderBottomColor: activeBrandColor,
-                                borderLeftColor: activeBrandColor,
+                                borderRightColor: previewAccentColor,
+                                borderBottomColor: previewAccentColor,
+                                borderLeftColor: previewAccentColor,
                               }}
                             />
                           </div>
@@ -2922,7 +2799,7 @@ const persistProjectPreferences = useCallback(
                             <MotionDiv
                               animate={{ opacity: [0, 1, 0] }}
                               transition={{ duration: 1.5, repeat: Infinity, delay: 0 }}
-                              className="w-1 h-1 bg-slate-600 rounded-full"
+                            className="w-1 h-1 bg-slate-600 rounded-full"
                             />
                             <MotionDiv
                               animate={{ opacity: [0, 1, 0] }}
@@ -2940,9 +2817,9 @@ const persistProjectPreferences = useCallback(
                     ) : (
                     <div className="text-center">
                       <MotionDiv
-                        initial={{ opacity: 0, y: 20 }}
+                        initial={{ opacity: 0, y: 14 }}
                         animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.6, ease: "easeOut" }}
+                        transition={panelTransition}
                       >
                         {/* QuantPilot 图标 */}
                         {hasActiveRequests ? (
@@ -2957,7 +2834,7 @@ const persistProjectPreferences = useCallback(
                           <div
                             className="w-full h-full"
                             style={{
-                              backgroundColor: activeBrandColor,
+                              backgroundColor: previewAccentColor,
                               mask: 'url(/Symbol_white.png) no-repeat center/contain',
                               WebkitMask: 'url(/Symbol_white.png) no-repeat center/contain',
                               opacity: 0.9
@@ -2971,11 +2848,11 @@ const persistProjectPreferences = useCallback(
                                 className="relative"
                                 style={{
                                   background: `linear-gradient(90deg,
-                                    #6b7280 0%,
-                                    #6b7280 30%,
-                                    #ffffff 50%,
-                                    #6b7280 70%,
-                                    #6b7280 100%)`,
+                                    #334155 0%,
+                                    #334155 30%,
+                                    #2563eb 50%,
+                                    #334155 70%,
+                                    #334155 100%)`,
                                   backgroundSize: '200% 100%',
                                   WebkitBackgroundClip: 'text',
                                   backgroundClip: 'text',
@@ -3012,7 +2889,7 @@ const persistProjectPreferences = useCallback(
                                 <div
                                   className="w-full h-full"
                                   style={{
-                                    backgroundColor: activeBrandColor,
+                                    backgroundColor: previewAccentColor,
                                     mask: 'url(/Symbol_white.png) no-repeat center/contain',
                                     WebkitMask: 'url(/Symbol_white.png) no-repeat center/contain',
                                     opacity: 0.9
@@ -3027,9 +2904,9 @@ const persistProjectPreferences = useCallback(
                                     className="w-14 h-14 border-4 rounded-full animate-spin"
                                     style={{
                                       borderTopColor: 'transparent',
-                                      borderRightColor: activeBrandColor,
-                                      borderBottomColor: activeBrandColor,
-                                      borderLeftColor: activeBrandColor,
+                                      borderRightColor: previewAccentColor,
+                                      borderBottomColor: previewAccentColor,
+                                      borderLeftColor: previewAccentColor,
                                     }}
                                   />
                                 ) : (
@@ -3046,7 +2923,7 @@ const persistProjectPreferences = useCallback(
                               </div>
                             </div>
 
-                            <h3 className="text-2xl font-bold text-slate-900 mb-3">
+                            <h3 className="text-2xl font-bold text-slate-950 mb-3">
                               {quantValidationState === 'failed' ? '看板验证未通过' : '看板待生成'}
                             </h3>
 
@@ -3058,7 +2935,7 @@ const persistProjectPreferences = useCallback(
                                 : '数据获取、页面生成和验证完成后会自动展示最终可视化结果'}
                             </p>
                             {quantValidationState === 'failed' && quantRepairPlan?.steps?.length ? (
-                              <div className="mt-5 w-full max-w-2xl rounded-lg border border-red-100 bg-red-50/70 p-4 text-left shadow-sm">
+                              <div className="mt-5 w-full max-w-2xl rounded-xl border border-red-100 bg-red-50/70 p-4 text-left shadow-sm">
                                 <div className="flex items-center justify-between gap-3">
                                   <p className="text-sm font-semibold text-red-900">自动修复计划</p>
                                   {quantRepairPlan.repairPlanPath ? (
@@ -3113,6 +2990,7 @@ const persistProjectPreferences = useCallback(
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
+                transition={panelTransition}
                 className="h-full flex bg-white "
               >
                 {/* Left Sidebar - File Explorer (VS Code style) */}

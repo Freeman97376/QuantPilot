@@ -1,7 +1,12 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { z } from 'zod';
-import { QUANT_ARTIFACT_CONTRACTS_RELATIVE_PATH } from '@/lib/quant/artifacts';
+import {
+  QUANT_ARTIFACT_CONTRACTS_RELATIVE_PATH,
+  QUANT_DASHBOARD_DATA_RELATIVE_PATH,
+  QUANT_VIEW_CONFIG_RELATIVE_PATH,
+} from '@/lib/quant/artifacts';
+import { validateQuantViewConfig } from '@/lib/quant/view-config';
 import { appendQuantWorkspaceEvent, ensureQuantWorkspace } from '@/lib/quant/workspace';
 
 export type QuantArtifactContractStatus = 'passed' | 'failed' | 'warning';
@@ -177,6 +182,7 @@ const dataQualitySchema = z.object({
 }).passthrough();
 
 const dashboardDataSchema = z.record(z.string(), z.unknown());
+const viewConfigSchema = z.record(z.string(), z.unknown());
 
 function isRecord(value: unknown): value is JsonRecord {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
@@ -235,6 +241,10 @@ function inspectDashboardData(value: unknown): string[] {
   return errors;
 }
 
+function inspectViewConfig(value: unknown, dashboardData?: unknown): string[] {
+  return validateQuantViewConfig(value, dashboardData).map((issue) => `${issue.code}: ${issue.message}`);
+}
+
 function inspectRunPlan(value: unknown) {
   const record = asRecord(value);
   const expectedArtifacts = Array.isArray(record?.expectedArtifacts) ? record.expectedArtifacts : [];
@@ -250,6 +260,7 @@ function inspectRunPlan(value: unknown) {
     'evidence/sources.json',
     'evidence/data_quality.json',
     'data_file/final/dashboard-data.json',
+    'data_file/final/view-config.json',
     'app/page.tsx',
   ].forEach((artifact) => {
     if (!expectedArtifacts.includes(artifact)) {
@@ -349,10 +360,17 @@ const CONTRACTS: ContractDefinition[] = [
   {
     id: 'dashboard_data_contract',
     label: '最终数据契约',
-    relativePath: 'data_file/final/dashboard-data.json',
+    relativePath: QUANT_DASHBOARD_DATA_RELATIVE_PATH,
     required: true,
     schema: dashboardDataSchema,
     extraValidate: inspectDashboardData,
+  },
+  {
+    id: 'view_config_contract',
+    label: '视图配置契约',
+    relativePath: QUANT_VIEW_CONFIG_RELATIVE_PATH,
+    required: true,
+    schema: viewConfigSchema,
   },
 ];
 
@@ -434,7 +452,27 @@ export async function validateQuantArtifactContracts(params: {
   const projectPath = path.resolve(params.projectPath);
   const now = new Date().toISOString();
   await ensureQuantWorkspace(projectPath);
-  const checks = await Promise.all(CONTRACTS.map((definition) => checkContract(projectPath, definition)));
+  const dashboardPayload = await readJson(projectPath, QUANT_DASHBOARD_DATA_RELATIVE_PATH);
+  const checks = await Promise.all(CONTRACTS.map(async (definition) => {
+    const check = await checkContract(projectPath, definition);
+    if (definition.id !== 'view_config_contract' || check.status === 'failed') {
+      return check;
+    }
+    const payload = await readJson(projectPath, definition.relativePath);
+    if (!payload.ok) {
+      return check;
+    }
+    const extraErrors = inspectViewConfig(payload.value, dashboardPayload.ok ? dashboardPayload.value : undefined);
+    if (extraErrors.length === 0) {
+      return check;
+    }
+    return {
+      ...check,
+      status: 'failed' as const,
+      summary: '视图配置缺少关键布局或数据绑定字段。',
+      details: extraErrors.slice(0, 16).join('\n'),
+    };
+  }));
   const requiredFailures = checks.filter((check) => check.required && check.status === 'failed');
   const warnings = checks.filter((check) => check.status === 'warning');
   const status: QuantArtifactContractStatus = requiredFailures.length ? 'failed' : warnings.length ? 'warning' : 'passed';

@@ -12,6 +12,7 @@ import {
   X,
 } from 'lucide-react';
 import { toRelativePath } from '@/lib/utils/path';
+import { panelTransition, scaleIn, subtleFade } from '@/lib/motion';
 
 type ToolAction = 'Edited' | 'Created' | 'Read' | 'Deleted' | 'Generated' | 'Searched' | 'Executed';
 
@@ -348,30 +349,29 @@ const ToolResultItem: React.FC<ToolResultItemProps> = ({
   };
 
   return (
-    <div className="mb-1.5">
+    <div className="mb-2">
       <button
         type="button"
-        className={`group flex max-w-full items-center gap-1.5 text-left text-sm leading-6 text-slate-800 ${
-          hasDetail ? 'cursor-pointer hover:text-slate-950' : 'cursor-default'
+        className={`group flex max-w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-base leading-7 text-slate-800 transition-colors ${
+          hasDetail ? 'cursor-pointer hover:bg-slate-100/80 hover:text-slate-950' : 'cursor-default'
         }`}
         onClick={openDetails}
         aria-haspopup={hasDetail ? 'dialog' : undefined}
         aria-expanded={hasDetail ? isOpen : undefined}
         disabled={!hasDetail}
       >
-        <span className="text-slate-400">•</span>
-        <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-slate-100 ring-1 ring-slate-200">
           {getToolIcon(displayToolName, action)}
         </span>
-        <span className="shrink-0 font-semibold text-slate-900">{displayToolName}</span>
+        <span className="shrink-0 font-semibold text-slate-950">{displayToolName}</span>
         {status === 'executing' && (
-          <span className="shrink-0 rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] leading-4 text-slate-600">
+          <span className="shrink-0 rounded-md bg-primary/10 px-1.5 py-0.5 font-mono text-xs leading-4 text-primary">
             executing...
           </span>
         )}
         {displayTarget && (
           <code
-            className="min-w-0 max-w-[min(42rem,70vw)] truncate rounded-md bg-slate-100 px-2 py-0.5 font-mono text-xs text-slate-700 group-hover:bg-slate-200"
+            className="min-w-0 max-w-[min(42rem,70vw)] truncate rounded-md bg-slate-100 px-2 py-0.5 font-mono text-sm text-slate-700 group-hover:bg-slate-200"
             title={displayTarget}
           >
             {displayTarget}
@@ -379,7 +379,7 @@ const ToolResultItem: React.FC<ToolResultItemProps> = ({
         )}
       </button>
       {toolSummary && (
-        <div className="ml-[3.05rem] mt-0.5 max-w-[min(46rem,76vw)] text-sm leading-6 text-slate-700">
+        <div className="ml-[3.25rem] mt-0.5 max-w-[min(46rem,76vw)] border-l border-slate-200 pl-3 text-base leading-7 text-slate-700">
           {toolSummary}
         </div>
       )}
@@ -387,24 +387,20 @@ const ToolResultItem: React.FC<ToolResultItemProps> = ({
       <AnimatePresence>
         {isOpen && hasDetail && (
           <motion.div
-            className="fixed inset-0 z-[90] flex items-center justify-center bg-black/45 p-4"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm"
+            {...subtleFade}
             onClick={closeDetails}
           >
             <motion.div
               role="dialog"
               aria-modal="true"
               aria-labelledby={dialogTitleId}
-              className="flex max-h-[82vh] w-full max-w-3xl flex-col overflow-hidden rounded-lg bg-white shadow-2xl"
-              initial={{ opacity: 0, scale: 0.96, y: 8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.96, y: 8 }}
-              transition={{ duration: 0.16, ease: 'easeOut' }}
+              className="flex max-h-[82vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl"
+              {...scaleIn}
+              transition={panelTransition}
               onClick={(event: React.MouseEvent<HTMLDivElement>) => event.stopPropagation()}
             >
-              <div className="flex h-14 shrink-0 items-center justify-between border-b border-slate-200 px-5">
+              <div className="flex h-14 shrink-0 items-center justify-between border-b border-slate-200 bg-slate-50/70 px-5">
                 <h2 id={dialogTitleId} className="text-base font-semibold text-slate-950">
                   {displayToolName}
                 </h2>
@@ -424,9 +420,9 @@ const ToolResultItem: React.FC<ToolResultItemProps> = ({
                     key={tab}
                     type="button"
                     onClick={() => setActiveTab(tab)}
-                    className={`border-b-2 px-3 py-3 text-sm transition-colors ${
+                    className={`border-b-2 px-3 py-3 text-base transition-colors ${
                       activeTab === tab
-                        ? 'border-blue-600 font-medium text-blue-700'
+                        ? 'border-primary font-medium text-primary'
                         : 'border-transparent text-slate-500 hover:text-slate-900'
                     }`}
                   >
@@ -441,13 +437,13 @@ const ToolResultItem: React.FC<ToolResultItemProps> = ({
                     <DetailBlock title="args" value={detailInput} />
                     <div>
                       <div className="mb-2 text-xs font-semibold text-indigo-700">skill</div>
-                      <div className="text-sm text-slate-900">{displayToolName}</div>
+                      <div className="text-base text-slate-900">{displayToolName}</div>
                     </div>
                   </>
                 ) : detailOutput ? (
                   <DetailBlock title="output" value={detailOutput} />
                 ) : (
-                  <div className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-500">
+                    <div className="rounded-lg bg-slate-50 px-3 py-2 text-base text-slate-500">
                     暂无输出，工具可能仍在执行中。
                   </div>
                 )}
@@ -457,7 +453,7 @@ const ToolResultItem: React.FC<ToolResultItemProps> = ({
                 <button
                   type="button"
                   onClick={closeDetails}
-                  className="rounded-lg bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-200"
+                  className="rounded-lg bg-slate-100 px-4 py-2 text-base font-medium text-slate-700 hover:bg-slate-200"
                 >
                   关闭
                 </button>

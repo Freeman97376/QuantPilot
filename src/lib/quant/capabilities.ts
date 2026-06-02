@@ -1,5 +1,6 @@
 import {
   QUANT_ARTIFACT_CONTRACTS_RELATIVE_PATH,
+  QUANT_VIEW_CONFIG_RELATIVE_PATH,
   QUANT_GENERATION_QUEUE_RELATIVE_PATH,
   QUANT_GENERATION_STATE_RELATIVE_PATH,
   QUANT_VISUAL_VALIDATION_RELATIVE_PATH,
@@ -87,6 +88,7 @@ const BASE_EXPECTED_ARTIFACTS = [
   'evidence/sources.json',
   'evidence/data_quality.json',
   'data_file/final/dashboard-data.json',
+  QUANT_VIEW_CONFIG_RELATIVE_PATH,
   'app/page.tsx',
 ];
 

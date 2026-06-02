@@ -339,10 +339,110 @@ async function writeBenchmarkImageAttachment({ projectPath, requestId, imageAtta
   });
 }
 
+async function writeBenchmarkGenerationContracts({ projectId, projectPath, requestId, testCase, status = 'completed' }) {
+  const now = new Date().toISOString();
+  const stepIds = [
+    ['request_received', '接收请求'],
+    ['planning', '生成计划'],
+    ['data_prefetch', '数据预取'],
+    ['agent_execution', 'Benchmark 产物生成'],
+    ['validation', '自动验证'],
+    ['repair', '自动修复'],
+    ['final_validation', '最终验证'],
+    ['completed', '完成'],
+  ];
+  await writeJson(path.join(projectPath, '.quantpilot/generation-state.json'), {
+    schemaVersion: 1,
+    projectId,
+    requestId,
+    status,
+    activeStep: status === 'needs_clarification' ? 'planning' : 'completed',
+    createdAt: now,
+    updatedAt: now,
+    completedAt: status === 'completed' ? now : null,
+    originalInstruction: testCase.question,
+    cliPreference: 'benchmark',
+    selectedModel: 'benchmark',
+    repairAttemptCount: 0,
+    maxRepairAttempts: 0,
+    steps: stepIds.map(([id, label]) => ({
+      id,
+      label,
+      status: status === 'needs_clarification' && !['request_received', 'planning'].includes(id) ? 'skipped' : 'success',
+      startedAt: now,
+      completedAt: status === 'needs_clarification' && !['request_received', 'planning'].includes(id) ? null : now,
+      summary: `benchmark ${label}`,
+    })),
+    error: null,
+  });
+  await writeJson(path.join(projectPath, '.quantpilot/generation-queue.json'), {
+    schemaVersion: 1,
+    projectId,
+    activeRequestId: null,
+    updatedAt: now,
+    items: [
+      {
+        id: `${projectId}:${requestId}`,
+        projectId,
+        requestId,
+        status: status === 'completed' ? 'completed' : 'queued',
+        cliPreference: 'benchmark',
+        selectedModel: 'benchmark',
+        instructionPreview: testCase.question,
+        queuedAt: now,
+        startedAt: now,
+        completedAt: status === 'completed' ? now : null,
+        errorMessage: null,
+      },
+    ],
+  });
+}
+
 function assertCondition(condition, message, failures) {
   if (!condition) {
     failures.push(message);
   }
+}
+
+function asObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
+function getViewSections(viewConfig) {
+  return Array.isArray(viewConfig?.sections) ? viewConfig.sections.map(asObject).filter(Boolean) : [];
+}
+
+function sectionText(section) {
+  return `${section?.id ?? ''} ${section?.type ?? ''} ${section?.title ?? ''} ${section?.dataKey ?? ''}`;
+}
+
+function hasSection(sections, predicate) {
+  return sections.some((section) => predicate(section, sectionText(section)));
+}
+
+function hasDataBinding(sections, pattern) {
+  return hasSection(sections, (section) => pattern.test(String(section.dataKey ?? '')));
+}
+
+function hasWidgetType(sections, types) {
+  const allowed = new Set(types);
+  return hasSection(sections, (section) => allowed.has(String(section.type)));
+}
+
+function dashboardHasUsableFinalData(finalData) {
+  if (!finalData || typeof finalData !== 'object') return false;
+  if (finalData.symbol === 'QUANTPILOT' && finalData.name === '等待生成数据') return false;
+  const quote = asObject(finalData.quote);
+  const kline = asObject(finalData.kline);
+  return Boolean(
+    finalData.symbol ||
+      finalData.name ||
+      quote?.price !== undefined ||
+      (Array.isArray(kline?.bars) && kline.bars.length > 0) ||
+      Array.isArray(finalData.assets) ||
+      finalData.portfolio ||
+      finalData.visualization
+  );
 }
 
 function formatError(error) {
@@ -352,9 +452,12 @@ function formatError(error) {
 async function inspectArtifacts({ projectPath, testCase, prefetch }) {
   const failures = [];
   const finalData = await readJson(path.join(projectPath, 'data_file/final/dashboard-data.json'));
+  const viewConfig = await readJson(path.join(projectPath, 'data_file/final/view-config.json')).catch(() => null);
   const quality = await readJson(path.join(projectPath, 'evidence/data_quality.json'));
   const sources = await readJson(path.join(projectPath, 'evidence/sources.json'));
   const page = await fs.readFile(path.join(projectPath, 'app/page.tsx'), 'utf8');
+  const sections = getViewSections(viewConfig);
+  const isConfigRenderer = /VIEW_CONFIG_FILE|data-view-config-file|view-config\.json/.test(page);
 
   if (testCase.expectedSymbol) {
     assertCondition(finalData.symbol === testCase.expectedSymbol, `symbol 应为 ${testCase.expectedSymbol}，实际为 ${finalData.symbol}`, failures);
@@ -366,23 +469,29 @@ async function inspectArtifacts({ projectPath, testCase, prefetch }) {
   assertCondition(Array.isArray(sources.sources) && sources.sources.length > 0, 'evidence/sources.json 应包含 sources。', failures);
   assertCondition(page.includes('data_file/final/dashboard-data.json'), 'app/page.tsx 应读取 final 数据文件。', failures);
   assertCondition(page.includes('/api/market'), 'app/page.tsx 应声明 /api/market 数据入口。', failures);
-  assertCondition(page.includes('<svg'), 'app/page.tsx 应包含 SVG 图表实现。', failures);
+  assertCondition(isConfigRenderer, 'app/page.tsx 应使用固定 renderer 读取 view-config.json。', failures);
+  assertCondition(sections.length > 0, 'view-config.sections 应包含至少 1 个安全组件。', failures);
+  assertCondition(sections.every((section) => typeof section.dataKey === 'string' && section.dataKey.trim()), 'view-config.sections[].dataKey 必须全部为非空字符串。', failures);
 
   const templateId = testCase.expectedTemplateId || finalData.visualization?.template_id || finalData.visualization?.templateId;
   if (!templateId || ['single-stock-diagnosis', 'technical-timing', 'fundamental-research', 'backtest-review'].includes(templateId)) {
-    assertCondition(page.includes('K 线与量价结构'), 'app/page.tsx 应包含 K 线与量价结构面板。', failures);
-    assertCondition(page.includes('candle-up') && page.includes('candle-down'), 'app/page.tsx 应实现涨跌 K 线/OHLC 结构。', failures);
-    assertCondition(page.includes('volume-chart'), 'app/page.tsx 应包含成交量副图。', failures);
-    assertCondition(page.includes('SignalPanel'), 'app/page.tsx 应包含量化信号摘要面板。', failures);
+    assertCondition(
+      hasWidgetType(sections, ['market-pulse-hero', 'trend-volume-combo', 'valuation-temperature', 'kpi-grid', 'data-table', 'line-chart', 'candlestick-chart', 'equity-drawdown-combo']),
+      'view-config 应配置行情、指标、图表或数据表安全组件。',
+      failures
+    );
+    if ((finalData.kline?.bars?.length || finalData.technicalIndicators?.points?.length || 0) > 0) {
+      assertCondition(
+        hasDataBinding(sections, /kline\.bars|technicalIndicators\.points|market\.priceSeries/),
+        'view-config 应绑定 K 线或技术指标序列。',
+        failures
+      );
+    }
   }
 
   assertCondition(
-    page.includes('data_quality') ||
-      page.includes('DataQualityPanel') ||
-      page.includes('数据质量') ||
-      page.includes('数据信源渠道') ||
-      page.includes('数据缺口'),
-    'app/page.tsx 应展示数据质量或限制信息。',
+    isConfigRenderer || page.includes('data_quality') || page.includes('数据质量') || page.includes('数据信源渠道') || page.includes('数据缺口'),
+    '页面应通过固定 renderer 或源码展示数据质量/限制信息。',
     failures
   );
 
@@ -436,21 +545,35 @@ async function inspectArtifacts({ projectPath, testCase, prefetch }) {
       'comparison.rows[] 应包含 composite_score 和 selection_view。',
       failures
     );
-    assertCondition(/selectionRanking|financialQuality|stock-selection|相对强弱|财务质量|收益对比|回撤对比/i.test(page), '选股页面应包含排名、财务质量或对比图表组件。', failures);
+    assertCondition(
+      hasDataBinding(sections, /selectionRanking\.rows|financialQuality\.rows|comparison\.rows|assets/) ||
+        hasSection(sections, (_section, text) => /排名|财务质量|对比|矩阵|收益|回撤|asset-ranking-matrix|risk-return-quadrant/i.test(text)),
+      'view-config 应包含排名、财务质量或多标的对比组件。',
+      failures
+    );
   }
 
   if (testCase.expectedFinalFields?.includes('portfolio')) {
     assertCondition(finalData.portfolio && typeof finalData.portfolio === 'object', 'portfolio 应为对象。', failures);
     assertCondition(Array.isArray(finalData.holdings) && finalData.holdings.length > 0, 'holdings[] 应非空。', failures);
     assertCondition(finalData.portfolio.concentration && typeof finalData.portfolio.concentration === 'object', 'portfolio.concentration 应存在。', failures);
-    assertCondition(/holding-analysis|持仓|仓位|集中度|调仓|相关性|流动性/.test(page), '持仓页面应包含持仓、仓位集中度、调仓或风险组件。', failures);
+    assertCondition(
+      hasDataBinding(sections, /portfolio|holdings|assets|comparison\.rows|liquidity\.rows|correlation/) ||
+        hasSection(sections, (_section, text) => /持仓|仓位|集中度|调仓|风险|流动性|相关性|portfolio-allocation|risk-panel/i.test(text)),
+      'view-config 应包含持仓、仓位集中度、调仓或风险组件。',
+      failures
+    );
   }
 
   if (testCase.expectedFinalFields?.includes('backtest')) {
     const backtest = finalData.backtest || {};
     assertCondition(Array.isArray(backtest.equity_curve) && backtest.equity_curve.length > 0, 'backtest 应包含 equity_curve。', failures);
     assertCondition(backtest.summary && typeof backtest.summary === 'object', 'backtest 应包含 summary。', failures);
-    assertCondition(page.includes('BacktestPanel'), 'app/page.tsx 应包含回测面板。', failures);
+    assertCondition(
+      hasDataBinding(sections, /backtest/) || hasWidgetType(sections, ['equity-drawdown-combo', 'drawdown-chart']),
+      'view-config 应包含回测收益回撤组件。',
+      failures
+    );
   }
 
   const rawFiles = new Set((prefetch.rawFiles || []).map((filePath) => path.basename(filePath)));
@@ -538,6 +661,13 @@ async function runClarificationCase(testCase) {
     capabilityId: testCase.capabilityId,
   });
   const prefetch = await prefetchQuantDataForRunPlan({ projectPath, plan });
+  await writeBenchmarkGenerationContracts({
+    projectId,
+    projectPath,
+    requestId,
+    testCase,
+    status: 'needs_clarification',
+  });
 
   assertCondition(plan.status === 'needs_clarification', `run_plan.status 应为 needs_clarification，实际为 ${plan.status}`, failures);
   assertCondition(plan.clarification?.required === true, 'clarification.required 应为 true。', failures);
@@ -550,8 +680,8 @@ async function runClarificationCase(testCase) {
     );
   }
 
-  const finalDataExists = await fs.stat(path.join(projectPath, 'data_file/final/dashboard-data.json')).then(() => true).catch(() => false);
-  assertCondition(!finalDataExists, 'needs_clarification 时不应生成 final dashboard-data.json。', failures);
+  const finalData = await readJson(path.join(projectPath, 'data_file/final/dashboard-data.json')).catch(() => null);
+  assertCondition(!dashboardHasUsableFinalData(finalData), 'needs_clarification 时不应生成可用 final dashboard-data.json。', failures);
   const eventAudit = await auditProjectEvents({
     projectPath,
     testCase,
@@ -627,6 +757,12 @@ async function runClarificationContinuationCase(testCase) {
       capabilityId: testCase.capabilityId,
     });
     prefetch = await prefetchQuantDataForRunPlan({ projectPath, plan });
+    await writeBenchmarkGenerationContracts({
+      projectId,
+      projectPath,
+      requestId: followupRequestId,
+      testCase,
+    });
     await ensureQuantDashboardTemplate(projectPath);
     artifactInspection = await inspectArtifacts({ projectPath, testCase, prefetch });
     validation = await validateQuantProject({
@@ -691,11 +827,11 @@ function runRuntimeRegistryCase(testCase) {
   const claudeModels = getModelDefinitionsForCli('claude');
   const runtimeConfig = getCodexRuntimeConfig();
   const configArgs = buildCodexConfigArgs();
+  const codexDefault = getDefaultModelForCli('codex');
 
-  assertCondition(codexModels.length === 1, `Codex 应只暴露 1 个模型，实际 ${codexModels.length} 个。`, failures);
-  assertCondition(codexModels[0]?.id === 'gpt-5.5', `Codex 模型应为 gpt-5.5，实际 ${codexModels[0]?.id}`, failures);
-  assertCondition(getDefaultModelForCli('codex') === 'gpt-5.5', `Codex 默认模型应为 gpt-5.5，实际 ${getDefaultModelForCli('codex')}`, failures);
-  assertCondition(normalizeModelId('codex', 'gpt-4o-mini') === 'gpt-5.5', 'Codex 非白名单模型应归一到 gpt-5.5。', failures);
+  assertCondition(codexModels.length >= 1, 'Codex 应至少暴露 1 个可用模型。', failures);
+  assertCondition(codexModels.some((model) => model.id === codexDefault), `Codex 默认模型 ${codexDefault} 应存在于模型列表。`, failures);
+  assertCondition(normalizeModelId('codex', 'gpt-4o-mini') === codexDefault, `Codex 非白名单模型应归一到默认模型 ${codexDefault}。`, failures);
   assertCondition(runtimeConfig.reasoningEffort === 'low', `Codex 默认 reasoning effort 应为 low，实际 ${runtimeConfig.reasoningEffort}`, failures);
     assertCondition(
       configArgs.some((arg) => arg === 'model_reasoning_effort="low"'),
@@ -717,7 +853,7 @@ function runRuntimeRegistryCase(testCase) {
     prefetch: { skipped: true, summary: '运行时注册表用例不创建生成项目。' },
     artifacts: {
       codexModels,
-      codexDefault: getDefaultModelForCli('codex'),
+      codexDefault,
       runtimeConfig: {
         openAIBaseUrl: runtimeConfig.openAIBaseUrl,
         reasoningEffort: runtimeConfig.reasoningEffort,
@@ -856,14 +992,55 @@ async function runSourceDegradationCase(testCase) {
       },
     },
     warnings: ['已发生数据源降级：历史 K 线使用腾讯代理，财务和公告保留缺口。'],
+    visualization: {
+      template_id: 'single-stock-diagnosis',
+      variant_id: 'source-degradation-diagnosis',
+      required_components: ['行情摘要', 'K 线趋势', '数据源降级说明', '数据质量限制'],
+      rendered_components: ['行情摘要', 'K 线趋势', '数据源降级说明', '数据质量限制'],
+    },
   };
   await writeJson(path.join(projectPath, 'data_file/final/dashboard-data.json'), finalData);
+  const now = new Date().toISOString();
   await writeJson(path.join(projectPath, '.quantpilot/run_plan.json'), {
+    schemaVersion: 1,
     runId: requestId,
     status: 'planned',
     capabilityId: testCase.capabilityId,
+    requestedCapabilityId: testCase.capabilityId,
+    executionCapabilityId: testCase.capabilityId,
     question: testCase.question,
+    symbols: ['600519'],
+    timeRange: { period: 'recent', lookbackDays: 120 },
     dataRequirements: ['/api/v1/quotes/realtime/600519', '/api/v1/quotes/history/600519', '/api/v1/fundamentals/financials/600519'],
+    analysisSteps: ['构造主信源缺口。', '写入备用信源行情。', '生成 warning 级数据质量证据。', '验证页面展示限制说明。'],
+    visualization: {
+      required: true,
+      templateId: 'single-stock-diagnosis',
+      panels: ['行情摘要', 'K 线趋势', '数据源降级说明', '数据质量限制'],
+    },
+    expectedArtifacts: [
+      '.quantpilot/run_plan.json',
+      '.quantpilot/generation-state.json',
+      '.quantpilot/generation-queue.json',
+      '.quantpilot/events.jsonl',
+      '.quantpilot/artifact-contracts.json',
+      '.quantpilot/visual-validation.json',
+      '.quantpilot/validation.json',
+      'evidence/sources.json',
+      'evidence/data_quality.json',
+      'data_file/final/dashboard-data.json',
+      'data_file/final/view-config.json',
+      'app/page.tsx',
+    ],
+    validationRules: ['数据质量为 warning 时页面必须展示限制说明。'],
+    createdAt: now,
+    updatedAt: now,
+  });
+  await writeBenchmarkGenerationContracts({
+    projectId,
+    projectPath,
+    requestId,
+    testCase,
   });
   await fs.appendFile(
     path.join(projectPath, '.quantpilot/events.jsonl'),
@@ -898,8 +1075,8 @@ async function runSourceDegradationCase(testCase) {
     runId: requestId,
     generated_by: 'benchmark',
     sources: [
-      { id: 'quote', dataset: '实时行情', source: 'eastmoney', endpoint: '/api/v1/quotes/realtime/600519', artifact_path: 'data_file/final/dashboard-data.json', row_count: 1, status: 'ok' },
-      { id: 'kline', dataset: '历史 K 线', source: 'tencent', endpoint: '/api/v1/quotes/history/600519', artifact_path: 'data_file/final/dashboard-data.json', row_count: 24, status: 'warning' },
+      { id: 'quote', dataset: '实时行情', source: 'eastmoney', endpoint: '/api/v1/quotes/realtime/600519', artifact_path: 'data_file/final/dashboard-data.json', row_count: 1, status: 'ok', fetched_at: now, as_of: now },
+      { id: 'kline', dataset: '历史 K 线', source: 'tencent', endpoint: '/api/v1/quotes/history/600519', artifact_path: 'data_file/final/dashboard-data.json', row_count: 24, status: 'warning', fetched_at: now, as_of: now },
     ],
   });
   await writeJson(path.join(projectPath, 'evidence/data_quality.json'), {
@@ -1068,6 +1245,12 @@ async function runCase(testCase) {
     hasImageAttachments: Boolean(testCase.imageAttachment),
   });
   const prefetch = await prefetchQuantDataForRunPlan({ projectPath, plan });
+  await writeBenchmarkGenerationContracts({
+    projectId,
+    projectPath,
+    requestId,
+    testCase,
+  });
   await ensureQuantDashboardTemplate(projectPath);
   const artifactInspection = await inspectArtifacts({ projectPath, testCase, prefetch });
   const validation = await validateQuantProject({

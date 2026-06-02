@@ -33,7 +33,6 @@ import type { Project as ProjectSummary } from "@/types/project";
 import { fetchCliStatusSnapshot, createCliStatusFallback } from "@/hooks/useCLI";
 import type { CLIStatus } from "@/types/cli";
 import {
-  ACTIVE_CLI_BRAND_COLORS,
   ACTIVE_CLI_MODEL_OPTIONS,
   ACTIVE_CLI_OPTIONS,
   ACTIVE_CLI_OPTIONS_MAP,
@@ -47,12 +46,12 @@ import {
   getQuantCapability,
   type QuantCapabilityId,
 } from "@/lib/quant/capabilities";
+import { gentleRise, listContainer, listItem, softTransition } from "@/lib/motion";
 
 const fetchAPI = globalThis.fetch || fetch;
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "";
 
 const ASSISTANT_OPTIONS = ACTIVE_CLI_OPTIONS.map(({ id, name }) => ({ id, name }));
-const assistantBrandColors = ACTIVE_CLI_BRAND_COLORS;
 const MODEL_OPTIONS_BY_ASSISTANT = ACTIVE_CLI_MODEL_OPTIONS;
 
 export default function HomePage() {
@@ -496,6 +495,21 @@ export default function HomePage() {
   // --- Render ---
   return (
     <div className="relative flex h-screen overflow-hidden bg-background text-foreground">
+      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+        {/* Copper radial glow */}
+        <div className="absolute -top-40 left-1/2 h-[600px] w-[600px] -translate-x-1/2 rounded-full bg-[radial-gradient(circle,rgba(37,99,235,0.08)_0%,transparent_65%)] md:h-[800px] md:w-[800px]" />
+        {/* Subtle grid pattern */}
+        <div
+          className="absolute inset-0 opacity-[0.25]"
+          style={{
+            backgroundImage:
+              "linear-gradient(rgba(100,116,139,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(100,116,139,0.06) 1px, transparent 1px)",
+            backgroundSize: "64px 64px",
+          }}
+        />
+        {/* Base warm gradient */}
+        <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.86)_0%,rgba(248,250,252,0.72)_100%)]" />
+      </div>
       <div className="relative z-10 flex h-full w-full">
         {/* Desktop sidebar */}
         <div className="hidden lg:block">
@@ -529,7 +543,7 @@ export default function HomePage() {
         {/* Main content */}
         <div className="flex min-w-0 flex-1 flex-col">
           {/* Top bar */}
-          <header className="flex h-14 shrink-0 items-center justify-between border-b bg-background/85 px-4 backdrop-blur md:px-6">
+          <header className="flex h-16 shrink-0 items-center justify-between bg-background/70 px-4 backdrop-blur-xl md:px-6">
             <div className="flex min-w-0 items-center gap-3">
               <Button
                 type="button"
@@ -541,19 +555,26 @@ export default function HomePage() {
               >
                 <Menu className="h-5 w-5" />
               </Button>
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary text-base font-bold text-primary-foreground shadow-sm">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-950 text-base font-bold text-white shadow-sm">
                 Q
               </div>
               <div className="min-w-0">
-                <h1 className="truncate text-base font-bold md:text-lg">
+                <h1 className="truncate text-lg font-bold md:text-xl">
                   QuantPilot
                 </h1>
-                <div className="mt-0.5 hidden items-center gap-2 text-xs text-muted-foreground md:flex">
-                  <span>任务 {projects.length}</span>
-                  <span>·</span>
-                  <span>运行中 {runningProjects}</span>
-                  <span>·</span>
-                  <span>{selectedModelLabel}</span>
+                <div className="mt-0.5 flex items-center gap-1.5 text-sm text-muted-foreground">
+                  <span className="inline-flex items-center gap-1">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                    {projects.length} 任务
+                  </span>
+                  {runningProjects > 0 && (
+                    <>
+                      <span className="text-border">·</span>
+                      <span>{runningProjects} 运行中</span>
+                    </>
+                  )}
+                  <span className="hidden text-border sm:inline">·</span>
+                  <span className="hidden truncate sm:inline">{selectedModelLabel}</span>
                 </div>
               </div>
             </div>
@@ -562,61 +583,81 @@ export default function HomePage() {
                 type="button"
                 onClick={() => router.push("/strategy-platform")}
                 variant="ghost"
-                className="inline-flex gap-1.5 px-2 text-xs font-medium sm:gap-2 sm:px-3 sm:text-sm"
+                className="inline-flex h-10 gap-1.5 px-2 text-base font-medium sm:gap-2 sm:px-3"
               >
-                <BarChart3 className="h-4 w-4" />
+                <BarChart3 className="h-5 w-5" />
                 策略平台
               </Button>
               <Button
                 type="button"
                 onClick={() => router.push("/ops-platform")}
                 variant="ghost"
-                className="inline-flex gap-1.5 px-2 text-xs font-medium sm:gap-2 sm:px-3 sm:text-sm"
+                className="inline-flex h-10 gap-1.5 px-2 text-base font-medium sm:gap-2 sm:px-3"
               >
-                <ShieldCheck className="h-4 w-4" />
+                <ShieldCheck className="h-5 w-5" />
                 运维平台
               </Button>
               <Button
                 type="button"
                 onClick={() => router.push("/data-platform")}
                 variant="ghost"
-                className="inline-flex gap-1.5 px-2 text-xs font-medium sm:gap-2 sm:px-3 sm:text-sm"
+                className="inline-flex h-10 gap-1.5 px-2 text-base font-medium sm:gap-2 sm:px-3"
               >
-                <Boxes className="h-4 w-4" />
+                <Boxes className="h-5 w-5" />
                 数据平台
               </Button>
             </div>
           </header>
 
           {/* Main area */}
-          <main className="relative flex flex-1 flex-col items-center overflow-y-auto px-4 py-12 md:justify-center md:py-8">
-            <div className="flex w-full max-w-4xl flex-col items-center">
-              {/* Title */}
+          <main className="relative flex flex-1 flex-col items-center overflow-y-auto px-4 py-10 md:justify-center md:py-8">
+            <div className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-border/70 to-transparent" />
+            <motion.div
+              {...gentleRise}
+              className="flex w-full max-w-4xl flex-col items-center"
+            >
+              {/* Hero */}
               <div className="mb-8 text-center">
-                <h2 className="text-3xl font-bold tracking-normal text-primary md:text-5xl">
+                <div className="mb-4 inline-flex items-center gap-1.5 rounded-full border border-primary/15 bg-primary/5 px-4 py-1.5 text-sm font-medium text-primary shadow-sm backdrop-blur">
+                  <span className="h-1.5 w-1.5 rounded-full bg-primary" />
+                  AI 量化任务工作台
+                </div>
+                <h2 className="text-4xl font-bold tracking-tight text-slate-950 md:text-5xl lg:text-6xl">
                   QuantPilot
                 </h2>
-                <p className="mt-3 text-sm text-muted-foreground md:text-base">
+                <p className="mx-auto mt-4 max-w-2xl text-lg leading-7 text-slate-500">
                   选择角色模块，描述真实需求，等待任务完成并生成可验证的量化看板
                 </p>
               </div>
 
               {/* Recent projects */}
               {projects.length > 0 && (
-                <div className="mb-5 flex flex-wrap items-center justify-center gap-2">
-                  <Clock3 className="h-3.5 w-3.5 text-slate-400" />
-                  <span className="text-xs text-slate-500">最近任务</span>
+                <motion.div
+                  variants={listContainer}
+                  initial="initial"
+                  animate="animate"
+                  className="mb-6 flex max-w-3xl flex-wrap items-center justify-center gap-2 text-sm"
+                >
+                  <div className="inline-flex items-center gap-1.5 rounded-md border border-slate-200/60 bg-white/60 px-2.5 py-1 text-slate-500 shadow-sm">
+                    <Clock3 className="h-3.5 w-3.5 text-slate-400" />
+                    <span className="text-xs font-medium">最近任务</span>
+                  </div>
                   {projects.slice(0, 4).map((p) => (
-                    <button
+                    <motion.button
                       key={p.id}
                       type="button"
+                      variants={listItem}
+                      transition={softTransition}
+                      whileHover={{ y: -1 }}
+                      whileTap={{ scale: 0.98 }}
                       onClick={() => openProject(p)}
-                      className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600 transition-colors hover:border-primary/30 hover:bg-primary/5 hover:text-primary"
+                      className="max-w-[280px] truncate rounded-md border border-slate-200/60 bg-white/60 px-2.5 py-1 text-left text-xs text-slate-600 shadow-sm transition-colors hover:border-primary/20 hover:bg-primary/5 hover:text-primary"
+                      title={p.name || p.initialPrompt || "未命名"}
                     >
-                      {p.name || p.initialPrompt?.slice(0, 20) || "未命名"}
-                    </button>
+                      {p.name || p.initialPrompt?.slice(0, 24) || "未命名"}
+                    </motion.button>
                   ))}
-                </div>
+                </motion.div>
               )}
 
               {/* Create form */}
@@ -636,7 +677,7 @@ export default function HomePage() {
                 modelOptions={availableModels}
                 selectedRole={selectedRoleModule}
               />
-            </div>
+            </motion.div>
           </main>
         </div>
 

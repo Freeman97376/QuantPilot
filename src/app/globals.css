@@ -8,28 +8,32 @@
 @layer base {
   :root {
     --radius: 0.5rem;
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    --background: 210 40% 98%;
+    --foreground: 222 47% 11%;
     --card: 0 0% 100%;
     --card-foreground: 222.2 84% 4.9%;
     --popover: 0 0% 100%;
     --popover-foreground: 222.2 84% 4.9%;
-    --primary: 0 64% 48%;
+    --primary: 217 42% 36%;
     --primary-foreground: 0 0% 98%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
+    --secondary: 214 32% 94%;
+    --secondary-foreground: 222 47% 11%;
+    --muted: 214 32% 94%;
+    --muted-foreground: 215 16% 43%;
+    --accent: 214 32% 94%;
     --accent-foreground: 222.2 47.4% 11.2%;
     --destructive: 0 84.2% 60.2%;
     --destructive-foreground: 0 0% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 0 64% 48%;
+    --border: 214 32% 88%;
+    --input: 214 32% 88%;
+    --ring: 217 42% 36%;
     /* Unified surface tokens for console pages */
-    --surface: 210 20% 98%;
-    --surface-secondary: 210 20% 96%;
+    --surface: 210 40% 98%;
+    --surface-secondary: 214 32% 94%;
+    --qp-panel: 0 0% 100%;
+    --qp-panel-muted: 214 32% 95%;
+    --qp-ink: 222 47% 11%;
+    --qp-copper: 217 42% 36%;
   }
 
   * {
@@ -48,6 +52,12 @@
     font-feature-settings: 'liga' 1, 'calt' 1;
     overscroll-behavior: none;
     -webkit-overflow-scrolling: touch;
+    background:
+      linear-gradient(180deg, hsl(210 40% 99%) 0%, hsl(214 32% 96%) 100%);
+  }
+
+  ::selection {
+    background: hsl(var(--primary) / 0.16);
   }
 
   html.theme-preload,

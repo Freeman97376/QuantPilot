@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import { ArrowUp, Image as ImageIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,6 +13,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { fadeUp, listContainer, listItem, scaleIn, softTransition, springPanelTransition } from "@/lib/motion";
+import { getRoleExperience } from "@/lib/quant/task-experience";
 import { cn } from "@/lib/utils";
 import type { QuantCapabilityId } from "@/lib/quant/capabilities";
 import type { ActiveCliId } from "@/lib/utils/cliOptions";
@@ -79,6 +82,7 @@ function CreateTaskForm({
   const [isDragOver, setIsDragOver] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const roleExperience = getRoleExperience(selectedRole.capabilityId);
 
   const handleFiles = useCallback(
     (files: FileList | File[]) => {
@@ -113,7 +117,9 @@ function CreateTaskForm({
   };
 
   return (
-    <form
+    <motion.form
+      layout
+      {...scaleIn}
       onSubmit={(e) => {
         e.preventDefault();
         onSubmit();
@@ -141,16 +147,31 @@ function CreateTaskForm({
         setIsDragOver(false);
         if (e.dataTransfer.files.length > 0) handleFiles(e.dataTransfer.files);
       }}
+      transition={springPanelTransition}
       className={cn(
-        "relative w-full max-w-4xl rounded-lg border bg-card text-card-foreground shadow-sm transition-colors",
-        isDragOver ? "border-primary bg-primary/5" : "border-border"
+        "relative w-full max-w-4xl overflow-hidden rounded-2xl border bg-white text-card-foreground shadow-[0_4px_24px_-8px_rgba(0,0,0,0.08)] transition-all duration-200 ease-out",
+        "focus-within:border-primary/30 focus-within:shadow-[0_8px_40px_-20px_hsl(var(--primary))]",
+        isDragOver ? "border-primary bg-primary/3 shadow-[0_12px_48px_-24px_hsl(var(--primary))]" : "border-slate-200"
       )}
     >
       {/* Uploaded image previews */}
-      {uploadedImages.length > 0 && (
-        <div className="flex flex-wrap gap-2 px-5 pt-4">
+      <AnimatePresence initial={false}>
+        {uploadedImages.length > 0 && (
+        <motion.div
+          layout
+          variants={listContainer}
+          initial="initial"
+          animate="animate"
+          exit="exit"
+          className="flex flex-wrap gap-2 px-5 pt-4"
+        >
           {uploadedImages.map((image, index) => (
-            <div key={image.id} className="group relative">
+            <motion.div
+              key={image.id}
+              layout
+              variants={listItem}
+              className="group relative"
+            >
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={image.url}
@@ -168,48 +189,92 @@ function CreateTaskForm({
               >
                 ×
               </button>
-            </div>
+            </motion.div>
           ))}
-        </div>
-      )}
+        </motion.div>
+        )}
+      </AnimatePresence>
 
-      <Textarea
-        value={prompt}
-        onChange={(e) => onPromptChange(e.target.value)}
-        placeholder={selectedRole.inputPlaceholder}
-        disabled={isCreating}
-        className="min-h-[128px] resize-none border-0 px-5 py-4 text-[16px] leading-6 shadow-none focus-visible:ring-0"
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            onSubmit();
-          }
-        }}
-      />
+      <motion.div layout transition={softTransition}>
+        <div className="border-b bg-gradient-to-r from-white to-slate-50/70 px-6 py-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="secondary" className="rounded-md border-primary/10 bg-primary/8 px-3 py-1.5 text-sm text-primary">
+              {selectedRole.name}
+            </Badge>
+            <span className="text-sm text-muted-foreground">
+              {roleExperience.inputHint}
+            </span>
+          </div>
+          <p className="mt-1.5 text-sm leading-6 text-muted-foreground">
+            <span className="font-medium text-foreground/70">将生成：</span>
+            {roleExperience.outputHint}
+          </p>
+        </div>
+        <Textarea
+          value={prompt}
+          onChange={(e) => onPromptChange(e.target.value)}
+          placeholder={selectedRole.inputPlaceholder}
+          disabled={isCreating}
+          className="min-h-[150px] resize-none border-0 bg-transparent px-6 py-5 text-[18px] leading-8 shadow-none transition-[min-height] duration-200 placeholder:text-muted-foreground/72 focus-visible:ring-0 md:focus:min-h-[176px]"
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              onSubmit();
+            }
+          }}
+        />
+      </motion.div>
 
       {/* Drag overlay */}
-      {isDragOver && (
-        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-lg border-2 border-dashed border-primary bg-primary/10">
+      <AnimatePresence>
+        {isDragOver && (
+        <motion.div
+          {...fadeUp}
+          className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-lg border-2 border-dashed border-primary bg-primary/10"
+        >
           <div className="text-center text-primary">
             <ImageIcon className="mx-auto mb-2 h-6 w-6" />
             <p className="text-sm font-semibold">将图片拖到这里</p>
             <p className="mt-1 text-xs">支持 JPG、PNG、GIF、WEBP</p>
           </div>
-        </div>
-      )}
+        </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Toolbar */}
-      <div className="flex flex-wrap items-center gap-2 border-t px-3 py-3">
+      <div className="border-t border-slate-200 bg-white px-4 py-4">
+        <motion.div
+          layout
+          variants={listContainer}
+          initial="initial"
+          animate="animate"
+          className="mb-4 flex flex-wrap gap-2"
+        >
+          {roleExperience.templates.map((template) => (
+            <motion.button
+              key={template.title}
+              type="button"
+              variants={listItem}
+              onClick={() => onPromptChange(template.prompt)}
+              disabled={isCreating}
+              className="rounded-full border border-slate-200 bg-slate-50/80 px-3.5 py-1.5 text-sm font-medium text-slate-600 shadow-sm transition-all hover:border-primary/25 hover:bg-primary/5 hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {template.title}
+            </motion.button>
+          ))}
+        </motion.div>
+
+        <div className="flex flex-wrap items-center gap-2">
         <Button
           type="button"
           variant="ghost"
           size="icon"
-          className="relative h-9 w-9"
+          className="relative h-10 w-10"
           aria-label="上传图片"
           asChild
         >
           <label>
-            <ImageIcon className="h-4 w-4" />
+            <ImageIcon className="h-5 w-5" />
             <input
               ref={fileInputRef}
               type="file"
@@ -223,7 +288,7 @@ function CreateTaskForm({
         </Button>
 
         <Select value={selectedAssistant} onValueChange={onAssistantChange}>
-          <SelectTrigger className="w-[150px]">
+            <SelectTrigger className="h-11 w-[170px] rounded-xl border-slate-200 bg-white text-base">
             <SelectValue placeholder="选择助手" />
           </SelectTrigger>
           <SelectContent>
@@ -239,13 +304,9 @@ function CreateTaskForm({
           </SelectContent>
         </Select>
 
-        <Badge variant="secondary" className="h-9 rounded-md px-3 text-sm text-primary">
-          {selectedRole.name}
-        </Badge>
-
         {modelOptions.length > 0 && (
           <Select value={selectedModel} onValueChange={onModelChange}>
-            <SelectTrigger className="w-[170px]">
+            <SelectTrigger className="h-11 w-[190px] rounded-xl border-slate-200 bg-white text-base">
               <SelectValue placeholder="选择模型" />
             </SelectTrigger>
             <SelectContent>
@@ -258,11 +319,12 @@ function CreateTaskForm({
           </Select>
         )}
 
-        <Button
+        <motion.div whileTap={{ scale: 0.96 }} transition={softTransition}>
+          <Button
           type="submit"
           disabled={(!prompt.trim() && uploadedImages.length === 0) || isCreating}
           size="icon"
-          className="ml-auto h-9 w-9"
+          className="h-11 w-11 rounded-xl bg-primary text-primary-foreground shadow-sm hover:bg-primary/90"
           aria-label="提交任务"
         >
           {isCreating ? (
@@ -289,9 +351,11 @@ function CreateTaskForm({
           ) : (
             <ArrowUp className="h-5 w-5" />
           )}
-        </Button>
+          </Button>
+        </motion.div>
+        </div>
       </div>
-    </form>
+    </motion.form>
   );
 }
 

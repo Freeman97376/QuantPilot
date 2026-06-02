@@ -2,18 +2,32 @@
 
 import { useRouter } from "next/navigation";
 import {
+  Activity,
   BarChart3,
   Boxes,
+  FileText,
   Gauge,
+  History,
   Menu,
   PackageCheck,
+  Search,
   Settings,
   ShieldCheck,
+  TrendingUp,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { QuantCapabilityId } from "@/lib/quant/capabilities";
+
+const ROLE_ICONS: Record<string, React.ReactNode> = {
+  "holding-analysis": <BarChart3 className="h-[18px] w-[18px]" />,
+  "stock-selection": <Search className="h-[18px] w-[18px]" />,
+  "single-stock-diagnosis": <Activity className="h-[18px] w-[18px]" />,
+  "timing-analysis": <TrendingUp className="h-[18px] w-[18px]" />,
+  "fundamental-research": <FileText className="h-[18px] w-[18px]" />,
+  "strategy-backtest": <History className="h-[18px] w-[18px]" />,
+};
 
 const ROLE_MODULES: Array<{
   id: string;
@@ -95,19 +109,19 @@ function Sidebar({
   return (
     <aside
       className={cn(
-        "flex h-full flex-col border-r bg-background/95",
-        isMobile ? "w-[286px]" : "w-[260px]"
+        "flex h-full flex-col bg-background/70 backdrop-blur",
+        isMobile ? "w-[296px]" : "w-[268px]"
       )}
     >
-      <div className="flex h-14 items-center justify-between border-b px-4">
+      <div className="flex h-14 items-center justify-between px-5">
         <button
           type="button"
           onClick={onOpenTaskDrawer}
-          className="flex items-center gap-2 text-foreground hover:text-primary"
+          className="flex items-center gap-2.5 text-foreground hover:text-primary"
           title="打开任务记录"
         >
-          <Menu className="h-4 w-4" />
-          <span className="text-sm font-semibold">任务记录</span>
+          <Menu className="h-5 w-5" />
+          <span className="text-base font-semibold">任务记录</span>
         </button>
         {isMobile && (
           <Button
@@ -123,14 +137,14 @@ function Sidebar({
         )}
       </div>
 
-      <div className="flex-1 overflow-y-auto px-3 py-4">
+      <div className="flex-1 overflow-y-auto px-4 py-4">
         <div className="mb-2 px-2">
-          <span className="text-xs font-semibold tracking-wide text-muted-foreground">
+          <span className="text-sm font-semibold tracking-wide text-muted-foreground">
             角色模块
           </span>
         </div>
 
-        <div className="space-y-1.5">
+        <div className="space-y-1">
           {ROLE_MODULES.map((role) => {
             const active = selectedCapability === role.capabilityId;
             return (
@@ -142,26 +156,43 @@ function Sidebar({
                   onCloseMobile?.();
                 }}
                 className={cn(
-                  "w-full rounded-md border px-3 py-3 text-left transition-colors",
+                  "relative w-full rounded-lg px-4 py-3 text-left transition-all",
                   active
-                    ? "border-primary/20 bg-primary/10 text-primary"
-                    : "border-transparent text-foreground hover:border-border hover:bg-muted/60"
+                    ? "bg-primary/8 text-primary shadow-sm"
+                    : "text-foreground hover:bg-muted/55 hover:shadow-sm"
                 )}
                 title={role.description}
                 aria-pressed={active}
               >
                 <span
                   className={cn(
-                    "text-sm font-semibold",
-                    active ? "text-primary" : "text-foreground"
+                    "absolute left-1 top-3 bottom-3 w-1 rounded-full transition-colors",
+                    active ? "bg-primary" : "bg-transparent"
                   )}
-                >
-                  {role.name}
+                  aria-hidden="true"
+                />
+                <span className="flex items-center gap-2.5">
+                  <span
+                    className={cn(
+                      "flex shrink-0 items-center justify-center",
+                      active ? "text-primary" : "text-muted-foreground"
+                    )}
+                  >
+                    {ROLE_ICONS[role.id]}
+                  </span>
+                  <span
+                    className={cn(
+                      "block truncate text-base font-semibold",
+                      active ? "text-primary" : "text-foreground"
+                    )}
+                  >
+                    {role.name}
+                  </span>
                 </span>
                 <p
                   className={cn(
-                    "mt-1 text-xs leading-5",
-                    active ? "text-primary/80" : "text-muted-foreground"
+                    "mt-1.5 line-clamp-2 text-sm leading-5",
+                    active ? "text-primary/75" : "text-muted-foreground"
                   )}
                 >
                   {role.description}
@@ -173,12 +204,12 @@ function Sidebar({
       </div>
 
       {/* Platform navigation */}
-      <div className="border-t p-3">
+      <div className="px-4 py-3">
         <Button
           type="button"
           onClick={() => router.push("/eval-platform")}
           variant="ghost"
-          className="mb-0.5 w-full justify-start"
+          className="mb-0.5 h-10 w-full justify-start gap-2.5 text-sm"
         >
           <Gauge className="h-4 w-4" />
           评测平台
@@ -187,7 +218,7 @@ function Sidebar({
           type="button"
           onClick={() => router.push("/skills")}
           variant="ghost"
-          className="mb-0.5 w-full justify-start"
+          className="mb-0.5 h-10 w-full justify-start gap-2.5 text-sm"
         >
           <PackageCheck className="h-4 w-4" />
           Skills 管理
@@ -196,7 +227,7 @@ function Sidebar({
           type="button"
           onClick={onShowSettings}
           variant="ghost"
-          className="w-full justify-start"
+          className="h-10 w-full justify-start gap-2.5 text-sm"
         >
           <Settings className="h-4 w-4" />
           设置

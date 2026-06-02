@@ -150,14 +150,18 @@ async function validateViewport(params: {
       const charts = Array.from(document.querySelectorAll('svg, canvas')).map((element) => {
         const rect = element.getBoundingClientRect();
         const visible = rect.width > 4 && rect.height > 4 && window.getComputedStyle(element).display !== 'none';
-        const text = element.closest('section,article,div')?.textContent || '';
+        const text = [
+          element.getAttribute('aria-label') || '',
+          element.closest('article,section')?.textContent || '',
+          element.closest('div')?.textContent || '',
+        ].join(' ');
         return {
           visible,
           width: rect.width,
           height: rect.height,
           top: rect.top,
           area: rect.width * rect.height,
-          hasMarketContext: /K\s*线|K线|成交量|均线|MA5|MA10|MA20|收益|回撤|波动|对比|矩阵|强弱|排名/i.test(text),
+          hasMarketContext: /K\s*线|K线|成交量|均线|MA5|MA10|MA20|收益|回撤|波动|对比|矩阵|强弱|排名|估值|温度|财务|质量|诊断|风险|色带|ROE|毛利率|净利率|胜率|夏普/i.test(text),
         };
       });
       const largeCharts = charts.filter((chart) => chart.visible && chart.width >= 280 && chart.height >= 140 && chart.hasMarketContext);
@@ -221,7 +225,7 @@ async function validateViewport(params: {
         firstViewportTextLength: firstViewportText.length,
         firstViewportGraphicCount,
         firstViewportTableCount,
-        firstViewportHasMarketLanguage: /最新价|实时|价格|price|K\s*线|成交量|均线|财务|回撤|波动|净值|持仓|收益|风险/i.test(firstViewportText),
+        firstViewportHasMarketLanguage: /最新价|实时|价格|price|K\s*线|成交量|均线|财务|质量|估值|回撤|波动|净值|持仓|收益|风险|诊断/i.test(firstViewportText),
         firstViewportHasCoreVisual: largeCharts.some((chart) => chart.top < viewportHeight) || firstViewportTableCount > 0,
         largeChartCount: largeCharts.length,
         firstViewportLargeChartCount: largeCharts.filter((chart) => chart.top < viewportHeight).length,
@@ -230,7 +234,7 @@ async function validateViewport(params: {
         oversizedHeroLike: oversizedHeading && firstViewportGraphicCount === 0 && firstViewportTableCount === 0,
         horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 2,
         blankLike: bodyText.trim().length < 80 && rects.length < 8,
-        hasMarketLanguage: /最新价|实时|价格|price|K\s*线|成交量|均线|财务|回撤|波动|净值|持仓|收益|风险/i.test(bodyText),
+        hasMarketLanguage: /最新价|实时|价格|price|K\s*线|成交量|均线|财务|质量|估值|回撤|波动|净值|持仓|收益|风险|诊断/i.test(bodyText),
         hasDataSourceLanguage: /dashboard-data\.json|数据来源|数据信源|信源渠道|source|fetched_at|as_of|更新时间/i.test(bodyText),
       };
     });
@@ -259,7 +263,7 @@ async function validateViewport(params: {
     if (metrics.largeChartCount === 0 && metrics.firstViewportTableCount === 0) {
       failures.push('页面没有检测到足够尺寸的金融主图或数据矩阵。');
     }
-    if (metrics.tinyChartCount >= 3 && metrics.largeChartCount === 0) {
+    if (metrics.tinyChartCount >= 3 && metrics.largeChartCount === 0 && metrics.firstViewportTableCount === 0) {
       failures.push('页面主要由迷你图组成，缺少带坐标/刻度/上下文的主图。');
     }
     if (metrics.squashedMetricCount > 0) {

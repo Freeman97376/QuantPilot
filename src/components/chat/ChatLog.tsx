@@ -3,6 +3,7 @@ import React, { useEffect, useState, useRef, ReactElement, useCallback, useMemo 
 import { motion, AnimatePresence } from 'framer-motion';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import ToolResultItem from './ToolResultItem';
+import { fadeUp, listItem, smoothEase, subtleFade } from '@/lib/motion';
 import type { ChatMessage, RealtimeEvent, RealtimeStatus } from '@/types';
 import { toChatMessage, normalizeChatContent } from '@/lib/serializers/client/chat';
 import { toRelativePath } from '@/lib/utils/path';
@@ -3365,9 +3366,9 @@ const ToolResultMessage = ({
       )}
 
       {/* Display messages and logs together */}
-      <div className="flex-1 overflow-y-auto px-8 py-3 space-y-2 custom-scrollbar ">
+      <div className="flex-1 overflow-y-auto px-8 py-4 space-y-3 custom-scrollbar ">
         {isLoading && !hasLoadedOnce && !hasError && (
-          <div className="flex items-center justify-center h-32 text-slate-400 text-sm">
+          <div className="flex items-center justify-center h-32 text-slate-400 text-base">
             <div className="flex flex-col items-center">
               <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-slate-900 mb-2 mx-auto"></div>
               <p>Loading chat history...</p>
@@ -3376,7 +3377,7 @@ const ToolResultMessage = ({
         )}
         
         {!isLoading && messages.length === 0 && logs.length === 0 && (
-          <div className="flex items-center justify-center h-32 text-slate-400 text-sm">
+          <div className="flex items-center justify-center h-32 text-slate-400 text-base">
             <div className="text-center">
               <div className="text-2xl mb-2">💬</div>
               <p>Start a conversation with your agent</p>
@@ -3389,7 +3390,7 @@ const ToolResultMessage = ({
           <div className="mb-4 flex justify-center">
             <button
               onClick={loadOlderMessages}
-              className="px-4 py-2 text-sm text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors"
+              className="px-4 py-2 text-base text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors"
               disabled={isLoading}
             >
               {isLoading ? 'Loading...' : `Load older messages (${totalMessageCount - messages.length} remaining)`}
@@ -3398,6 +3399,7 @@ const ToolResultMessage = ({
         )}
 
         {/* Render chat messages */}
+        <AnimatePresence initial={false}>
         {displayMessages.filter(shouldDisplayMessage).map((message, index) => {
           const messageMetadata = message.metadata as Record<string, unknown> | null;
           const messageText = normalizeChatContent(message.content);
@@ -3414,12 +3416,22 @@ const ToolResultMessage = ({
               : undefined;
 
           return (
-            <div className="mb-4" key={reactKey}>
+            <motion.div
+              layout="position"
+              {...listItem}
+              className="mb-4"
+              key={reactKey}
+            >
                 {message.role === 'user' ? (
                   // User message - boxed on the right
                   <div className="flex justify-end">
-                    <div className="max-w-[80%] bg-slate-100 rounded-lg px-4 py-3">
-                      <div className="text-sm text-slate-900 break-words">
+                    <motion.div
+                      layout
+                      whileHover={{ y: -1 }}
+                      transition={{ duration: 0.16, ease: smoothEase }}
+                      className="max-w-[80%] bg-slate-100 rounded-lg px-4 py-3"
+                    >
+                      <div className="text-base leading-7 text-slate-900 break-words">
                         {(() => {
                           const cleanedMessage = cleanUserMessage(messageText);
                           
@@ -3565,7 +3577,7 @@ const ToolResultMessage = ({
                           );
                         })()}
                       </div>
-                    </div>
+                    </motion.div>
                   </div>
                 ) : (
                   // Agent message - full width, no box
@@ -3587,41 +3599,48 @@ const ToolResultMessage = ({
                       />
                     ) : (
                       // Regular agent message - plain text
-                      <div className="text-sm text-slate-900 leading-relaxed">
+                      <div className="text-base text-slate-900 leading-7">
                         {renderContentWithThinking(shortenPath(messageText))}
                       </div>
                     )}
                   </div>
                 )}
-            </div>
+            </motion.div>
           );
         })}
+        </AnimatePresence>
         
         {/* Render filtered agent logs as plain text */}
+        <AnimatePresence initial={false}>
         {logs.filter(log => {
           // Hide internal tool results and system logs
           const hideTypes = ['tool_result', 'tool_start', 'system'];
           return !hideTypes.includes(log.type);
         }).map((log, index) => (
-          <div
+          <motion.div
             key={log.id ?? `log-${index}`}
+            layout="position"
+            {...fadeUp}
             className="mb-4 w-full cursor-pointer"
             onClick={() => openDetailModal(log)}
           >
-            <div className="text-sm text-slate-900 leading-relaxed">
+            <div className="text-base text-slate-900 leading-7">
               {renderLogEntry(log)}
             </div>
-          </div>
+          </motion.div>
         ))}
+        </AnimatePresence>
         
         {/* Loading indicator for waiting response */}
+        <AnimatePresence>
         {isWaitingForResponse && (
-          <div className="mb-4 w-full">
+          <motion.div {...subtleFade} className="mb-4 w-full">
             <div className="text-xl text-slate-900 leading-relaxed font-bold">
               <span className="animate-pulse">...</span>
             </div>
-          </div>
+          </motion.div>
         )}
+        </AnimatePresence>
         
         <div ref={logsEndRef} />
       </div>

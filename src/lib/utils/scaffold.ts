@@ -1,5 +1,10 @@
 import fs from 'fs/promises';
 import path from 'path';
+import {
+  QUANT_DASHBOARD_DATA_RELATIVE_PATH,
+  QUANT_VIEW_CONFIG_RELATIVE_PATH,
+} from '@/lib/quant/artifacts';
+import { buildDefaultViewConfig, validateQuantViewConfig } from '@/lib/quant/view-config';
 
 function shouldRefreshScaffoldFile(filePath: string, existing: string): boolean {
   const normalizedPath = filePath.replaceAll(path.sep, '/');
@@ -372,10 +377,1231 @@ async function readJsonRecord(filePath: string): Promise<Record<string, unknown>
   }
 }
 
+async function writeJsonIfMissing(filePath: string, value: unknown) {
+  if (await fileExists(filePath)) {
+    return;
+  }
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
+async function writeDefaultViewConfigIfMissingOrInvalid(filePath: string, dashboardData: unknown) {
+  const nextConfig = buildDefaultViewConfig(dashboardData ?? {});
+  const existing = await readJsonRecord(filePath);
+  if (existing) {
+    const issues = validateQuantViewConfig(existing, dashboardData);
+    if (issues.length === 0) {
+      return;
+    }
+  }
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, `${JSON.stringify(nextConfig, null, 2)}\n`, 'utf8');
+}
+
 function readRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function quantConfigRendererPageTemplate() {
+  return `import fs from 'fs/promises';
+import path from 'path';
+
+type JsonRecord = Record<string, unknown>;
+
+const DATA_FILE = 'data_file/final/dashboard-data.json';
+const VIEW_CONFIG_FILE = 'data_file/final/view-config.json';
+const ALLOWED_WIDGETS = new Set(['kpi-grid','line-chart','bar-chart','area-chart','candlestick-chart','data-table','signal-table','markdown-analysis','risk-panel','drawdown-chart','correlation-heatmap','portfolio-allocation','alert-list','market-pulse-hero','trend-volume-combo','decision-brief','risk-ribbon','valuation-temperature','financial-quality-matrix','backtest-diagnostics','asset-ranking-matrix','risk-return-quadrant','equity-drawdown-combo','signal-timeline']);
+const ALLOWED_SPANS = new Set([3, 4, 6, 8, 9, 12]);
+const ALLOWED_HEIGHTS = new Set(['small', 'medium', 'large', 'xlarge']);
+
+function asRecord(value: unknown): JsonRecord | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonRecord : null;
+}
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function numeric(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function text(value: unknown, fallback = '-'): string {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value === 'string') return value.trim() || fallback;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return fallback;
+}
+
+function formatNumber(value: unknown, digits = 2): string {
+  const number = numeric(value);
+  if (number === null) return text(value);
+  return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: digits }).format(number);
+}
+
+function formatPercent(value: unknown): string {
+  const number = numeric(value);
+  if (number === null) return text(value);
+  return (number > 0 ? '+' : '') + number.toFixed(2) + '%';
+}
+
+function formatMoney(value: unknown): string {
+  const number = numeric(value);
+  if (number === null) return text(value);
+  if (Math.abs(number) >= 100000000) return formatNumber(number / 100000000, 2) + ' 亿';
+  if (Math.abs(number) >= 10000) return formatNumber(number / 10000, 2) + ' 万';
+  return formatNumber(number);
+}
+
+function getByPath(root: unknown, dataKey: string): unknown {
+  return dataKey.split('.').filter(Boolean).reduce<unknown>((current, part) => {
+    if (current === undefined || current === null) return undefined;
+    if (Array.isArray(current) && /^\\d+$/.test(part)) return current[Number(part)];
+    const record = asRecord(current);
+    return record ? record[part] : undefined;
+  }, root);
+}
+
+async function readJson(relativePath: string): Promise<unknown> {
+  const content = await fs.readFile(path.join(process.cwd(), relativePath), 'utf8');
+  return JSON.parse(content);
+}
+
+function inferRows(value: unknown): JsonRecord[] {
+  if (Array.isArray(value)) return value.map(asRecord).filter((item): item is JsonRecord => Boolean(item));
+  const record = asRecord(value);
+  if (!record) return [];
+  for (const key of ['rows', 'items', 'data', 'signals', 'metrics', 'bars', 'trades', 'holdings', 'assets']) {
+    const rows = asArray(record[key]).map(asRecord).filter((item): item is JsonRecord => Boolean(item));
+    if (rows.length) return rows;
+  }
+  return [record];
+}
+
+function labelForKey(key: string): string {
+  const labels: Record<string, string> = {
+    symbol: '代码',
+    code: '代码',
+    name: '名称',
+    date: '日期',
+    time: '时间',
+    price: '最新价',
+    latest: '最新值',
+    close: '收盘价',
+    latest_close: '最新收盘',
+    open: '开盘价',
+    high: '最高价',
+    low: '最低价',
+    previous_close: '昨收',
+    change_percent: '涨跌幅',
+    change_amount: '涨跌额',
+    volume: '成交量',
+    amount: '成交额',
+    turnover: '换手率',
+    amplitude: '振幅',
+    market_cap: '总市值',
+    float_market_cap: '流通市值',
+    ma5: 'MA5',
+    ma10: 'MA10',
+    ma20: 'MA20',
+    ma30: 'MA30',
+    ma60: 'MA60',
+    return_pct: '日收益',
+    return_20d_pct: '20日收益',
+    return_60d_pct: '60日收益',
+    return_120d_pct: '120日收益',
+    period_return_pct: '区间收益',
+    max_drawdown_pct: '最大回撤',
+    drawdown_pct: '回撤',
+    volatility_20d_annualized_pct: '20日年化波动',
+    trend_state: '趋势状态',
+    volume_note: '量能说明',
+    sample_window: '样本区间',
+    source: '信源',
+    as_of: '截至',
+    quote_time: '行情时间',
+    fetched_at: '抓取时间',
+  };
+  return labels[key] ?? key.replace(/_/g, ' ');
+}
+
+function isPercentKey(key: string): boolean {
+  return /(^|_)(pct|percent)$|pct_|return|drawdown|volatility|turnover|amplitude|change_percent/.test(key);
+}
+
+function inferUnit(key: string, value: unknown): string {
+  if (isPercentKey(key)) return '%';
+  if (/amount|market_cap|price|close|open|high|low|ma\d+|value/.test(key) && numeric(value) !== null) return '';
+  return '';
+}
+
+function metricRowsFromRecord(record: JsonRecord): JsonRecord[] {
+  const preferred = [
+    'price',
+    'latest',
+    'latest_close',
+    'change_percent',
+    'change_amount',
+    'period_return_pct',
+    'return_20d_pct',
+    'return_60d_pct',
+    'return_120d_pct',
+    'max_drawdown_pct',
+    'volatility_20d_annualized_pct',
+    'ma5',
+    'ma10',
+    'ma20',
+    'turnover',
+    'amplitude',
+    'volume',
+    'amount',
+    'market_cap',
+    'trend_state',
+    'volume_note',
+    'sample_window',
+  ];
+  const keys = preferred.filter((key) => record[key] !== undefined);
+  const fallbackKeys = Object.keys(record)
+    .filter((key) => !keys.includes(key))
+    .filter((key) => {
+      const value = record[key];
+      return numeric(value) !== null || typeof value === 'string';
+    })
+    .slice(0, Math.max(0, 10 - keys.length));
+  return [...keys, ...fallbackKeys].slice(0, 12).map((key) => ({
+    key,
+    label: labelForKey(key),
+    value: record[key],
+    unit: inferUnit(key, record[key]),
+  }));
+}
+
+function formatCell(value: unknown): string {
+  if (numeric(value) !== null) return formatNumber(value);
+  if (Array.isArray(value)) return value.length + ' 项';
+  if (asRecord(value)) return '对象';
+  return text(value);
+}
+
+function formatSmartValue(value: unknown, unit?: unknown): string {
+  const suffix = text(unit, '');
+  if (/^%|percent|pct$/i.test(suffix)) return formatPercent(value);
+  if (/cny|rmb|amount|money|元|亿元|万元/i.test(suffix)) return formatMoney(value);
+  return formatCell(value);
+}
+
+function formatAxisDate(value: unknown): string {
+  const raw = text(value, '');
+  const match = raw.match(/(\\d{4})[-/](\\d{1,2})[-/](\\d{1,2})/);
+  if (match) return match[2].padStart(2, '0') + '/' + match[3].padStart(2, '0');
+  return raw.length > 10 ? raw.slice(0, 10) : raw;
+}
+
+function firstNumeric(row: JsonRecord, keys: string[]): number | null {
+  for (const key of keys) {
+    const value = numeric(row[key]);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+function firstText(row: JsonRecord, keys: string[], fallback = '-'): string {
+  for (const key of keys) {
+    const value = text(row[key], '');
+    if (value) return value;
+  }
+  return fallback;
+}
+
+function toneClass(value: unknown): string {
+  const number = numeric(value);
+  if (number === null) return 'tone-neutral';
+  if (number > 0) return 'tone-up';
+  if (number < 0) return 'tone-down';
+  return 'tone-neutral';
+}
+
+function normalizePercentValue(value: unknown): number | null {
+  const number = numeric(value);
+  if (number === null) return null;
+  return Math.abs(number) <= 1 ? number * 100 : number;
+}
+
+function scaledPoint(value: number, min: number, max: number, start: number, end: number): number {
+  const range = Math.max(max - min, 0.000001);
+  return start + ((value - min) / range) * (end - start);
+}
+
+function metricBarWidth(value: unknown, index: number): number {
+  const number = numeric(value);
+  if (number === null) return 34 + (index % 4) * 13;
+  return Math.max(18, Math.min(96, Math.abs(number) % 100));
+}
+
+function KpiGrid({ value }: { value: unknown }) {
+  const record = asRecord(value);
+  const rows = (record ? metricRowsFromRecord(record) : inferRows(value)).slice(0, 12);
+  if (!rows.length) return <EmptyState label="暂无指标数据" />;
+  return (
+    <div className="qp-kpi-grid">
+      {rows.map((item, index) => {
+        const displayValue = text(item.displayValue, '') || formatSmartValue(item.value ?? item.latest ?? item.price ?? item.close ?? item.amount ?? item.score, item.unit);
+        const isNarrative = displayValue.length > 18 && numeric(displayValue) === null;
+        return (
+          <div className={isNarrative ? 'qp-kpi is-text' : 'qp-kpi'} key={text(item.key ?? item.label ?? item.name, String(index))}>
+            <span>{text(item.label ?? item.name ?? item.key, '指标')}</span>
+            <strong>{displayValue}</strong>
+            <svg className="qp-kpi-meter" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true">
+              <rect x="0" y="1" width="100" height="6" rx="3" className="kpi-meter-bg" />
+              <rect x="0" y="1" width={metricBarWidth(item.value ?? item.latest ?? item.price ?? item.close ?? item.amount ?? item.score, index)} height="6" rx="3" className={toneClass(item.value ?? item.latest ?? item.price ?? item.close ?? item.amount ?? item.score)} />
+            </svg>
+            <em>{text(item.note ?? item.description ?? item.unit, '')}</em>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function MarketPulseHero({ value }: { value: unknown }) {
+  const record = asRecord(value) ?? inferRows(value)[0] ?? {};
+  const change = firstNumeric(record, ['change_percent', 'changePct', 'pct_chg', 'return', 'period_return']);
+  const metrics = inferRows(record.metrics ?? record.items ?? record.kpis).slice(0, 4);
+  const fallbackMetrics: JsonRecord[] = [
+    { label: '成交额', value: record.amount, unit: 'money' },
+    { label: '成交量', value: record.volume },
+    { label: '换手率', value: record.turnover, unit: '%' },
+    { label: '振幅', value: record.amplitude, unit: '%' },
+    { label: '总市值', value: record.market_cap, unit: 'money' },
+    { label: '行情时间', value: record.quote_time ?? record.as_of },
+  ].filter((item) => item.value !== undefined).slice(0, 4);
+  const displayMetrics = metrics.length ? metrics : fallbackMetrics;
+  const name = firstText(record, ['name', 'asset_name', 'title'], '核心标的');
+  const symbol = firstText(record, ['symbol', 'code', 'ticker'], '');
+  const price = record.price ?? record.latest ?? record.close ?? record.nav ?? record.value;
+  return (
+    <div className={'qp-pulse-hero ' + toneClass(change)}>
+      <div className="pulse-main">
+        <span className="pulse-live"><i />行情脉冲</span>
+        <h3>{name}{symbol ? <small>{symbol}</small> : null}</h3>
+        <div className="pulse-price">{formatSmartValue(price, record.unit ?? record.currency)}</div>
+        <div className="pulse-change">{formatPercent(change)}</div>
+        <p>{text(record.summary ?? record.description ?? record.status, '等待更多市场数据沉淀。')}</p>
+      </div>
+      <div className="pulse-metrics">
+        {displayMetrics.map((item, index) => (
+          <div key={index}>
+            <span>{text(item.label ?? item.name ?? item.key, '指标')}</span>
+            <strong>{text(item.displayValue, '') || formatSmartValue(item.value ?? item.latest ?? item.price ?? item.score, item.unit)}</strong>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TrendVolumeCombo({ value, section }: { value: unknown; section: JsonRecord }) {
+  const rows = inferRows(value).slice(-140);
+  if (rows.length < 2) return <EmptyState label="暂无量价趋势数据" />;
+  const encoding = asRecord(section.encoding) ?? {};
+  const xKey = text(encoding.x, 'date');
+  const yKeys = inferYKeys(rows, Array.isArray(encoding.y) ? encoding.y.map(String) : [text(encoding.y, '')].filter(Boolean));
+  const primaryKey = yKeys[0] ?? 'close';
+  const latest = rows.at(-1) ?? {};
+  const previous = rows.at(-2) ?? {};
+  const latestValue = numeric(latest[primaryKey]);
+  const previousValue = numeric(previous[primaryKey]);
+  const change = latestValue !== null && previousValue !== null && previousValue !== 0
+    ? ((latestValue - previousValue) / Math.abs(previousValue)) * 100
+    : firstNumeric(latest, ['change_percent', 'pct_chg', 'return_pct']);
+  const volumeKey = ['volume', 'vol', 'turnover_volume', 'amount'].find((key) => rows.some((row) => numeric(row[key]) !== null));
+  const volumes = volumeKey ? rows.map((row) => numeric(row[volumeKey]) ?? 0) : [];
+  const maxVolume = Math.max(1, ...volumes);
+  const reference = numeric(latest.previous_close ?? latest.pre_close ?? latest.open) ?? previousValue;
+  return (
+    <div className="qp-trend-combo">
+      <div className="trend-combo-head">
+        <div>
+          <strong>{formatSmartValue(latestValue, inferUnit(primaryKey, latestValue))}</strong>
+          <span className={toneClass(change)}>{formatPercent(change)}</span>
+        </div>
+        <div className="trend-combo-tags">
+          {yKeys.slice(0, 4).map((key) => <em key={key}>{labelForKey(key)} {formatSmartValue(latest[key], inferUnit(key, latest[key]))}</em>)}
+        </div>
+      </div>
+      <svg className="qp-trend-main" viewBox="0 0 760 320" preserveAspectRatio="xMidYMid meet" role="img" aria-label={text(section.title)}>
+        <line x1="58" y1="254" x2="732" y2="254" className="axis" />
+        <line x1="58" y1="28" x2="58" y2="254" className="axis" />
+        {[0, 0.25, 0.5, 0.75, 1].map((ratio) => <line key={ratio} x1="58" y1={28 + ratio * 226} x2="732" y2={28 + ratio * 226} className="grid-line" />)}
+        {reference !== null && latestValue !== null ? (
+          <line x1="58" y1="142" x2="732" y2="142" className="reference-line" />
+        ) : null}
+        {volumeKey ? rows.map((row, index) => {
+          const value = numeric(row[volumeKey]) ?? 0;
+          const barWidth = Math.max(1.5, 670 / Math.max(rows.length, 1) - 1);
+          const x = 60 + index * (670 / Math.max(rows.length, 1));
+          const h = Math.max(1, value / maxVolume * 42);
+          const priceTone = toneClass(numeric(row[primaryKey]) !== null && index > 0 && numeric(rows[index - 1]?.[primaryKey]) !== null
+            ? ((numeric(row[primaryKey]) as number) - (numeric(rows[index - 1]?.[primaryKey]) as number))
+            : 0);
+          return <rect key={index} x={x} y={254 - h} width={barWidth} height={h} className={'combo-volume ' + priceTone} />;
+        }) : null}
+        {primaryKey ? <path d={areaPath(rows, xKey, primaryKey, 760, 300)} className="chart-area" /> : null}
+        {yKeys.slice(0, 4).map((key, index) => <path key={key} d={linePath(rows, xKey, key, 760, 300)} className={'line line-' + (index + 1)} />)}
+        {[0, Math.floor((rows.length - 1) / 2), rows.length - 1].map((index) => (
+          <text key={index} x={chartX(index, rows.length, 760)} y="304" textAnchor="middle" className="axis-label">{formatAxisDate(rows[index]?.[xKey])}</text>
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+function DecisionBrief({ value }: { value: unknown }) {
+  const record = asRecord(value);
+  const rows = inferRows(value);
+  const source = record ?? rows[0] ?? {};
+  const conclusion = firstText(source, ['conclusion', 'decision', 'summary', 'recommendation', 'text'], text(value, '暂无明确结论。'));
+  const evidence = asArray(source.evidence ?? source.reasons ?? source.basis).map((item) => text(item)).filter(Boolean);
+  const risks = asArray(source.risks ?? source.risk_points ?? source.warnings).map((item) => text(item)).filter(Boolean);
+  const next = asArray(source.next_steps ?? source.watchlist ?? source.actions).map((item) => text(item)).filter(Boolean);
+  const groups = [
+    { label: '结论', value: conclusion, className: 'brief-primary' },
+    { label: '依据', items: evidence.length ? evidence : rows.slice(0, 3).map((row) => firstText(row, ['summary', 'reason', 'description', 'name'], '')) },
+    { label: '风险', items: risks },
+    { label: '观察', items: next },
+  ];
+  return (
+    <div className="qp-decision-brief">
+      {groups.map((group, index) => (
+        <section key={group.label} className={group.className ?? ''}>
+          <span>{String(index + 1).padStart(2, '0')}</span>
+          <h3>{group.label}</h3>
+          {group.value ? <p>{group.value}</p> : (
+            <ul>
+              {(group.items ?? []).filter(Boolean).slice(0, 4).map((item, itemIndex) => <li key={itemIndex}>{item}</li>)}
+              {!(group.items ?? []).filter(Boolean).length ? <li>等待更多数据确认。</li> : null}
+            </ul>
+          )}
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function RiskRibbon({ value }: { value: unknown }) {
+  const record = asRecord(value);
+  const rows = (record ? metricRowsFromRecord(record) : inferRows(value)).slice(0, 8);
+  if (!rows.length) return <EmptyState label="暂无风险状态数据" />;
+  return (
+    <div className="qp-risk-ribbon">
+      {rows.map((row, index) => {
+        const rawValue = row.value ?? row.score ?? row.latest ?? row.risk ?? row.level;
+        const number = numeric(rawValue);
+        const width = number === null ? 48 + (index % 3) * 16 : Math.max(12, Math.min(100, Math.abs(number) > 1 ? Math.abs(number) : Math.abs(number) * 100));
+        return (
+          <div key={index} className={'ribbon-item ' + toneClass(rawValue)}>
+            <div>
+              <strong>{text(row.label ?? row.name ?? row.key, '风险项')}</strong>
+              <span>{text(row.note ?? row.description ?? row.status, '')}</span>
+            </div>
+            <b>{formatSmartValue(rawValue, row.unit)}</b>
+            <svg className="ribbon-spark" viewBox="0 0 100 18" preserveAspectRatio="none" aria-label={text(row.label ?? row.name ?? row.key, '风险色带')}>
+              <rect x="0" y="7" width="100" height="4" rx="2" />
+              <circle cx={width} cy="9" r="5" />
+            </svg>
+            <i><em style={{ width: width + '%' }} /></i>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ValuationTemperature({ value }: { value: unknown }) {
+  const record = asRecord(value) ?? {};
+  const rows = (Object.keys(record).length ? metricRowsFromRecord(record) : inferRows(value)).slice(0, 8);
+  if (!rows.length) return <EmptyState label="暂无估值温度数据" />;
+  return (
+    <div className="qp-valuation-temp">
+      {rows.map((row, index) => {
+        const rawValue = row.value ?? row.latest ?? row.score ?? row.percentile;
+        const number = numeric(rawValue);
+        const pct = number === null ? 50 : Math.max(0, Math.min(100, Math.abs(number) <= 1 ? number * 100 : number % 101));
+        return (
+          <div className="temp-row" key={index}>
+            <div className="temp-label">
+              <strong>{text(row.label ?? row.name ?? row.key, '估值项')}</strong>
+              <span>{formatSmartValue(rawValue, row.unit)}</span>
+            </div>
+            <svg className="temp-gauge" viewBox="0 0 160 24" preserveAspectRatio="none" aria-label={text(row.label ?? row.name ?? row.key, '估值温度')}>
+              <rect x="4" y="9" width="48" height="6" rx="3" className="temp-low" />
+              <rect x="56" y="9" width="48" height="6" rx="3" className="temp-mid" />
+              <rect x="108" y="9" width="48" height="6" rx="3" className="temp-high" />
+              <circle cx={4 + pct * 1.52} cy="12" r="6" />
+            </svg>
+            <em>{pct < 35 ? '偏低' : pct > 70 ? '偏高' : '中性'}</em>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function FinancialQualityMatrix({ value }: { value: unknown }) {
+  const rows = inferRows(value).slice(0, 8);
+  if (!rows.length) return <EmptyState label="暂无财务质量矩阵" />;
+  const metricKeys = ['roe', 'gross_margin', 'net_margin', 'revenue_growth', 'profit_growth', 'debt_ratio', 'cashflow', 'quality_score']
+    .filter((key) => rows.some((row) => row[key] !== undefined));
+  const keys = metricKeys.length ? metricKeys.slice(0, 6) : Object.keys(rows[0] ?? {}).filter((key) => !/name|symbol|code|date/i.test(key)).slice(0, 6);
+  return (
+    <div className="qp-quality-matrix">
+      <div className="quality-header"><span>标的</span>{keys.map((key) => <span key={key}>{labelForKey(key)}</span>)}</div>
+      {rows.map((row, index) => (
+        <div className="quality-row" key={index}>
+          <strong>{firstText(row, ['name', 'symbol', 'code'], '标的')}</strong>
+          {keys.map((key) => {
+            const value = row[key];
+            const number = numeric(value);
+            const heat = number === null ? 42 : Math.max(18, Math.min(96, Math.abs(number) > 1 ? Math.abs(number) : Math.abs(number) * 100));
+            return <span key={key} style={{ background: 'rgba(37, 99, 235, ' + (heat / 180).toFixed(2) + ')' }}>{formatSmartValue(value, inferUnit(key, value))}</span>;
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function BacktestDiagnostics({ value }: { value: unknown }) {
+  const record = asRecord(value) ?? {};
+  const metrics = asRecord(record.metrics) ?? record;
+  const items: JsonRecord[] = [
+    { label: '累计收益', value: metrics.total_return ?? metrics.total_return_pct ?? metrics.return_pct, unit: '%' },
+    { label: '最大回撤', value: metrics.max_drawdown ?? metrics.max_drawdown_pct, unit: '%' },
+    { label: '胜率', value: metrics.win_rate ?? metrics.win_rate_pct, unit: '%' },
+    { label: '夏普', value: metrics.sharpe ?? metrics.sharpe_ratio },
+    { label: '交易次数', value: metrics.trade_count ?? metrics.trades },
+    { label: '年化波动', value: metrics.volatility ?? metrics.annualized_volatility_pct, unit: '%' },
+  ].filter((item) => item.value !== undefined);
+  const rows: JsonRecord[] = items.length ? items : metricRowsFromRecord(metrics).slice(0, 6);
+  if (!rows.length) return <EmptyState label="暂无回测诊断数据" />;
+  return (
+    <div className="qp-backtest-diagnostics">
+      {rows.map((item, index) => (
+        <div className="diag-card" key={index}>
+          <span>{text(item.label ?? item.name ?? item.key, '诊断项')}</span>
+          <strong>{formatSmartValue(item.value ?? item.latest ?? item.score, item.unit)}</strong>
+          <svg className="diag-meter" viewBox="0 0 100 18" preserveAspectRatio="none" aria-label={text(item.label ?? item.name ?? item.key, '回测诊断')}>
+            <rect x="0" y="7" width="100" height="4" rx="2" />
+            <path d={'M 0 12 L 24 9 L 42 11 L 62 5 L 82 8 L 100 4'} />
+          </svg>
+          <i className={toneClass(item.value ?? item.latest ?? item.score)} />
+        </div>
+      ))}
+      <div className="diag-summary">
+        <b>策略状态</b>
+        <p>{text(record.summary ?? record.conclusion ?? record.note, '结合收益曲线、回撤深度和交易质量判断策略稳定性。')}</p>
+      </div>
+    </div>
+  );
+}
+
+function AssetRankingMatrix({ value, section }: { value: unknown; section: JsonRecord }) {
+  const rows = inferRows(value).slice(0, 12);
+  if (!rows.length) return <EmptyState label="暂无排名矩阵数据" />;
+  const options = asRecord(section.options) ?? {};
+  const scoreKey = text(options.scoreKey, 'composite_score');
+  const scoreValues = rows.map((row) => firstNumeric(row, [scoreKey, 'score', 'rank_score', 'selection_score']) ?? 0);
+  const maxScore = Math.max(1, ...scoreValues.map((value) => Math.abs(value)));
+  return (
+    <div className="qp-rank-matrix">
+      {rows.map((row, index) => {
+        const score = firstNumeric(row, [scoreKey, 'score', 'rank_score', 'selection_score']) ?? 0;
+        const ret = firstNumeric(row, ['period_return', 'return', 'return_pct', 'change_percent', 'pct_chg']);
+        const risk = firstNumeric(row, ['max_drawdown', 'drawdown', 'volatility20d', 'volatility', 'risk']);
+        return (
+          <div className="rank-row" key={firstText(row, ['symbol', 'code', 'name'], String(index))}>
+            <b>{String(index + 1).padStart(2, '0')}</b>
+            <div className="rank-name">
+              <strong>{firstText(row, ['name', 'symbol', 'code'], '标的')}</strong>
+              <span>{firstText(row, ['symbol', 'code', 'industry', 'sector'], '')}</span>
+            </div>
+            <div className="rank-bar"><i style={{ width: Math.max(8, Math.abs(score) / maxScore * 100) + '%' }} /></div>
+            <span className={toneClass(ret)}>{formatPercent(ret)}</span>
+            <em>{risk === null ? '-' : formatPercent(risk)}</em>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function RiskReturnQuadrant({ value, section }: { value: unknown; section: JsonRecord }) {
+  const rows = inferRows(value).slice(0, 32);
+  if (!rows.length) return <EmptyState label="暂无风险收益数据" />;
+  const encoding = asRecord(section.encoding) ?? {};
+  const xKeys = [text(encoding.x, ''), 'volatility20d', 'volatility', 'max_drawdown', 'drawdown', 'risk', 'x'].filter(Boolean);
+  const yKeys = [text(encoding.y, ''), 'period_return', 'return', 'return_pct', 'score', 'y'].filter(Boolean);
+  const points = rows.map((row) => ({
+    row,
+    x: firstNumeric(row, xKeys),
+    y: firstNumeric(row, yKeys),
+  })).filter((point): point is { row: JsonRecord; x: number; y: number } => point.x !== null && point.y !== null);
+  if (!points.length) return <EmptyState label="暂无可绘制象限数据" />;
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const midX = (minX + maxX) / 2;
+  const midY = (minY + maxY) / 2;
+  return (
+    <svg className="qp-quadrant" viewBox="0 0 760 300" role="img" aria-label={text(section.title)}>
+      <rect x="32" y="20" width="696" height="240" className="quad-bg" />
+      <line x1="380" y1="20" x2="380" y2="260" className="quad-axis" />
+      <line x1="32" y1="140" x2="728" y2="140" className="quad-axis" />
+      <text x="46" y="44">低风险</text><text x="650" y="44">高风险</text><text x="46" y="246">低收益</text><text x="650" y="246">高收益</text>
+      {points.map((point, index) => {
+        const cx = scaledPoint(point.x, minX, maxX, 52, 708);
+        const cy = scaledPoint(point.y, minY, maxY, 242, 38);
+        const label = firstText(point.row, ['symbol', 'code', 'name'], String(index + 1));
+        return (
+          <g key={index} className={point.x <= midX && point.y >= midY ? 'quad-good' : point.y < midY ? 'quad-weak' : 'quad-watch'}>
+            <circle cx={cx} cy={cy} r="7"><title>{label}: 风险 {formatNumber(point.x)}, 收益 {formatNumber(point.y)}</title></circle>
+            <text x={cx + 10} y={cy + 4}>{label}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+function EquityDrawdownCombo({ value, section }: { value: unknown; section: JsonRecord }) {
+  const record = asRecord(value);
+  const rows = record ? inferRows(record.equityCurve ?? record.rows ?? record.series ?? value) : inferRows(value);
+  const seriesRows = rows.slice(-160);
+  if (seriesRows.length < 2) return <EmptyState label="暂无收益回撤序列" />;
+  const encoding = asRecord(section.encoding) ?? {};
+  const equityKey = text(encoding.equity ?? encoding.y, 'equity');
+  const benchmarkKey = text(encoding.benchmark, 'benchmark');
+  const drawdownKey = text(encoding.drawdown, 'drawdown');
+  const equityPath = linePath(seriesRows, text(encoding.x, 'date'), equityKey, 760, 220);
+  const benchmarkPath = linePath(seriesRows, text(encoding.x, 'date'), benchmarkKey, 760, 220);
+  const drawdownValues = seriesRows.map((row) => normalizePercentValue(row[drawdownKey]) ?? 0);
+  const minDrawdown = Math.min(-0.000001, ...drawdownValues);
+  return (
+    <div className="qp-combo">
+      <svg className="qp-combo-equity" viewBox="0 0 760 220" role="img" aria-label={text(section.title)}>
+        <line x1="36" y1="188" x2="742" y2="188" className="axis" />
+        <path d={equityPath} className="line line-1" />
+        {benchmarkPath ? <path d={benchmarkPath} className="line line-3" /> : null}
+      </svg>
+      <svg className="qp-combo-dd" viewBox="0 0 760 110" role="img" aria-label="回撤">
+        <line x1="36" y1="18" x2="742" y2="18" className="axis" />
+        {seriesRows.map((row, index) => {
+          const value = normalizePercentValue(row[drawdownKey]) ?? 0;
+          const barWidth = Math.max(2, (700 / Math.max(seriesRows.length, 1)) - 1);
+          const x = 38 + index * (700 / Math.max(seriesRows.length, 1));
+          const h = Math.max(1, Math.abs(value / minDrawdown) * 78);
+          return <rect key={index} x={x} y="18" width={barWidth} height={h} className="drawdown-bar"><title>{formatPercent(value)}</title></rect>;
+        })}
+      </svg>
+    </div>
+  );
+}
+
+function SignalTimeline({ value }: { value: unknown }) {
+  const rows = inferRows(value).slice(0, 10);
+  if (!rows.length) return <EmptyState label="暂无信号时间线" />;
+  return (
+    <ol className="qp-timeline">
+      {rows.map((row, index) => {
+        const severity = firstText(row, ['severity', 'level', 'type', 'signal'], 'neutral').toLowerCase();
+        const className = /buy|up|bull|positive|机会|买入|看多/.test(severity)
+          ? 'event-up'
+          : /sell|down|bear|negative|risk|风险|卖出|看空/.test(severity)
+            ? 'event-down'
+            : /warn|watch|neutral|观察|预警/.test(severity)
+              ? 'event-watch'
+              : 'event-neutral';
+        return (
+          <li className={className} key={index}>
+            <time>{firstText(row, ['date', 'time', 'created_at', 'as_of'], '待确认')}</time>
+            <div>
+              <strong>{firstText(row, ['title', 'name', 'type', 'signal'], '信号')}</strong>
+              <p>{firstText(row, ['summary', 'description', 'reason', 'note'], firstText(row, ['symbol', 'code'], ''))}</p>
+            </div>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+const CHART_MARGIN = { left: 58, right: 28, top: 26, bottom: 44 };
+
+function chartX(index: number, rowsLength: number, width: number): number {
+  return CHART_MARGIN.left + (index / Math.max(rowsLength - 1, 1)) * (width - CHART_MARGIN.left - CHART_MARGIN.right);
+}
+
+function chartY(value: number, min: number, range: number, height: number): number {
+  return CHART_MARGIN.top + (1 - (value - min) / range) * (height - CHART_MARGIN.top - CHART_MARGIN.bottom);
+}
+
+function linePath(rows: JsonRecord[], xKey: string, yKey: string, width: number, height: number): string {
+  const values = rows.map((row) => numeric(row[yKey])).filter((value): value is number => value !== null);
+  if (values.length < 2) return '';
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = Math.max(max - min, 0.000001);
+  let started = false;
+  return rows.map((row, index) => {
+    const value = numeric(row[yKey]);
+    if (value === null) return '';
+    const x = chartX(index, rows.length, width);
+    const y = chartY(value, min, range, height);
+    const segment = (started ? 'L ' : 'M ') + x.toFixed(2) + ' ' + y.toFixed(2);
+    started = true;
+    return segment;
+  }).filter(Boolean).join(' ');
+}
+
+function areaPath(rows: JsonRecord[], xKey: string, yKey: string, width: number, height: number): string {
+  const line = linePath(rows, xKey, yKey, width, height);
+  if (!line) return '';
+  const values = rows.map((row) => numeric(row[yKey]));
+  const firstIndex = values.findIndex((value) => value !== null);
+  const lastIndex = values.length - 1 - [...values].reverse().findIndex((value) => value !== null);
+  if (firstIndex < 0 || lastIndex < firstIndex) return '';
+  const firstX = chartX(firstIndex, rows.length, width);
+  const lastX = chartX(lastIndex, rows.length, width);
+  const baseY = height - CHART_MARGIN.bottom + 3;
+  return line + ' L ' + lastX.toFixed(2) + ' ' + baseY + ' L ' + firstX.toFixed(2) + ' ' + baseY + ' Z';
+}
+
+function inferYKeys(rows: JsonRecord[], configured: string[]): string[] {
+  const available = new Set(Object.keys(rows[0] ?? {}));
+  const validConfigured = configured.filter((key) => available.has(key) && rows.some((row) => numeric(row[key]) !== null));
+  if (validConfigured.length > 0) return validConfigured.slice(0, 4);
+  const preferred = ['close', 'price', 'latest_close', 'ma5', 'ma10', 'ma20', 'return_pct', 'drawdown_pct'];
+  const inferred = preferred.filter((key) => available.has(key) && rows.some((row) => numeric(row[key]) !== null));
+  if (inferred.includes('close')) {
+    return ['close', 'ma5', 'ma10', 'ma20'].filter((key) => inferred.includes(key)).slice(0, 4);
+  }
+  return inferred.slice(0, 4);
+}
+
+function Chart({ value, section }: { value: unknown; section: JsonRecord }) {
+  const rows = inferRows(value).slice(-120);
+  const encoding = asRecord(section.encoding) ?? {};
+  const xKey = text(encoding.x, 'date');
+  const configuredYKeys = Array.isArray(encoding.y) ? encoding.y.map(String) : [text(encoding.y, '')].filter(Boolean);
+  const yKeys = inferYKeys(rows, configuredYKeys);
+  if (rows.length < 2) return <EmptyState label="暂无可绘制序列" />;
+  if (yKeys.length === 0) return <EmptyState label="暂无可绘制指标字段" />;
+  const width = 760;
+  const height = 300;
+  const volumeKey = ['volume', 'vol', 'turnover_volume'].find((key) => rows.some((row) => numeric(row[key]) !== null));
+  const latest = rows.at(-1) ?? {};
+  const primaryKey = yKeys[0];
+  const primaryValues = rows.map((row) => numeric(row[primaryKey])).filter((value): value is number => value !== null);
+  const primaryMin = primaryValues.length ? Math.min(...primaryValues) : null;
+  const primaryMax = primaryValues.length ? Math.max(...primaryValues) : null;
+  const primaryRange = primaryMin !== null && primaryMax !== null ? Math.max(primaryMax - primaryMin, 0.000001) : 1;
+  const yTicks = primaryMin !== null && primaryMax !== null
+    ? [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+        const value = primaryMax - primaryRange * ratio;
+        const y = CHART_MARGIN.top + ratio * (height - CHART_MARGIN.top - CHART_MARGIN.bottom);
+        return { value, y };
+      })
+    : [];
+  const xTickIndexes = Array.from(new Set([0, Math.floor((rows.length - 1) / 3), Math.floor((rows.length - 1) * 2 / 3), rows.length - 1]));
+  const xTicks = xTickIndexes.map((index) => ({
+    index,
+    x: chartX(index, rows.length, width),
+    label: formatAxisDate(rows[index]?.[xKey]),
+  })).filter((tick) => tick.label);
+  const referenceValue = numeric(latest.previous_close ?? latest.pre_close ?? latest.open) ?? (primaryMin !== null && primaryMax !== null ? (primaryMin + primaryMax) / 2 : null);
+  const referenceY = referenceValue !== null && primaryMin !== null && primaryMax !== null
+    ? chartY(referenceValue, primaryMin, primaryRange, height)
+    : null;
+  if (text(section.type) === 'bar-chart') {
+    const yKey = yKeys[0] ?? 'value';
+    const values = rows.map((row) => numeric(row[yKey]) ?? 0);
+    const maxAbs = Math.max(1, ...values.map((value) => Math.abs(value)));
+    return (
+      <svg className="qp-chart" viewBox={'0 0 ' + width + ' ' + height} preserveAspectRatio="xMidYMid meet" role="img" aria-label={text(section.title)}>
+        <line x1="28" y1={height - 26} x2={width - 16} y2={height - 26} className="axis" />
+        {rows.map((row, index) => {
+          const value = numeric(row[yKey]) ?? 0;
+          const barHeight = Math.max(2, Math.abs(value) / maxAbs * (height - 52));
+          const barWidth = Math.max(3, (width - 60) / Math.max(rows.length, 1) - 2);
+          const x = 36 + index * ((width - 60) / Math.max(rows.length, 1));
+          const y = height - 26 - barHeight;
+          return <rect key={index} x={x} y={y} width={barWidth} height={barHeight} className={value >= 0 ? 'bar-up' : 'bar-down'} />;
+        })}
+      </svg>
+    );
+  }
+  return (
+    <div className="qp-chart-shell">
+      <div className="qp-chart-legend">
+        {yKeys.map((yKey, index) => (
+          <span key={yKey} className={'legend-' + (index + 1)}>
+            <i />{labelForKey(yKey)} <b>{formatSmartValue(latest[yKey], inferUnit(yKey, latest[yKey]))}</b>
+          </span>
+        ))}
+      </div>
+      <svg className="qp-chart" viewBox={'0 0 ' + width + ' ' + height} preserveAspectRatio="xMidYMid meet" role="img" aria-label={text(section.title)}>
+        <line x1={CHART_MARGIN.left} y1={height - CHART_MARGIN.bottom} x2={width - CHART_MARGIN.right} y2={height - CHART_MARGIN.bottom} className="axis" />
+        <line x1={CHART_MARGIN.left} y1={CHART_MARGIN.top} x2={CHART_MARGIN.left} y2={height - CHART_MARGIN.bottom} className="axis" />
+        {yTicks.map((tick, index) => (
+          <g key={'y-' + index}>
+            <line x1={CHART_MARGIN.left} y1={tick.y} x2={width - CHART_MARGIN.right} y2={tick.y} className="grid-line" />
+            <text x="14" y={tick.y + 4} className="axis-label">{formatSmartValue(tick.value, inferUnit(primaryKey, tick.value))}</text>
+          </g>
+        ))}
+        {xTicks.map((tick) => (
+          <g key={'x-' + tick.index}>
+            <line x1={tick.x} y1={height - CHART_MARGIN.bottom} x2={tick.x} y2={height - CHART_MARGIN.bottom + 5} className="axis-tick" />
+            <text x={tick.x} y={height - 16} textAnchor="middle" className="axis-label">{tick.label}</text>
+          </g>
+        ))}
+        {primaryKey ? <path d={areaPath(rows, xKey, primaryKey, width, height)} className="chart-area" /> : null}
+        {referenceY !== null ? (
+          <>
+            <line x1={CHART_MARGIN.left} y1={referenceY} x2={width - CHART_MARGIN.right} y2={referenceY} className="reference-line" />
+            <text x={CHART_MARGIN.left + 6} y={referenceY - 6} className="reference-label">{formatSmartValue(referenceValue, inferUnit(primaryKey, referenceValue))}</text>
+          </>
+        ) : null}
+        {volumeKey ? rows.map((row, index) => {
+          const values = rows.map((item) => numeric(item[volumeKey]) ?? 0);
+          const max = Math.max(1, ...values);
+          const value = numeric(row[volumeKey]) ?? 0;
+          const plotWidth = width - CHART_MARGIN.left - CHART_MARGIN.right;
+          const barWidth = Math.max(1.5, plotWidth / Math.max(rows.length, 1) - 1);
+          const x = CHART_MARGIN.left + index * (plotWidth / Math.max(rows.length, 1));
+          const barHeight = Math.max(1, value / max * 34);
+          return <rect key={'vol-' + index} x={x} y={height - CHART_MARGIN.bottom + 1 - barHeight} width={barWidth} height={barHeight} className="volume-bar" />;
+        }) : null}
+        {yKeys.map((yKey, index) => <path key={yKey} d={linePath(rows, xKey, yKey, width, height)} className={'line line-' + (index + 1)} />)}
+        {primaryMin !== null ? <text x={width - 86} y={height - 52} className="scale-label down">{formatSmartValue(primaryMin, inferUnit(primaryKey, primaryMin))}</text> : null}
+        {primaryMax !== null ? <text x={width - 86} y="34" className="scale-label up">{formatSmartValue(primaryMax, inferUnit(primaryKey, primaryMax))}</text> : null}
+      </svg>
+    </div>
+  );
+}
+
+function DataTable({ value, section }: { value: unknown; section: JsonRecord }) {
+  const rows = inferRows(value).slice(0, 50);
+  if (!rows.length) return <EmptyState label="暂无表格数据" />;
+  const configuredColumns = asArray(section.columns).map(asRecord).filter((item): item is JsonRecord => Boolean(item));
+  const columns = configuredColumns.length
+    ? configuredColumns.map((column) => ({ key: text(column.key), label: text(column.label ?? column.key) }))
+    : Object.keys(rows[0] ?? {}).slice(0, 8).map((key) => ({ key, label: labelForKey(key) }));
+  return (
+    <div className="qp-table-wrap">
+      <table>
+        <thead><tr>{columns.map((column) => <th key={column.key}>{column.label}</th>)}</tr></thead>
+        <tbody>{rows.map((row, index) => <tr key={index}>{columns.map((column) => <td key={column.key}>{formatCell(row[column.key])}</td>)}</tr>)}</tbody>
+      </table>
+    </div>
+  );
+}
+
+function MarkdownAnalysis({ value }: { value: unknown }) {
+  const content = Array.isArray(value) ? value.map(String).join('\\n') : text(value, '');
+  if (!content) return <EmptyState label="暂无分析结论" />;
+  return <div className="qp-analysis">{content.split(/\\n+/).slice(0, 12).map((line, index) => <p key={index}>{line.replace(/^[-*]\\s*/, '')}</p>)}</div>;
+}
+
+function EmptyState({ label }: { label: string }) {
+  return <div className="qp-empty">{label}</div>;
+}
+
+function SectionBody({ section, data }: { section: JsonRecord; data: unknown }) {
+  const value = getByPath(data, text(section.dataKey, ''));
+  const type = text(section.type);
+  if (value === undefined) return <EmptyState label={'未找到数据：' + text(section.dataKey)} />;
+  if (type === 'market-pulse-hero') return <MarketPulseHero value={value} />;
+  if (type === 'trend-volume-combo') return <TrendVolumeCombo value={value} section={section} />;
+  if (type === 'decision-brief') return <DecisionBrief value={value} />;
+  if (type === 'risk-ribbon') return <RiskRibbon value={value} />;
+  if (type === 'valuation-temperature') return <ValuationTemperature value={value} />;
+  if (type === 'financial-quality-matrix') return <FinancialQualityMatrix value={value} />;
+  if (type === 'backtest-diagnostics') return <BacktestDiagnostics value={value} />;
+  if (type === 'asset-ranking-matrix') return <AssetRankingMatrix value={value} section={section} />;
+  if (type === 'risk-return-quadrant') return <RiskReturnQuadrant value={value} section={section} />;
+  if (type === 'equity-drawdown-combo') return <EquityDrawdownCombo value={value} section={section} />;
+  if (type === 'signal-timeline') return <SignalTimeline value={value} />;
+  if (type === 'kpi-grid' || type === 'risk-panel' || type === 'portfolio-allocation' || type === 'alert-list') return <KpiGrid value={value} />;
+  if (type === 'line-chart' || type === 'area-chart' || type === 'bar-chart' || type === 'candlestick-chart' || type === 'drawdown-chart' || type === 'correlation-heatmap') return <Chart value={value} section={section} />;
+  if (type === 'data-table' || type === 'signal-table') return <DataTable value={value} section={section} />;
+  if (type === 'markdown-analysis') return <MarkdownAnalysis value={value} />;
+  return <EmptyState label={'不支持的组件：' + type} />;
+}
+
+function validateConfig(config: unknown, data: unknown): string[] {
+  const errors: string[] = [];
+  const record = asRecord(config);
+  if (!record) return ['view-config.json 必须是 JSON 对象。'];
+  if (record.version !== '1.0') errors.push('version 必须为 1.0。');
+  const sections = asArray(record.sections);
+  if (!sections.length) errors.push('sections 必须是非空数组。');
+  sections.forEach((raw, index) => {
+    const section = asRecord(raw);
+    if (!section) return errors.push('sections[' + index + '] 必须是对象。');
+    if (!ALLOWED_WIDGETS.has(text(section.type))) errors.push('sections[' + index + '].type 不在白名单内。');
+    if (!ALLOWED_SPANS.has(Number(section.span))) errors.push('sections[' + index + '].span 只能是 3/4/6/8/9/12。');
+    if (!ALLOWED_HEIGHTS.has(text(section.height))) errors.push('sections[' + index + '].height 不合法。');
+    const dataKey = text(section.dataKey, '');
+    if (!dataKey) errors.push('sections[' + index + '].dataKey 不能为空。');
+    if (dataKey && getByPath(data, dataKey) === undefined) errors.push('sections[' + index + '].dataKey 找不到数据：' + dataKey);
+  });
+  return errors;
+}
+
+function DataProvenance({ data, sections }: { data: unknown; sections: JsonRecord[] }) {
+  const record = asRecord(data) ?? {};
+  const quote = asRecord(record.quote) ?? {};
+  const source = text(record.source ?? quote.source, '未知信源');
+  const updatedAt = text(quote.quote_time ?? quote.fetched_at ?? record.as_of, '待确认');
+  return (
+    <aside className="qp-data-provenance" aria-label="数据来源说明">
+      <span>数据信源/数据来源：{source}</span>
+      <span>更新时间：{updatedAt}</span>
+      <span>最终数据文件：{DATA_FILE}</span>
+      <span>视图配置：{VIEW_CONFIG_FILE}</span>
+      <span>{sections.length} 个安全组件由固定 renderer 渲染</span>
+    </aside>
+  );
+}
+
+export default async function Home() {
+  let data: unknown = {};
+  let config: unknown = {};
+  let loadError = '';
+  try {
+    data = await readJson(DATA_FILE);
+    config = await readJson(VIEW_CONFIG_FILE);
+  } catch (error) {
+    loadError = error instanceof Error ? error.message : String(error);
+  }
+
+  const configRecord = asRecord(config);
+  const sections = asArray(configRecord?.sections).map(asRecord).filter((item): item is JsonRecord => Boolean(item));
+  const validationErrors = loadError ? ['读取 dashboard-data.json 或 view-config.json 失败：' + loadError] : validateConfig(config, data);
+
+  return (
+    <main className="qp-shell" data-source-file={DATA_FILE} data-view-config-file={VIEW_CONFIG_FILE} data-market-proxy="/api/market">
+      {validationErrors.length ? (
+        <section className="qp-error-panel">
+          <h2>视图配置校验失败</h2>
+          <ul>{validationErrors.slice(0, 12).map((error, index) => <li key={index}>{error}</li>)}</ul>
+        </section>
+      ) : null}
+
+      <section className="qp-grid">
+        {sections.map((section, index) => (
+          <article
+            className={'qp-section height-' + (ALLOWED_HEIGHTS.has(text(section.height)) ? text(section.height) : 'medium')}
+            style={{ gridColumn: 'span ' + (ALLOWED_SPANS.has(Number(section.span)) ? Number(section.span) : 12) }}
+            key={text(section.id, String(index))}
+          >
+            <div className="qp-section-heading">
+              <div>
+                <h2>{text(section.title, '未命名区块')}</h2>
+                {section.subtitle ? <p>{text(section.subtitle)}</p> : null}
+              </div>
+              <span>{text(section.type)}</span>
+            </div>
+            <SectionBody section={section} data={data} />
+          </article>
+        ))}
+      </section>
+
+      <DataProvenance data={data} sections={sections} />
+    </main>
+  );
+}
+`;
+}
+
+function quantConfigRendererCss() {
+  return `:root {
+  color-scheme: light;
+  --qp-bg: #f5f6f8;
+  --qp-panel: #ffffff;
+  --qp-ink: #172033;
+  --qp-muted: #657084;
+  --qp-line: #dfe4ec;
+  --qp-soft: #f0f3f7;
+  --qp-red: #d9363e;
+  --qp-green: #0e9d5d;
+  --qp-blue: #2563eb;
+  --qp-amber: #b7791f;
+  --qp-teal: #149b82;
+  --qp-chart-blue: #2383e2;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; background: var(--qp-bg); color: var(--qp-ink); font-family: Arial, "Microsoft YaHei", sans-serif; }
+body { overflow-x: hidden; }
+.qp-shell { width: min(1440px, 100%); margin: 0 auto; padding: 24px; }
+.qp-header { display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; padding: 18px 0 20px; border-bottom: 1px solid var(--qp-line); }
+.qp-eyebrow { display: block; font-size: 12px; color: var(--qp-blue); font-weight: 700; letter-spacing: 0; margin-bottom: 6px; }
+.qp-header h1 { margin: 0; font-size: 30px; line-height: 1.15; letter-spacing: 0; }
+.qp-header p { margin: 8px 0 0; color: var(--qp-muted); max-width: 760px; line-height: 1.6; }
+.qp-status { min-width: 180px; border: 1px solid var(--qp-line); background: var(--qp-panel); border-radius: 8px; padding: 12px; text-align: right; }
+.qp-status strong { display: block; font-size: 14px; }
+.qp-status span { display: block; margin-top: 4px; color: var(--qp-muted); font-size: 12px; }
+.qp-error-panel { margin: 18px 0; border: 1px solid #fecaca; background: #fef2f2; border-radius: 8px; padding: 16px; color: #991b1b; }
+.qp-error-panel h2 { margin: 0 0 8px; font-size: 16px; }
+.qp-error-panel ul { margin: 0; padding-left: 20px; line-height: 1.7; }
+.qp-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 16px; padding-top: 18px; }
+.qp-section { min-width: 0; border: 1px solid var(--qp-line); background: var(--qp-panel); border-radius: 8px; padding: 16px; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04); overflow: hidden; display: flex; flex-direction: column; }
+.qp-section.height-small { min-height: 150px; }
+.qp-section.height-medium { min-height: 260px; }
+.qp-section.height-large { min-height: 380px; }
+.qp-section.height-xlarge { min-height: 520px; }
+.qp-section-heading { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 14px; }
+.qp-section-heading h2 { margin: 0; font-size: 16px; line-height: 1.3; letter-spacing: 0; }
+.qp-section-heading p { margin: 4px 0 0; color: var(--qp-muted); font-size: 12px; line-height: 1.5; }
+.qp-section-heading span { flex: 0 0 auto; border: 1px solid var(--qp-line); background: var(--qp-soft); border-radius: 999px; padding: 3px 8px; color: var(--qp-muted); font-size: 11px; }
+.qp-kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; align-content: start; }
+.qp-kpi { border: 1px solid var(--qp-line); background: #fafbfc; border-radius: 8px; padding: 12px; min-width: 0; min-height: 96px; }
+.qp-kpi span, .qp-kpi em { display: block; color: var(--qp-muted); font-size: 12px; font-style: normal; overflow-wrap: anywhere; }
+.qp-kpi strong { display: block; margin: 6px 0; font-size: 22px; line-height: 1.1; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.qp-kpi.is-text { grid-column: span 2; }
+.qp-kpi.is-text strong { font-size: 18px; line-height: 1.28; }
+.qp-kpi-meter { display: block; width: 100%; height: 8px; margin: 8px 0 6px; }
+.kpi-meter-bg { fill: #e8edf4; }
+.qp-kpi-meter .tone-up { fill: var(--qp-red); }
+.qp-kpi-meter .tone-down { fill: var(--qp-green); }
+.qp-kpi-meter .tone-neutral { fill: var(--qp-blue); }
+.qp-chart-shell { border: 1px solid var(--qp-line); border-radius: 8px; background: #ffffff; overflow: hidden; flex: 0 0 auto; min-height: 0; display: flex; flex-direction: column; }
+.qp-chart-legend { min-height: 38px; display: flex; flex-wrap: wrap; gap: 7px 13px; align-items: center; padding: 9px 12px; border-bottom: 1px solid #edf1f6; background: #fbfcfe; }
+.qp-chart-legend span { display: inline-flex; align-items: center; gap: 6px; color: var(--qp-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.qp-chart-legend i { width: 16px; height: 3px; border-radius: 999px; background: var(--qp-chart-blue); }
+.qp-chart-legend b { color: var(--qp-ink); font-weight: 800; }
+.qp-chart-legend .legend-2 i { background: var(--qp-red); }
+.qp-chart-legend .legend-3 i { background: var(--qp-green); }
+.qp-chart-legend .legend-4 i { background: var(--qp-amber); }
+.qp-chart { width: 100%; height: clamp(230px, 31vw, 330px); display: block; flex: 0 0 auto; background: linear-gradient(#ffffff, #fbfdff); }
+.qp-chart .axis { stroke: #edf1f6; stroke-width: 1; }
+.qp-chart .grid-line { stroke: #eef2f7; stroke-width: 1; }
+.qp-chart .axis-tick { stroke: #cbd5e1; stroke-width: 1; }
+.qp-chart .axis-label { fill: #7b8796; font-size: 10px; font-weight: 600; }
+.qp-chart text { fill: var(--qp-muted); font-size: 11px; }
+.qp-chart .line { fill: none; stroke-width: 2.15; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.qp-chart .line-1 { stroke: var(--qp-chart-blue); }
+.qp-chart .line-2 { stroke: var(--qp-red); }
+.qp-chart .line-3 { stroke: var(--qp-green); }
+.qp-chart .line-4 { stroke: var(--qp-amber); }
+.chart-area { fill: rgba(35, 131, 226, 0.1); stroke: none; }
+.reference-line { stroke: #aab3bf; stroke-width: 1; stroke-dasharray: 7 7; vector-effect: non-scaling-stroke; }
+.reference-label { fill: #8b95a3; font-weight: 700; font-size: 10px; }
+.volume-bar { fill: rgba(20, 155, 130, 0.32); }
+.scale-label { font-size: 11px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.scale-label.up { fill: var(--qp-red); }
+.scale-label.down { fill: var(--qp-teal); }
+.bar-up { fill: var(--qp-red); }
+.bar-down { fill: var(--qp-green); }
+.qp-table-wrap { max-width: 100%; overflow-x: auto; border: 1px solid var(--qp-line); border-radius: 8px; }
+table { width: 100%; border-collapse: collapse; min-width: 560px; }
+th, td { padding: 10px 12px; border-bottom: 1px solid var(--qp-line); text-align: left; font-size: 13px; vertical-align: top; }
+th { background: #f8fafc; color: var(--qp-muted); font-weight: 700; }
+td { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.qp-analysis { color: #243049; line-height: 1.75; }
+.qp-analysis p { margin: 0 0 10px; }
+.qp-empty { display: grid; place-items: center; min-height: 140px; border: 1px dashed var(--qp-line); border-radius: 8px; color: var(--qp-muted); background: #fafbfc; text-align: center; padding: 20px; }
+.qp-data-provenance { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 16px; padding: 10px 12px; border: 1px solid var(--qp-line); border-radius: 8px; background: rgba(255,255,255,0.72); color: var(--qp-muted); font-size: 12px; line-height: 1.5; }
+.qp-data-provenance span { display: inline-flex; align-items: center; min-width: 0; overflow-wrap: anywhere; }
+.tone-up { color: var(--qp-red); }
+.tone-down { color: var(--qp-green); }
+.tone-neutral { color: var(--qp-muted); }
+.qp-pulse-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(330px, 0.95fr); gap: 18px; min-height: 230px; border: 1px solid #edf1f6; border-radius: 8px; padding: 18px; background: #ffffff; position: relative; overflow: hidden; }
+.qp-pulse-hero::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 54px; background: linear-gradient(180deg, rgba(255,255,255,0), rgba(245,248,252,0.86)); pointer-events: none; }
+.pulse-main, .pulse-metrics { position: relative; z-index: 1; }
+.pulse-live { display: inline-flex; align-items: center; gap: 7px; color: var(--qp-muted); font-size: 12px; font-weight: 700; }
+.pulse-live i { width: 8px; height: 8px; border-radius: 50%; background: var(--qp-teal); box-shadow: 0 0 0 0 rgba(20, 155, 130, 0.38); animation: qpPulse 1.8s ease-out infinite; }
+.pulse-main h3 { margin: 14px 0 8px; font-size: 26px; line-height: 1.2; letter-spacing: 0; }
+.pulse-main h3 small { display: inline-block; margin-left: 10px; color: var(--qp-muted); font-size: 13px; font-weight: 700; }
+.pulse-price { color: var(--qp-teal); font-size: 48px; line-height: 1; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: 0; }
+.pulse-change { margin-top: 8px; font-size: 20px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.pulse-main p { max-width: 640px; margin: 14px 0 0; color: var(--qp-muted); line-height: 1.65; }
+.pulse-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 18px; align-content: center; }
+.pulse-metrics div { min-width: 0; border: 0; border-bottom: 1px solid #edf1f6; background: transparent; border-radius: 0; padding: 8px 0 10px; backdrop-filter: none; }
+.pulse-metrics span { display: block; color: var(--qp-muted); font-size: 12px; }
+.pulse-metrics strong { display: block; margin-top: 6px; font-size: 19px; font-weight: 800; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.qp-trend-combo { border: 1px solid var(--qp-line); border-radius: 8px; background: #ffffff; overflow: hidden; }
+.trend-combo-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; padding: 12px 14px; border-bottom: 1px solid #edf1f6; background: #fbfcfe; }
+.trend-combo-head strong { display: block; font-size: 26px; line-height: 1; font-variant-numeric: tabular-nums; }
+.trend-combo-head span { display: block; margin-top: 5px; font-size: 13px; font-weight: 800; }
+.trend-combo-tags { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.trend-combo-tags em { border: 1px solid var(--qp-line); border-radius: 999px; padding: 4px 8px; color: var(--qp-muted); font-size: 11px; font-style: normal; font-variant-numeric: tabular-nums; background: #ffffff; }
+.qp-trend-main { width: 100%; height: clamp(260px, 32vw, 340px); display: block; background: linear-gradient(#ffffff, #fbfdff); }
+.qp-trend-main .axis { stroke: #edf1f6; }
+.qp-trend-main .grid-line { stroke: #eef2f7; stroke-width: 1; }
+.qp-trend-main .line { fill: none; stroke-width: 2.1; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.qp-trend-main .line-1 { stroke: var(--qp-chart-blue); }
+.qp-trend-main .line-2 { stroke: var(--qp-red); }
+.qp-trend-main .line-3 { stroke: var(--qp-green); }
+.qp-trend-main .line-4 { stroke: var(--qp-amber); }
+.combo-volume { fill: rgba(20, 155, 130, 0.22); }
+.combo-volume.tone-up { fill: rgba(217, 54, 62, 0.22); }
+.combo-volume.tone-down { fill: rgba(14, 157, 93, 0.24); }
+.qp-decision-brief { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.qp-decision-brief section { min-width: 0; border: 1px solid var(--qp-line); border-radius: 8px; padding: 12px; background: #ffffff; }
+.qp-decision-brief .brief-primary { grid-column: 1 / -1; background: linear-gradient(135deg, #ffffff, #f6f9fc); }
+.qp-decision-brief span { display: inline-block; color: var(--qp-blue); font-size: 11px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.qp-decision-brief h3 { margin: 5px 0 7px; font-size: 14px; }
+.qp-decision-brief p, .qp-decision-brief li { color: var(--qp-muted); font-size: 13px; line-height: 1.6; }
+.qp-decision-brief p { margin: 0; }
+.qp-decision-brief ul { margin: 0; padding-left: 18px; }
+.qp-risk-ribbon { display: grid; gap: 9px; }
+.ribbon-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; align-items: center; border: 1px solid var(--qp-line); border-radius: 8px; padding: 10px 12px; background: #ffffff; }
+.ribbon-item strong, .ribbon-item span { display: block; min-width: 0; overflow-wrap: anywhere; }
+.ribbon-item strong { font-size: 13px; }
+.ribbon-item span { margin-top: 3px; color: var(--qp-muted); font-size: 12px; line-height: 1.45; }
+.ribbon-item b { font-size: 16px; font-variant-numeric: tabular-nums; }
+.ribbon-spark { grid-column: 1 / -1; width: 100%; height: 18px; display: block; }
+.ribbon-spark rect { fill: #edf2f7; }
+.ribbon-spark circle { fill: var(--qp-blue); }
+.ribbon-item.tone-up .ribbon-spark circle { fill: var(--qp-red); }
+.ribbon-item.tone-down .ribbon-spark circle { fill: var(--qp-green); }
+.ribbon-item i { grid-column: 1 / -1; height: 8px; border-radius: 999px; background: #edf2f7; overflow: hidden; }
+.ribbon-item i em { display: block; height: 100%; border-radius: inherit; background: var(--qp-blue); }
+.ribbon-item.tone-up i em { background: var(--qp-red); }
+.ribbon-item.tone-down i em { background: var(--qp-green); }
+.qp-valuation-temp { display: grid; gap: 10px; }
+.temp-row { display: grid; grid-template-columns: minmax(120px, 0.9fr) minmax(160px, 1.4fr) 46px; align-items: center; gap: 12px; border: 1px solid var(--qp-line); border-radius: 8px; padding: 10px 12px; background: #ffffff; }
+.temp-label strong, .temp-label span { display: block; min-width: 0; overflow-wrap: anywhere; }
+.temp-label strong { font-size: 13px; }
+.temp-label span { margin-top: 3px; color: var(--qp-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.temp-gauge { width: 100%; height: 24px; display: block; }
+.temp-low { fill: #16a34a; opacity: 0.78; }
+.temp-mid { fill: #f59e0b; opacity: 0.8; }
+.temp-high { fill: #dc2626; opacity: 0.78; }
+.temp-gauge circle { fill: #172033; stroke: #ffffff; stroke-width: 2; vector-effect: non-scaling-stroke; filter: drop-shadow(0 2px 4px rgba(15, 23, 42, 0.22)); }
+.temp-row em { color: var(--qp-muted); font-size: 12px; font-style: normal; text-align: right; }
+.qp-quality-matrix { min-width: 0; overflow-x: auto; border: 1px solid var(--qp-line); border-radius: 8px; background: #ffffff; }
+.quality-header, .quality-row { display: grid; grid-template-columns: minmax(110px, 1.1fr) repeat(6, minmax(86px, 1fr)); min-width: 680px; gap: 1px; background: #edf1f6; }
+.quality-header span, .quality-row strong, .quality-row span { padding: 9px 10px; background: #ffffff; font-size: 12px; min-width: 0; overflow-wrap: anywhere; }
+.quality-header span { color: var(--qp-muted); font-weight: 800; background: #f8fafc; }
+.quality-row strong { font-size: 13px; }
+.quality-row span { text-align: right; font-variant-numeric: tabular-nums; }
+.qp-backtest-diagnostics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.diag-card { position: relative; min-height: 88px; border: 1px solid var(--qp-line); border-radius: 8px; padding: 12px; background: #ffffff; overflow: hidden; }
+.diag-card span { display: block; color: var(--qp-muted); font-size: 12px; }
+.diag-card strong { display: block; margin-top: 8px; font-size: 22px; line-height: 1; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.diag-meter { display: block; width: 100%; height: 18px; margin-top: 10px; }
+.diag-meter rect { fill: #edf2f7; }
+.diag-meter path { fill: none; stroke: var(--qp-blue); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.diag-card i { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: var(--qp-blue); }
+.diag-card i.tone-up { background: var(--qp-red); }
+.diag-card i.tone-down { background: var(--qp-green); }
+.diag-summary { grid-column: 1 / -1; border: 1px solid var(--qp-line); border-radius: 8px; padding: 12px; background: #fbfcfe; }
+.diag-summary b { display: block; font-size: 13px; }
+.diag-summary p { margin: 6px 0 0; color: var(--qp-muted); font-size: 13px; line-height: 1.6; }
+.qp-rank-matrix { display: grid; gap: 8px; }
+.rank-row { display: grid; grid-template-columns: 36px minmax(128px, 1fr) minmax(100px, 1.4fr) 78px 78px; align-items: center; gap: 12px; border: 1px solid var(--qp-line); border-radius: 8px; padding: 10px 12px; background: #ffffff; transition: border-color 160ms ease, transform 160ms ease, box-shadow 160ms ease; }
+.rank-row:hover { border-color: #b9c6d8; transform: translateY(-1px); box-shadow: 0 6px 18px rgba(15, 23, 42, 0.07); }
+.rank-row b { color: var(--qp-blue); font-size: 12px; font-variant-numeric: tabular-nums; }
+.rank-name strong, .rank-name span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rank-name strong { font-size: 13px; }
+.rank-name span { margin-top: 3px; color: var(--qp-muted); font-size: 12px; }
+.rank-bar { height: 9px; border-radius: 999px; background: #edf2f7; overflow: hidden; }
+.rank-bar i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--qp-blue), #14b8a6); }
+.rank-row > span, .rank-row > em { font-style: normal; text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; }
+.rank-row > em { color: var(--qp-muted); }
+.qp-quadrant { width: 100%; height: 300px; display: block; border: 1px solid var(--qp-line); border-radius: 8px; background: #fbfcfe; }
+.quad-bg { fill: #ffffff; stroke: #e5eaf1; }
+.quad-axis { stroke: #cbd5e1; stroke-dasharray: 4 5; }
+.qp-quadrant text { fill: var(--qp-muted); font-size: 12px; }
+.qp-quadrant circle { stroke: #ffffff; stroke-width: 2; }
+.quad-good circle { fill: var(--qp-red); }
+.quad-watch circle { fill: var(--qp-amber); }
+.quad-weak circle { fill: var(--qp-green); }
+.quad-neutral circle { fill: var(--qp-blue); }
+.qp-combo { display: grid; gap: 8px; }
+.qp-combo-equity, .qp-combo-dd { width: 100%; display: block; border: 1px solid var(--qp-line); border-radius: 8px; background: linear-gradient(#ffffff, #f9fafb); }
+.qp-combo-equity { height: 220px; }
+.qp-combo-dd { height: 110px; }
+.qp-combo .axis { stroke: #c7cfdb; stroke-width: 1; }
+.qp-combo .line { fill: none; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.drawdown-bar { fill: rgba(14, 157, 93, 0.72); }
+.qp-timeline { list-style: none; margin: 0; padding: 0 0 0 8px; display: grid; gap: 10px; }
+.qp-timeline li { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 14px; position: relative; padding-left: 18px; }
+.qp-timeline li::before { content: ""; position: absolute; left: 0; top: 7px; width: 9px; height: 9px; border-radius: 50%; background: var(--qp-blue); box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12); }
+.qp-timeline li::after { content: ""; position: absolute; left: 4px; top: 22px; bottom: -13px; width: 1px; background: var(--qp-line); }
+.qp-timeline li:last-child::after { display: none; }
+.qp-timeline time { color: var(--qp-muted); font-size: 12px; line-height: 1.5; font-variant-numeric: tabular-nums; }
+.qp-timeline strong { display: block; font-size: 14px; line-height: 1.35; }
+.qp-timeline p { margin: 5px 0 0; color: var(--qp-muted); font-size: 13px; line-height: 1.6; }
+.qp-timeline .event-up::before { background: var(--qp-red); box-shadow: 0 0 0 4px rgba(217, 54, 62, 0.12); }
+.qp-timeline .event-down::before { background: var(--qp-green); box-shadow: 0 0 0 4px rgba(14, 157, 93, 0.12); }
+.qp-timeline .event-watch::before { background: var(--qp-amber); box-shadow: 0 0 0 4px rgba(183, 121, 31, 0.14); }
+@keyframes qpPulse { 0% { box-shadow: 0 0 0 0 rgba(20, 155, 130, 0.38); } 70% { box-shadow: 0 0 0 12px rgba(20, 155, 130, 0); } 100% { box-shadow: 0 0 0 0 rgba(20, 155, 130, 0); } }
+
+@media (max-width: 900px) {
+  .qp-shell { padding: 16px; }
+  .qp-header { display: block; }
+  .qp-status { margin-top: 14px; text-align: left; }
+  .qp-header h1 { font-size: 24px; }
+  .qp-grid { grid-template-columns: 1fr; }
+  .qp-section { grid-column: span 1 !important; }
+  .qp-pulse-hero { grid-template-columns: 1fr; }
+  .pulse-price { font-size: 34px; }
+  .pulse-metrics { grid-template-columns: 1fr; }
+  .trend-combo-head { display: block; }
+  .trend-combo-tags { justify-content: flex-start; margin-top: 10px; }
+  .qp-trend-main { height: 260px; }
+  .qp-decision-brief,
+  .qp-backtest-diagnostics { grid-template-columns: 1fr; }
+  .temp-row { grid-template-columns: 1fr; }
+  .temp-row em { text-align: left; }
+  .rank-row { grid-template-columns: 30px minmax(110px, 1fr) minmax(88px, 1fr); }
+  .rank-row > span, .rank-row > em { display: none; }
+  .qp-timeline li { grid-template-columns: 86px minmax(0, 1fr); }
+}
+`;
+}
+
+async function ensureQuantConfigRenderer(projectPath: string) {
+  const dashboardPath = path.join(projectPath, QUANT_DASHBOARD_DATA_RELATIVE_PATH);
+  const viewConfigPath = path.join(projectPath, QUANT_VIEW_CONFIG_RELATIVE_PATH);
+  let dashboardData = await readJsonRecord(dashboardPath);
+  await writeJsonIfMissing(dashboardPath, {
+    symbol: 'QUANTPILOT',
+    name: '等待生成数据',
+    source: 'quantpilot',
+    as_of: new Date().toISOString(),
+    summary: {
+      metrics: [
+        { label: '数据状态', value: '待生成' },
+        { label: '视图协议', value: 'view-config.json' },
+      ],
+    },
+    analysis: {
+      summary: '请让 Agent 生成 dashboard-data.json 和 view-config.json，页面会通过固定组件安全渲染。',
+    },
+    market: {
+      priceSeries: [],
+    },
+  });
+  dashboardData = await readJsonRecord(dashboardPath);
+  await writeDefaultViewConfigIfMissingOrInvalid(viewConfigPath, dashboardData ?? {});
+  await fs.mkdir(path.join(projectPath, 'app'), { recursive: true });
+  await fs.writeFile(path.join(projectPath, 'app', 'page.tsx'), quantConfigRendererPageTemplate(), 'utf8');
+  await fs.writeFile(path.join(projectPath, 'app', 'globals.css'), quantConfigRendererCss(), 'utf8');
 }
 
 async function upsertGeneratedCssBlock(cssPath: string, marker: string, block: string) {
@@ -2984,7 +4210,7 @@ async function ensureComparisonDashboardTemplate(projectPath: string) {
 }
 
 export async function ensureQuantDashboardTemplate(projectPath: string) {
-  await ensureComparisonDashboardTemplate(projectPath);
+  await ensureQuantConfigRenderer(projectPath);
 }
 
 export async function scaffoldBasicNextApp(
@@ -5640,5 +6866,5 @@ function resolvePort(preferredPort) {
 `
   );
 
-  await ensureComparisonDashboardTemplate(projectPath);
+  await ensureQuantConfigRenderer(projectPath);
 }

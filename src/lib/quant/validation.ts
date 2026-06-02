@@ -13,6 +13,11 @@ import { validateQuantArtifactContracts } from '@/lib/quant/artifact-contracts';
 import { validateQuantVisualPresentation } from '@/lib/quant/visual-validation';
 import { generatedBuildScriptContents, scaffoldBasicNextApp } from '@/lib/utils/scaffold';
 import {
+  QUANT_DASHBOARD_DATA_RELATIVE_PATH,
+  QUANT_VIEW_CONFIG_RELATIVE_PATH,
+} from '@/lib/quant/artifacts';
+import { validateQuantViewConfig } from '@/lib/quant/view-config';
+import {
   markActiveUserRequestsAsCompleted,
   markUserRequestAsCompleted,
 } from '@/lib/services/user-requests';
@@ -28,7 +33,23 @@ export interface QuantValidationCheck {
   details?: string;
   durationMs?: number;
   metadata?: Record<string, unknown>;
+  failureCategory?: QuantFailureCategory;
 }
+
+export type QuantFailureCategory =
+  | 'MODEL_OUTPUT_INVALID'
+  | 'SCHEMA_VALIDATION_FAILED'
+  | 'DATA_FETCH_FAILED'
+  | 'DATA_INSUFFICIENT'
+  | 'DATA_KEY_MISSING'
+  | 'UNSUPPORTED_WIDGET'
+  | 'COMPILE_FAILED'
+  | 'RUNTIME_RENDER_FAILED'
+  | 'PREVIEW_FAILED'
+  | 'VISUAL_VALIDATION_FAILED'
+  | 'AGENT_POLICY_VIOLATION'
+  | 'TIMEOUT'
+  | 'UNKNOWN';
 
 export interface QuantValidationReport {
   schemaVersion: 1;
@@ -430,6 +451,56 @@ async function safeRunCheck(
   }
 }
 
+function categorizeValidationFailure(check: QuantValidationCheck): QuantFailureCategory | undefined {
+  if (check.status !== 'failed') {
+    return undefined;
+  }
+  const haystack = `${check.id}\n${check.summary}\n${check.details ?? ''}`.toLowerCase();
+  if (check.id === 'next_build' || /next\.js build|build failed|type error|typescript|ts\d+/.test(haystack)) {
+    return 'COMPILE_FAILED';
+  }
+  if (check.id === 'typescript_compile') {
+    return 'COMPILE_FAILED';
+  }
+  if (check.id === 'preview_http_200') {
+    return /runtime|render|cannot read|is not a function|hydration/.test(haystack) ? 'RUNTIME_RENDER_FAILED' : 'PREVIEW_FAILED';
+  }
+  if (check.id === 'visual_presentation' || check.id === 'chart_presence') {
+    return 'VISUAL_VALIDATION_FAILED';
+  }
+  if (check.id === 'artifact_policy') {
+    return 'AGENT_POLICY_VIOLATION';
+  }
+  if (check.id === 'view_config_file') {
+    if (haystack.includes('unsupported_widget') || haystack.includes('不支持')) return 'UNSUPPORTED_WIDGET';
+    if (haystack.includes('data_key_missing') || haystack.includes('找不到数据')) return 'DATA_KEY_MISSING';
+    if (haystack.includes('json') || haystack.includes('parse') || haystack.includes('解析')) return 'MODEL_OUTPUT_INVALID';
+    return 'SCHEMA_VALIDATION_FAILED';
+  }
+  if (check.id === 'artifact_contracts') {
+    if (haystack.includes('view_config') || haystack.includes('视图配置')) return 'SCHEMA_VALIDATION_FAILED';
+    return 'SCHEMA_VALIDATION_FAILED';
+  }
+  if (check.id === 'final_data_file') {
+    if (/缺少|不足|没有可用|未提取到/.test(haystack)) return 'DATA_INSUFFICIENT';
+    return 'SCHEMA_VALIDATION_FAILED';
+  }
+  if (check.id === 'evidence_files' || check.id === 'market_proxy') {
+    return 'DATA_FETCH_FAILED';
+  }
+  if (/timeout|超时|超过/.test(haystack)) {
+    return 'TIMEOUT';
+  }
+  return 'UNKNOWN';
+}
+
+function attachFailureCategories(checks: QuantValidationCheck[]): QuantValidationCheck[] {
+  return checks.map((check) => ({
+    ...check,
+    ...(check.status === 'failed' ? { failureCategory: categorizeValidationFailure(check) ?? 'UNKNOWN' } : {}),
+  }));
+}
+
 async function checkBuild(projectPath: string): Promise<Omit<QuantValidationCheck, 'id' | 'name' | 'durationMs'>> {
   await normalizeGeneratedProjectForValidation(projectPath);
 
@@ -474,6 +545,34 @@ async function checkBuild(projectPath: string): Promise<Omit<QuantValidationChec
     summary: result.timedOut
       ? `Next.js build 超过 ${formatDuration(BUILD_TIMEOUT_MS)} 未完成。`
       : `Next.js build 失败，退出码：${result.exitCode ?? 'null'}，信号：${result.signal ?? 'none'}。`,
+    details: result.output,
+  };
+}
+
+async function checkTypeScriptCompile(
+  projectPath: string
+): Promise<Omit<QuantValidationCheck, 'id' | 'name' | 'durationMs'>> {
+  await normalizeGeneratedProjectForValidation(projectPath);
+  const tsconfigPath = path.join(projectPath, 'tsconfig.json');
+  if (!(await fileExists(tsconfigPath))) {
+    return {
+      status: 'failed',
+      summary: '缺少 tsconfig.json，无法执行 TypeScript compile 检查。',
+    };
+  }
+  const result = await runCommand('npx', ['tsc', '--noEmit', '--pretty', 'false'], projectPath, BUILD_TIMEOUT_MS);
+  if (result.exitCode === 0 && !result.timedOut) {
+    return {
+      status: 'passed',
+      summary: 'TypeScript compile 检查通过。',
+      details: result.output,
+    };
+  }
+  return {
+    status: 'failed',
+    summary: result.timedOut
+      ? `TypeScript compile 超过 ${formatDuration(BUILD_TIMEOUT_MS)} 未完成。`
+      : `TypeScript compile 失败，退出码：${result.exitCode ?? 'null'}，信号：${result.signal ?? 'none'}。`,
     details: result.output,
   };
 }
@@ -962,6 +1061,75 @@ async function checkFinalDataFile(
   };
 }
 
+async function checkViewConfigFile(
+  projectPath: string
+): Promise<Omit<QuantValidationCheck, 'id' | 'name' | 'durationMs'>> {
+  const viewConfigPath = path.join(projectPath, QUANT_VIEW_CONFIG_RELATIVE_PATH);
+  const dashboardPath = path.join(projectPath, QUANT_DASHBOARD_DATA_RELATIVE_PATH);
+  const rawConfig = await readTextFile(viewConfigPath);
+  const rawData = await readTextFile(dashboardPath);
+
+  if (!rawConfig) {
+    return {
+      status: 'failed',
+      summary: `缺少 ${QUANT_VIEW_CONFIG_RELATIVE_PATH}。`,
+      details: 'Agent 必须只生成 dashboard-data.json 和 view-config.json；view-config.json 负责自由编排组件顺序、大小和数据绑定。',
+    };
+  }
+  if (!rawData) {
+    return {
+      status: 'failed',
+      summary: `缺少 ${QUANT_DASHBOARD_DATA_RELATIVE_PATH}，无法验证 view-config dataKey。`,
+    };
+  }
+
+  let viewConfig: unknown;
+  let dashboardData: unknown;
+  try {
+    viewConfig = JSON.parse(rawConfig);
+  } catch (error) {
+    return {
+      status: 'failed',
+      summary: 'view-config.json 不是有效 JSON。',
+      details: error instanceof Error ? error.message : String(error),
+      failureCategory: 'MODEL_OUTPUT_INVALID',
+    };
+  }
+  try {
+    dashboardData = JSON.parse(rawData);
+  } catch (error) {
+    return {
+      status: 'failed',
+      summary: 'dashboard-data.json 不是有效 JSON，无法验证视图配置。',
+      details: error instanceof Error ? error.message : String(error),
+      failureCategory: 'MODEL_OUTPUT_INVALID',
+    };
+  }
+
+  const issues = validateQuantViewConfig(viewConfig, dashboardData);
+  if (issues.length > 0) {
+    return {
+      status: 'failed',
+      summary: `view-config.json 未通过配置协议：${issues.length} 个问题。`,
+      details: issues.map((issue) => `${issue.code}: ${issue.message}`).join('\n'),
+      metadata: {
+        issueCodes: Array.from(new Set(issues.map((issue) => issue.code))),
+      },
+    };
+  }
+
+  const sections = Array.isArray(asRecord(viewConfig)?.sections) ? asRecord(viewConfig)?.sections as unknown[] : [];
+  return {
+    status: 'passed',
+    summary: `view-config.json 通过，${sections.length} 个安全组件将由固定 renderer 渲染。`,
+    metadata: {
+      file: QUANT_VIEW_CONFIG_RELATIVE_PATH,
+      bytes: Buffer.byteLength(rawConfig),
+      sectionCount: sections.length,
+    },
+  };
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return null;
@@ -1141,13 +1309,35 @@ function collectVisualizationDependencyWarnings(projectPath: string, packageRaw:
   }
 }
 
+function findDependencyPolicyViolations(projectPath: string, packageRaw: string | null): string[] {
+  if (!packageRaw) {
+    return [];
+  }
+  const allowedDependencies = new Set(['next', 'react', 'react-dom']);
+  const allowedDevDependencies = new Set(['typescript', '@types/react', '@types/node', 'eslint', 'eslint-config-next']);
+  try {
+    const parsed = JSON.parse(packageRaw) as Record<string, unknown>;
+    const dependencies = Object.keys(asRecord(parsed.dependencies) ?? {});
+    const devDependencies = Object.keys(asRecord(parsed.devDependencies) ?? {});
+    const extraDependencies = dependencies.filter((dependency) => !allowedDependencies.has(dependency));
+    const extraDevDependencies = devDependencies.filter((dependency) => !allowedDevDependencies.has(dependency));
+    return [
+      ...extraDependencies.map((dependency) => `${normalizeRelativePath(projectPath, path.join(projectPath, 'package.json'))} 不允许新增运行依赖：${dependency}。`),
+      ...extraDevDependencies.map((dependency) => `${normalizeRelativePath(projectPath, path.join(projectPath, 'package.json'))} 不允许新增开发依赖：${dependency}。`),
+    ];
+  } catch {
+    return ['package.json 不是有效 JSON，无法执行依赖策略检查。'];
+  }
+}
+
 async function checkArtifactPolicy(
   projectPath: string
 ): Promise<Omit<QuantValidationCheck, 'id' | 'name' | 'durationMs'>> {
   const requiredArtifacts = [
     '.quantpilot/run_plan.json',
     'app/page.tsx',
-    'data_file/final/dashboard-data.json',
+    QUANT_DASHBOARD_DATA_RELATIVE_PATH,
+    QUANT_VIEW_CONFIG_RELATIVE_PATH,
     'evidence/sources.json',
     'evidence/data_quality.json',
   ];
@@ -1183,11 +1373,12 @@ async function checkArtifactPolicy(
 
   const pagePath = path.join(projectPath, 'app', 'page.tsx');
   const page = await readTextFile(pagePath);
-  if (page && !/data_file\/final\/dashboard-data\.json|data_file\\final\\dashboard-data\.json|\/api\/market/.test(page)) {
-    violations.push('app/page.tsx 没有使用标准 final 数据文件或 /api/market 同源接口。');
+  if (page && !/QuantPilot Config Renderer|VIEW_CONFIG_FILE|data-view-config-file|view-config\.json/.test(page)) {
+    violations.push('app/page.tsx 必须使用平台固定安全 renderer，Agent 不允许生成或改写页面源码作为交付物。');
   }
 
   const packageRaw = await readTextFile(path.join(projectPath, 'package.json'));
+  violations.push(...findDependencyPolicyViolations(projectPath, packageRaw));
   warnings.push(...collectVisualizationDependencyWarnings(projectPath, packageRaw));
 
   if (violations.length > 0) {
@@ -1670,6 +1861,34 @@ async function checkDashboardBinding(
   const requiredPanels = Array.isArray(runPlanVisualization?.panels)
     ? runPlanVisualization.panels.map((panel) => pickString(panel)).filter((panel): panel is string => Boolean(panel))
     : [];
+  const isConfigRenderer = /QuantPilot Config Renderer|VIEW_CONFIG_FILE|data-view-config-file|view-config\.json/.test(page);
+
+  if (isConfigRenderer) {
+    const viewConfigRaw = await readTextFile(path.join(projectPath, QUANT_VIEW_CONFIG_RELATIVE_PATH));
+    let viewConfig: unknown = null;
+    try {
+      viewConfig = viewConfigRaw ? JSON.parse(viewConfigRaw) : null;
+    } catch {
+      viewConfig = null;
+    }
+    const viewConfigIssues = validateQuantViewConfig(viewConfig, finalData);
+    if (viewConfigIssues.length > 0) {
+      return {
+        status: 'failed',
+        summary: '固定 renderer 已启用，但 view-config.json 未通过绑定检查。',
+        details: viewConfigIssues.map((issue) => `${issue.code}: ${issue.message}`).join('\n'),
+      };
+    }
+    return {
+      status: 'passed',
+      summary: '页面使用平台固定 renderer，并通过 dashboard-data/view-config 数据绑定检查。',
+      metadata: {
+        renderer: 'quant-config-renderer',
+        finalData: QUANT_DASHBOARD_DATA_RELATIVE_PATH,
+        viewConfig: QUANT_VIEW_CONFIG_RELATIVE_PATH,
+      },
+    };
+  }
 
   if (!hasBindingSignal) {
     return {
@@ -1880,9 +2099,84 @@ async function checkChartPresence(
   const runPlan = await readRunPlan(projectPath);
   const plannedSymbols = extractPlannedSymbols(runPlan);
   const finalDataRaw = await readTextFile(path.join(projectPath, 'data_file', 'final', 'dashboard-data.json'));
-  const hasMultiFinalData = Boolean(finalDataRaw && /"assets"\s*:|"comparison"\s*:/.test(finalDataRaw));
+  let finalDataRecordForCharts: Record<string, unknown> | null = null;
+  try {
+    const parsed = finalDataRaw ? JSON.parse(finalDataRaw) : null;
+    finalDataRecordForCharts = asRecord(parsed);
+  } catch {
+    finalDataRecordForCharts = null;
+  }
+  const comparisonForCharts = asRecord(finalDataRecordForCharts?.comparison);
+  const hasMultiFinalData = Boolean(
+    (Array.isArray(finalDataRecordForCharts?.assets) && finalDataRecordForCharts.assets.length > 1) ||
+      (Array.isArray(comparisonForCharts?.rows) && comparisonForCharts.rows.length > 1)
+  );
   const isMultiSymbolTask = plannedSymbols.length > 1 || hasMultiFinalData;
   const plannedTemplateId = pickString(asRecord(runPlan?.visualization)?.templateId);
+  const isConfigRenderer = /QuantPilot Config Renderer|VIEW_CONFIG_FILE|data-view-config-file|view-config\.json/.test(page);
+
+  if (isConfigRenderer) {
+    const viewConfigRaw = await readTextFile(path.join(projectPath, QUANT_VIEW_CONFIG_RELATIVE_PATH));
+    let viewConfig: unknown = null;
+    try {
+      viewConfig = viewConfigRaw ? JSON.parse(viewConfigRaw) : null;
+    } catch {
+      viewConfig = null;
+    }
+    const sections = Array.isArray(asRecord(viewConfig)?.sections)
+      ? (asRecord(viewConfig)?.sections as unknown[]).map(asRecord).filter((section): section is Record<string, unknown> => Boolean(section))
+      : [];
+    const chartTypes = new Set([
+      'line-chart',
+      'bar-chart',
+      'area-chart',
+      'candlestick-chart',
+      'drawdown-chart',
+      'correlation-heatmap',
+      'risk-return-quadrant',
+      'equity-drawdown-combo',
+      'market-pulse-hero',
+      'trend-volume-combo',
+      'valuation-temperature',
+      'financial-quality-matrix',
+      'backtest-diagnostics',
+    ]);
+    const hasChartSection = sections.some((section) => chartTypes.has(String(section.type)));
+    const hasTableOrKpiSection = sections.some((section) => [
+      'data-table',
+      'signal-table',
+      'kpi-grid',
+      'risk-panel',
+      'risk-ribbon',
+      'decision-brief',
+      'asset-ranking-matrix',
+      'signal-timeline',
+    ].includes(String(section.type)));
+    if (!hasChartSection && !hasTableOrKpiSection) {
+      return {
+        status: 'failed',
+        summary: 'view-config.json 未配置可视化组件。',
+        details: '至少需要配置一个图表、指标、风险面板或数据表组件；页面源码由固定 renderer 渲染这些组件。',
+      };
+    }
+    if (isMultiSymbolTask && !sections.some((section) => /comparison|assets|ranking|对比|矩阵|收益|波动|回撤/i.test(`${section.dataKey ?? ''} ${section.title ?? ''} ${section.type ?? ''}`))) {
+      return {
+        status: 'failed',
+        summary: '多标的任务的 view-config 未配置对比组件。',
+        details: '请在 view-config.sections 中加入绑定 comparison.rows、assets 或 selectionRanking.rows 的表格、图表、资产排名矩阵或风险收益象限组件。',
+        metadata: { plannedSymbols },
+      };
+    }
+    return {
+      status: 'passed',
+      summary: '固定 renderer 和 view-config 已配置金融可视化组件。',
+      metadata: {
+        renderer: 'quant-config-renderer',
+        sectionCount: sections.length,
+        hasChartSection,
+      },
+    };
+  }
 
   if (!hasGraphicElement || !hasFinanceOrMarketLanguage) {
     return {
@@ -2088,6 +2382,12 @@ function actionsForFailedCheck(check: QuantValidationCheck): string[] {
         '动态 JSON 字段必须使用 JsonRecord、asRecord、asArray、numeric 等守卫函数处理。',
         '不要通过新增大型图表依赖绕开类型问题。',
       ];
+    case 'typescript_compile':
+      return [
+        ...common,
+        '修复 TypeScript 编译错误；页面源码应保持平台固定 renderer，不要让 Agent 新写 React 页面。',
+        '如果错误来自 view-config 或 dashboard-data 字段不匹配，优先修复两个 JSON 文件。',
+      ];
     case 'preview_http_200':
       return [
         ...common,
@@ -2112,6 +2412,15 @@ function actionsForFailedCheck(check: QuantValidationCheck): string[] {
         'final 数据必须包含 visualization.template_id、variant_id、required_components 和 rendered_components，并与 run_plan.visualization.templateId 对齐。',
         '修复后重新检查 data_file/final/dashboard-data.json 不含 mock/demo/placeholder/sample 等标记，并能被页面读取。',
       ];
+    case 'view_config_file':
+      return [
+        ...common,
+        '生成或修复 data_file/final/view-config.json。',
+        'view-config.json 只能使用平台白名单组件：kpi-grid、line-chart、bar-chart、area-chart、candlestick-chart、data-table、signal-table、markdown-analysis、risk-panel、drawdown-chart、correlation-heatmap、portfolio-allocation、alert-list、market-pulse-hero、trend-volume-combo、decision-brief、risk-ribbon、valuation-temperature、financial-quality-matrix、backtest-diagnostics、asset-ranking-matrix、risk-return-quadrant、equity-drawdown-combo、signal-timeline。',
+        '每个 section 必须包含 id、type、title、dataKey、span、height；span 只能是 3/4/6/8/9/12，height 只能是 small/medium/large/xlarge。',
+        'dataKey 必须能在 data_file/final/dashboard-data.json 中找到；不要引用不存在的数据路径。',
+        '模型可以调整组件顺序、大小、标题、字段映射和展示列，但不能新增组件类型、写 React、写 CSS 或新增依赖。',
+      ];
     case 'evidence_files':
       return [
         ...common,
@@ -2129,6 +2438,8 @@ function actionsForFailedCheck(check: QuantValidationCheck): string[] {
     case 'artifact_policy':
       return [
         ...common,
+        'Agent 只允许生成或修复 data_file/final/dashboard-data.json 和 data_file/final/view-config.json；页面源码由平台固定 renderer 管理。',
+        '不要修改 package.json 增加依赖，也不要执行 npm install、pnpm add 或 yarn add。',
         '移除外部 CDN、远程脚本、远程样式、远程字体、远程媒体和浏览器直连外部 API。',
         '页面资源必须本地化；浏览器取数只能读取 data_file/final/dashboard-data.json 或同源 /api/market/**。',
         '移除 MOCK_DATA、SAMPLE_DATA、STATIC_QUOTES、示例数据、模拟数据、占位数据和明文密钥。',
@@ -2207,7 +2518,8 @@ function buildValidationSummary(report: QuantValidationReport): string {
     ...report.checks.map((check) => {
       const mark = check.status === 'passed' ? '通过' : check.status === 'warning' ? '警告' : '失败';
       const duration = check.durationMs ? `（${formatDuration(check.durationMs)}）` : '';
-      return `- ${mark}：${check.name}${duration} - ${check.summary}`;
+      const category = check.failureCategory ? ` [${check.failureCategory}]` : '';
+      return `- ${mark}：${check.name}${duration}${category} - ${check.summary}`;
     }),
     '',
     `验证报告：${report.reportPath}`,
@@ -2268,21 +2580,22 @@ ${repairSteps || '请重新检查验证报告并补齐缺失产物。'}
 
 修复要求：
 1. 只修改当前生成项目目录内的文件，不要修改父级 QuantPilot 平台工程。
-2. 不要只回复说明，必须实际修改文件并让页面可访问。
+2. 不要只回复说明，必须实际修改文件；Agent 只允许生成或修复 data_file/final/dashboard-data.json 和 data_file/final/view-config.json。
 3. 必须先读取 .quantpilot/validation.json、.quantpilot/validation-repair-plan.json、.quantpilot/run_plan.json、data_file/final/dashboard-data.json、evidence/sources.json、evidence/data_quality.json、app/page.tsx 和 app/globals.css；如果存在 .quantpilot/visual-validation.json，也必须读取截图路径和 viewport metrics。
 4. 如果失败项包含“最终数据文件存在，但没有通过真实数据形态检查”，必须修复 final 数据契约：单标的包含 symbol/name/source/as_of、quote.price/change_percent/quote_time、kline.bars[]；多标的包含 requestedSymbols、assets[]、comparison.rows[]，且覆盖 run_plan.symbols 全部标的。
 5. 不允许把取到的行情、K 线、财务、公告数据整段硬编码到 app/page.tsx；即使是真实数据，整段内联到页面代码也视为失败。
-6. 最终数据必须保留在 data_file/final/dashboard-data.json，页面必须读取该数据文件，或通过同源 /api/market/** 获取/刷新数据。
+6. 最终数据必须保留在 data_file/final/dashboard-data.json；页面结构必须由 data_file/final/view-config.json 描述，由平台固定 renderer 安全渲染。
 7. 必须写入 evidence/sources.json 和 evidence/data_quality.json，记录来源、端点、时间戳、样本长度、缺失字段、警告和限制。
 8. 必须创建 app/api/market/[...path]/route.ts，将 /api/market/** 转发到 http://127.0.0.1:8000/api/v1/**，并保留 query 参数。
 9. 不得引用外部 CDN、远程脚本、远程样式或浏览器直连外部接口；页面资源必须本地化，浏览器取数只能走 final 数据文件或同源 /api/market/**。
 10. 不得留下 MOCK_DATA、SAMPLE_DATA、STATIC_QUOTES、示例数据、模拟数据等 mock/static 产物，也不得写入任何鉴权凭据、会话凭据或密钥值。
-11. 保留或增强金融图表：K 线/量价/均线/财务趋势/公告事件至少覆盖当前用户问题所需内容。
-12. 如果 final 数据包含 assets[] 或 comparison，必须生成多标的对比页面：展示全部标的、指标矩阵、收益对比、波动/回撤对比和相对强弱摘要，不能只展示主标的。
-13. 如果失败细节提示 run_plan 或 visualization.template_id 与任务语义不一致，必须同步修复 .quantpilot/run_plan.json、data_file/final/dashboard-data.json 的 visualization.template_id 和 app/page.tsx 的页面结构。
-14. 修复后在当前生成项目目录内运行 npm run build；如果平台验证仍产生新的失败项，继续修复，不要停在“自动修复计划”页面。
-15. 最终必须确保 npm run build、预览 HTTP 200、数据文件、evidence、产物策略、页面数据绑定、图表存在性、视觉验收和 /api/market 代理都能通过平台验证。
-16. 不要启动开发服务器，QuantPilot 会统一管理预览。`;
+11. 不得修改 app/page.tsx、app/globals.css、app/layout.tsx、components/**、package.json 或构建配置来完成修复；这些由平台管理。
+12. view-config.json 可以自由编排组件顺序、大小、标题、字段映射和展示列，但 section.type 必须来自白名单，span 只能是 3/4/6/8/9/12，height 只能是 small/medium/large/xlarge。
+13. 如果 final 数据包含 assets[] 或 comparison，必须在 view-config 中配置多标的对比区块：展示全部标的、指标矩阵、收益对比、波动/回撤对比和相对强弱摘要，不能只展示主标的。
+14. 如果失败细节提示 run_plan 或 visualization.template_id 与任务语义不一致，优先修复 dashboard-data.json 和 view-config.json 的场景字段与组件编排。
+15. 修复后在当前生成项目目录内运行 npm run build；如果平台验证仍产生新的失败项，继续修复，不要停在“自动修复计划”页面。
+16. 最终必须确保 TypeScript compile、npm run build、预览 HTTP 200、数据文件、view-config、evidence、产物策略、页面数据绑定、图表存在性、视觉验收和 /api/market 代理都能通过平台验证。
+17. 不要启动开发服务器，QuantPilot 会统一管理预览。`;
 }
 
 async function publishValidationSummary(
@@ -2309,6 +2622,7 @@ async function publishValidationSummary(
           name: check.name,
           status: check.status,
           summary: check.summary,
+          failureCategory: check.failureCategory,
         })),
       },
     });
@@ -2385,8 +2699,10 @@ async function validateQuantProjectUnlocked(params: ValidateQuantProjectParams):
     },
   });
 
-  const checks: QuantValidationCheck[] = [];
+  let checks: QuantValidationCheck[] = [];
   try {
+    checks.push(await safeRunCheck('view_config_file', '视图配置文件', () => checkViewConfigFile(projectPath)));
+    checks.push(await safeRunCheck('typescript_compile', 'TypeScript compile', () => checkTypeScriptCompile(projectPath)));
     checks.push(await safeRunCheck('next_build', 'Next.js build', () => checkBuild(projectPath)));
     checks.push(await safeRunCheck('preview_http_200', '预览 HTTP 200', () => checkPreviewHttp(params.projectId)));
     checks.push(await safeRunCheck('visual_presentation', '视觉验收', () => checkVisualPresentation(projectPath, params.projectId, params.requestId)));
@@ -2406,6 +2722,7 @@ async function validateQuantProjectUnlocked(params: ValidateQuantProjectParams):
     });
   }
 
+  checks = attachFailureCategories(checks);
   const passed = checks.every((check) => check.status !== 'failed');
   const updatedAt = new Date().toISOString();
   const report: QuantValidationReport = {
@@ -2444,6 +2761,7 @@ async function validateQuantProjectUnlocked(params: ValidateQuantProjectParams):
           id: check.id,
           status: check.status,
           summary: check.summary,
+          failureCategory: check.failureCategory,
         })),
       },
     },
