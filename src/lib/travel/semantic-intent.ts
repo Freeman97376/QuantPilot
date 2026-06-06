@@ -11,10 +11,14 @@ export interface TravelQueryIntent {
   raw_text: string;
   area: string | null;
   duration_minutes: number | null;
+  day_count: number;
+  start_time: string | null;
   budget_cny: number | null;
   route_mode: TravelRouteMode;
   needs_meal: boolean;
   meal_type: TravelMealType;
+  food_quality_preferred: boolean;
+  accommodation_names: string[];
   avoid_queue: boolean;
   walk_preference: TravelWalkPreference;
   persona: TravelPersona;
@@ -51,7 +55,9 @@ export class TravelIntentError extends Error {
   }
 }
 
+const INTENT_CACHE_VERSION = 'v3-composite-trip-days';
 const INTENT_CACHE_TTL_MS = Number(process.env.TRAVELPILOT_INTENT_CACHE_TTL_MS || 5 * 60 * 1000);
+const MAX_TRIP_DAYS = Number(process.env.TRAVELPILOT_MAX_TRIP_DAYS || 7);
 const intentCache = new Map<string, { expiresAt: number; intent: TravelQueryIntent }>();
 
 const AREA_ALIASES: Array<[string, string]> = [
@@ -70,6 +76,10 @@ const AREA_ALIASES: Array<[string, string]> = [
   ['798', '798'],
 ];
 
+const LANDMARK_ALIASES: Array<[RegExp, string]> = [
+  [/八达岭长城|慕田峪长城|居庸关长城|长城/, '长城'],
+];
+
 const routeModeSchema = z.enum(['culture', 'mixed']).catch('mixed');
 const walkPreferenceSchema = z.enum(['low', 'medium', 'high']).catch('medium');
 const mealTypeSchema = z.enum(['meal', 'snack', 'coffee', 'dessert']).nullable().catch(null);
@@ -78,11 +88,15 @@ const replanActionSchema = z.enum(['add_stop', 'replace_stop', 'remove_stop', 'p
 
 const modelIntentSchema = z.object({
   area: z.string().trim().min(1).nullable().catch(null),
-  duration_minutes: z.coerce.number().int().min(30).max(1440).nullable().catch(null),
+  duration_minutes: z.coerce.number().int().min(30).max(MAX_TRIP_DAYS * 480).nullable().catch(null),
+  day_count: z.coerce.number().int().min(1).max(MAX_TRIP_DAYS).catch(1),
+  start_time: z.string().trim().regex(/^\d{1,2}:\d{2}$/).nullable().catch(null),
   budget_cny: z.coerce.number().int().min(0).max(100000).nullable().catch(null),
   route_mode: routeModeSchema,
   needs_meal: z.coerce.boolean().catch(false),
   meal_type: mealTypeSchema,
+  food_quality_preferred: z.coerce.boolean().catch(false),
+  accommodation_names: z.array(z.string().trim().min(1)).catch([]),
   avoid_queue: z.coerce.boolean().catch(false),
   walk_preference: walkPreferenceSchema,
   persona: personaSchema,
@@ -102,7 +116,7 @@ function normalizeRawText(value: string): string {
 }
 
 function cacheKey(rawText: string): string {
-  return normalizeRawText(rawText).toLowerCase();
+  return `${INTENT_CACHE_VERSION}:${normalizeRawText(rawText).toLowerCase()}`;
 }
 
 function getCachedIntent(key: string): TravelQueryIntent | null {
@@ -136,13 +150,89 @@ function parseArea(text: string): string | null {
   return AREA_ALIASES.find(([alias]) => text.includes(alias))?.[1] ?? null;
 }
 
+function parseLandmarkIncludes(text: string): string[] {
+  return LANDMARK_ALIASES
+    .filter(([pattern]) => pattern.test(text))
+    .map(([, name]) => name);
+}
+
+function parseImplicitIncludeNames(text: string): string[] {
+  const names: string[] = [];
+  const softMatch = text.match(/^(.{2,16}?)(?:也)?(?:不错|可以|行|能安排|能去|安排吗|可以吗|行吗|怎么样|咋样|呢|吧)[？?。！!]*$/);
+  if (softMatch?.[1]) names.push(softMatch[1]);
+  const area = parseArea(text);
+  if (area && /(也|可以|行|不错|安排|去|逛|看|玩|附近|周边|路线)/.test(text)) names.push(area);
+  return Array.from(new Set(names
+    .map((name) => String(name || '').replace(/^(去|到|把|想去|还想去|也想去)/, '').trim())
+    .filter((name) => name.length >= 2 && !/^(这个|那个|哪里|路线|方案|地方|景点)$/.test(name))));
+}
+
+function parseDayCount(text: string): number {
+  const numeric = text.match(/(\d+)\s*(?:天|日)/)?.[1];
+  if (numeric) return Math.max(1, Math.min(MAX_TRIP_DAYS, Number(numeric)));
+  const chineseDigit: Record<string, number> = {
+    一: 1,
+    二: 2,
+    两: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+    十: 10,
+  };
+  const chinese = text.match(/([一二两三四五六七八九十])\s*(?:天|日)/)?.[1];
+  if (chinese && chineseDigit[chinese]) return Math.max(1, Math.min(MAX_TRIP_DAYS, chineseDigit[chinese]));
+  if (/整天|全天/.test(text)) return 1;
+  return 1;
+}
+
+function parseStartTime(text: string): string | null {
+  const explicit = text.match(/(?:早上|上午|中午|下午|晚上|晚间|夜间)?\s*(\d{1,2})[:：点时](\d{2})?/);
+  if (explicit?.[1]) {
+    let hour = Number(explicit[1]);
+    const minute = Number(explicit[2] || 0);
+    const prefix = explicit[0] || '';
+    if (/下午|晚上|晚间|夜间/.test(prefix) && hour < 12) hour += 12;
+    if (/中午/.test(prefix) && hour < 11) hour += 12;
+    if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+      return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+    }
+  }
+  if (/清晨|一早|早上|上午/.test(text)) return '09:00';
+  if (/中午|午餐|午饭/.test(text)) return '11:30';
+  if (/下午/.test(text)) return '14:00';
+  if (/晚上|晚间|夜间|夜游|晚餐/.test(text)) return '18:00';
+  return null;
+}
+
+function parseAccommodationNames(text: string): string[] {
+  const names: string[] = [];
+  const patterns = [
+    /(?:住在|住|住宿在|酒店在|从)([^，,。；;]{2,24}?)(?:酒店|宾馆|民宿|附近|出发|开始|周边|一带)/g,
+    /([^，,。；;]{2,24}?(?:酒店|宾馆|民宿))(?:附近|出发|开始|周边|一带)?/g,
+  ];
+  for (const pattern of patterns) {
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(text)) !== null) {
+      const raw = String(match[1] || '')
+        .replace(/^(我|我们|打算|计划|从)/, '')
+        .replace(/(出发|开始|附近|周边|一带)$/g, '')
+        .trim();
+      if (raw && !/^(北京|酒店|宾馆|民宿)$/.test(raw)) names.push(raw);
+    }
+  }
+  return Array.from(new Set(names)).slice(0, 3);
+}
+
 function parseDurationMinutes(text: string): number | null {
   const hourMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:个)?小时/);
   if (hourMatch?.[1]) return Math.round(Number(hourMatch[1]) * 60);
   if (/半日|半天/.test(text)) return 240;
-  if (/一天|1天|一日|整天|全天/.test(text)) return 480;
-  if (/两天|2天/.test(text)) return 960;
-  if (/三天|3天/.test(text)) return 1440;
+  const dayCount = parseDayCount(text);
+  if (dayCount > 1 || /一天|1天|一日|整天|全天/.test(text)) return dayCount * 480;
   return null;
 }
 
@@ -162,7 +252,7 @@ function parseNamesAfter(text: string, pattern: RegExp): string[] {
       .replace(/(吧|呀|啊|呢|了)$/g, '')
       .trim();
     if (!raw) continue;
-    for (const name of raw.split(/[、和,，]/).map((item) => item.trim()).filter(Boolean)) {
+    for (const name of raw.split(/[、,，]/).map((item) => item.trim()).filter(Boolean)) {
       if (!/^(吃饭|午餐|午饭|餐饮|景点|地方|点|室内点)$/.test(name)) names.push(name);
     }
   }
@@ -170,7 +260,7 @@ function parseNamesAfter(text: string, pattern: RegExp): string[] {
 }
 
 function inferReplanAction(text: string): TravelReplanAction {
-  if (/再加|加一个|添加|增加|顺路/.test(text)) return 'add_stop';
+  if (/再加|加一个|添加|增加|顺路|还想|也想|想去|有点想去|顺便|放进去|排进去|也不错|可以吗|行吗|能安排|能去/.test(text)) return 'add_stop';
   if (/替换|换成|换一个|改成/.test(text)) return 'replace_stop';
   if (/不去|别去|不要去|去掉|排除|删除|取消/.test(text)) return 'remove_stop';
   if (/保留|其他地方不变|原路线|原来的点都保留/.test(text)) return 'preserve_route';
@@ -197,7 +287,8 @@ function buildClarificationIntent(rawText: string, notes: string[]): TravelQuery
 function parseDictionaryIntent(rawText: string): TravelQueryIntent {
   const text = normalizeRawText(rawText);
   const noMeal = /不吃饭|不要吃饭|不安排吃饭/.test(text);
-  const needsMeal = !noMeal && /中午|午餐|午饭|吃饭|餐饮|饭店|餐厅|美食|小吃|咖啡|下午茶|甜品/.test(text);
+  const needsMeal = !noMeal && /中午|午餐|午饭|吃饭|吃点|好吃|餐饮|饭店|餐厅|美食|小吃|咖啡|下午茶|甜品/.test(text);
+  const dayCount = parseDayCount(text);
   const routeMode: TravelRouteMode = /文化|博物馆|景点/.test(text) && !needsMeal ? 'culture' : 'mixed';
   const mealType: TravelMealType = noMeal
     ? null
@@ -223,15 +314,23 @@ function parseDictionaryIntent(rawText: string): TravelQueryIntent {
     raw_text: text,
     area: parseArea(text),
     duration_minutes: parseDurationMinutes(text),
+    day_count: dayCount,
+    start_time: parseStartTime(text),
     budget_cny: parseBudget(text),
     route_mode: routeMode,
     needs_meal: needsMeal,
     meal_type: mealType,
+    food_quality_preferred: !noMeal && /好吃|吃好|吃点好的|靠谱|美食|口碑|招牌|特色|不踩雷|推荐餐厅/.test(text),
+    accommodation_names: parseAccommodationNames(text),
     avoid_queue: /不想排队|少排队|排队少|别排队|低排队/.test(text),
-    walk_preference: (/少走路|少步行|别太累|轻松|老人|长辈|亲子|带娃/.test(text) ? 'low' : 'medium') as TravelWalkPreference,
+    walk_preference: (/少走路|少步行|别太累|不要太累|不太累|轻松|慢慢|老人|长辈|亲子|带娃/.test(text) ? 'low' : 'medium') as TravelWalkPreference,
     persona,
     indoor_preferred: /室内|雨天|下雨|博物馆|美术馆|展览/.test(text),
-    must_include_names: parseNamesAfter(text, /(?:必须去|一定去|想去|保留)([^，,。；;]+)/g),
+    must_include_names: Array.from(new Set([
+      ...parseNamesAfter(text, /(?:必须去|一定去|想去|还想去|也想去|保留)([^，,。；;]+)/g),
+      ...parseLandmarkIncludes(text),
+      ...parseImplicitIncludeNames(text),
+    ])),
     exclude_names: parseNamesAfter(text, /(?:不去|别去|不要去|去掉|排除|删除|取消)([^，,。；;]+)/g),
     replan_action: inferReplanAction(text),
   };
@@ -240,7 +339,11 @@ function parseDictionaryIntent(rawText: string): TravelQueryIntent {
     base.area,
     base.duration_minutes,
     base.budget_cny,
+    base.day_count > 1,
+    base.start_time,
     base.needs_meal,
+    base.food_quality_preferred,
+    base.accommodation_names.length,
     base.avoid_queue,
     base.walk_preference === 'low',
     base.persona,
@@ -263,8 +366,26 @@ function parseDictionaryIntent(rawText: string): TravelQueryIntent {
   };
 }
 
-function shouldUseMiniMax(intent: TravelQueryIntent): boolean {
-  return intent.missing_fields.length > 0 || intent.confidence < 0.75 || /吃点|找点吃的|顺便|别太商业|轻松逛逛|随便逛/.test(intent.raw_text);
+export function shouldUseMiniMaxForTravelIntent(intent: TravelQueryIntent): boolean {
+  const text = intent.raw_text;
+  const complexConstraintCount = [
+    intent.day_count > 1,
+    Boolean(intent.start_time),
+    intent.needs_meal,
+    intent.food_quality_preferred,
+    intent.accommodation_names.length > 0,
+    intent.avoid_queue,
+    intent.walk_preference === 'low',
+    Boolean(intent.budget_cny),
+    Boolean(intent.persona),
+    intent.indoor_preferred,
+    intent.must_include_names.length > 0,
+    intent.exclude_names.length > 0,
+  ].filter(Boolean).length;
+  return intent.missing_fields.length > 0
+    || intent.confidence < 0.75
+    || complexConstraintCount >= 3
+    || /住宿|酒店|宾馆|民宿|住在|从.*出发|吃点|找点吃的|好吃|吃好|靠谱|不踩雷|顺便|别太商业|轻松逛逛|随便逛|上午|下午|晚上|早上/.test(text);
 }
 
 function getMiniMaxConfig() {
@@ -292,10 +413,14 @@ function buildMiniMaxPrompt(rawText: string): string {
     '{',
     '  "area": string|null,',
     '  "duration_minutes": number|null,',
+    '  "day_count": number,',
+    '  "start_time": "HH:mm"|null,',
     '  "budget_cny": number|null,',
     '  "route_mode": "culture"|"mixed",',
     '  "needs_meal": boolean,',
     '  "meal_type": "meal"|"snack"|"coffee"|"dessert"|null,',
+    '  "food_quality_preferred": boolean,',
+    '  "accommodation_names": string[],',
     '  "avoid_queue": boolean,',
     '  "walk_preference": "low"|"medium"|"high",',
     '  "persona": "senior"|"family"|"couple"|"friends"|null,',
@@ -371,10 +496,14 @@ export function validateTravelQueryIntent(rawJson: unknown, rawText: string, mod
     raw_text: normalizeRawText(rawText),
     area: value.area,
     duration_minutes: value.duration_minutes,
+    day_count: value.day_count,
+    start_time: value.start_time,
     budget_cny: value.budget_cny,
     route_mode: value.route_mode,
     needs_meal: value.needs_meal,
     meal_type: value.needs_meal ? value.meal_type || 'meal' : null,
+    food_quality_preferred: value.food_quality_preferred,
+    accommodation_names: Array.from(new Set(value.accommodation_names)),
     avoid_queue: value.avoid_queue,
     walk_preference: value.walk_preference,
     persona: value.persona,
@@ -469,6 +598,14 @@ export async function parseTravelQueryIntentMiniMaxPreferred(rawText: string, op
   if (cached) return cached;
 
   const dictionaryIntent = parseDictionaryIntent(normalized);
+  if (!shouldUseMiniMaxForTravelIntent(dictionaryIntent)) {
+    dictionaryIntent.notes = [
+      ...dictionaryIntent.notes,
+      'Common semantic fast path used; MiniMax intent parsing skipped for latency.',
+    ];
+    setCachedIntent(key, dictionaryIntent);
+    return dictionaryIntent;
+  }
   try {
     const minimaxIntent = await parseMiniMaxIntent(normalized, options);
     setCachedIntent(key, minimaxIntent);
@@ -496,7 +633,7 @@ export async function parseTravelQueryIntent(rawText: string, options: TravelInt
   if (cached) return cached;
 
   const dictionaryIntent = parseDictionaryIntent(normalized);
-  if (!shouldUseMiniMax(dictionaryIntent)) {
+  if (!shouldUseMiniMaxForTravelIntent(dictionaryIntent)) {
     setCachedIntent(key, dictionaryIntent);
     return dictionaryIntent;
   }
@@ -537,12 +674,20 @@ export function intentToPlannerLikeRequest(intent: TravelQueryIntent) {
     area: intent.area,
     max_budget: intent.budget_cny,
     max_duration_min: intent.duration_minutes,
+    day_count: intent.day_count || parseDayCount(intent.raw_text),
+    start_time: intent.start_time || undefined,
     walk_preference: intent.walk_preference,
     persona_id: personaId,
-    must_include_names: intent.must_include_names,
+    must_include_names: Array.from(new Set([
+      ...(intent.must_include_names || []),
+      ...(intent.area && /(去|玩|逛|看|附近|周边|路线)/.test(intent.raw_text) ? [intent.area] : []),
+    ])),
     exclude_names: intent.exclude_names,
     preference_signals: {
       lunch: intent.needs_meal,
+      formal_meal: intent.needs_meal && intent.meal_type === 'meal',
+      quality_food: intent.food_quality_preferred,
+      hotel_anchor: intent.accommodation_names.length > 0,
       avoid_queue: intent.avoid_queue,
       family: intent.persona === 'family',
       senior: intent.persona === 'senior',

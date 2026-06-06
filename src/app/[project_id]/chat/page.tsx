@@ -562,6 +562,7 @@ function TravelItineraryPreviewV2({ data }: { data: TravelItineraryData }) {
   const selectedPlan = proposals[selectedPlanIndex] || primary;
   const selectedStops = Array.isArray(selectedPlan?.pois) ? selectedPlan.pois : stops;
   const dayCount = dailyItinerary.length || planning.day_count || 1;
+  const isMultiDay = dailyItinerary.length > 1;
   const destination = planning.resolved_area || data.parsed_request?.area || '北京';
   const routeTitle =
     selectedPlan?.display_title ||
@@ -593,8 +594,10 @@ function TravelItineraryPreviewV2({ data }: { data: TravelItineraryData }) {
   ];
   const alternatives = proposals.filter((_, index) => index !== selectedPlanIndex);
   const coverImages = [
-    'https://images.unsplash.com/photo-1508804185872-d7badad00f7d?auto=format&fit=crop&w=1200&q=90',
-    'https://upload.wikimedia.org/wikipedia/commons/thumb/1/17/Beijing_China_Forbidden-City-01.jpg/1280px-Beijing_China_Forbidden-City-01.jpg',
+    '/travel-images/qianmen.jpg',
+    '/travel-images/forbidden-city.jpg',
+    '/travel-images/temple-of-heaven.jpg',
+    '/travel-images/beijing-street.jpg',
   ];
   const isTechnicalText = (value?: string | null) =>
     Boolean(
@@ -722,76 +725,133 @@ function TravelItineraryPreviewV2({ data }: { data: TravelItineraryData }) {
               <section className="p-5 sm:p-8 lg:p-10">
                 <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
                   <div>
-                    <p className="text-sm font-black text-[#c46b42]">第 1 天</p>
-                    <h2 className="mt-1 text-3xl font-black tracking-tight">{routeTitle}</h2>
+                    <p className="text-sm font-black text-[#c46b42]">{isMultiDay ? `${dayCount} 天游玩安排` : '第 1 天'}</p>
+                    <h2 className="mt-1 text-3xl font-black tracking-tight">{isMultiDay ? '每天都有独立路线和时间表' : routeTitle}</h2>
                   </div>
                   <button className="rounded-full bg-[#173f35] px-5 py-3 text-sm font-black text-white shadow-sm transition hover:bg-[#205447]">
                     优化行程
                   </button>
                 </div>
 
-                <div className="space-y-9">
-                  {visibleGroups.map(group => (
-                    <section key={group.label} id={`trip-section-${group.label}`} className="scroll-mt-8">
-                      <div className="mb-4 flex items-center gap-3">
-                        <div className="h-px flex-1 bg-[#eadcc9]" />
-                        <span className="rounded-full border border-[#eadcc9] bg-white px-4 py-1.5 text-sm font-black text-[#9c5834]">{group.label}</span>
-                        <div className="h-px flex-1 bg-[#eadcc9]" />
-                      </div>
-                      <div className="space-y-5">
-                        {group.stops.map((stop: Record<string, any>, index: number) => {
-                          const globalIndex = selectedStops.findIndex((item: Record<string, any>) => item === stop);
-                          const previousStop = selectedStops[globalIndex - 1] as Record<string, any> | undefined;
-                          return (
-                            <article key={`${stop.poi_id ?? stop.name}-${group.label}-${index}`} className="group rounded-[1.75rem] border border-[#eadcc9] bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-[0_18px_50px_rgba(92,64,33,0.12)] sm:p-6">
-                              <div className="flex flex-col gap-4 md:flex-row md:items-start">
-                                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-[#ef7f55] text-lg font-black text-white shadow-sm">
-                                  {globalIndex + 1 || index + 1}
-                                </div>
-                                <div className="min-w-0 flex-1">
-                                  <div className="flex flex-wrap items-start justify-between gap-3">
-                                    <div>
-                                      <div className="flex flex-wrap items-center gap-2">
-                                        <h3 className="text-2xl font-black tracking-tight">{stop.name}</h3>
-                                        <StopBadge stop={stop} />
-                                      </div>
-                                      <p className="mt-2 text-sm font-semibold text-[#667085]">{stop.arrival_time || '--:--'} - {stop.departure_time || '--:--'}</p>
+                {isMultiDay ? (
+                  <div className="space-y-8">
+                    {dailyItinerary.map((day: Record<string, any>, dayIndex: number) => {
+                      const dayProposal = day.proposal || {};
+                      const dayStops = Array.isArray(dayProposal.pois) ? dayProposal.pois : [];
+                      return (
+                        <section key={day.day ?? dayIndex} id={`trip-day-${dayIndex + 1}`} className="scroll-mt-8 rounded-[1.75rem] border border-[#eadcc9] bg-white p-5 shadow-sm sm:p-6">
+                          <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-black text-[#c46b42]">{day.title || `第 ${dayIndex + 1} 天`}</p>
+                              <h3 className="mt-1 text-2xl font-black tracking-tight">{day.area || destination} · {day.theme || dayProposal.display_title || '日程方案'}</h3>
+                            </div>
+                            <div className="flex gap-2 text-sm font-black">
+                              <span className="rounded-full bg-[#173f35] px-3 py-1.5 text-white">{dayProposal.total_route_duration_min ?? '-'} 分钟</span>
+                              <span className="rounded-full bg-[#f4c66f] px-3 py-1.5 text-[#101828]">{dayProposal.total_budget_estimate ?? '-'} 元</span>
+                            </div>
+                          </div>
+                          <div className="space-y-4">
+                            {dayStops.map((stop: Record<string, any>, index: number) => {
+                              const previousStop = dayStops[index - 1] as Record<string, any> | undefined;
+                              return (
+                                <article key={`${stop.poi_id ?? stop.name}-${dayIndex}-${index}`} className="rounded-[1.35rem] border border-[#eadcc9] bg-[#fffaf4] p-4">
+                                  <div className="flex flex-col gap-4 md:flex-row md:items-start">
+                                    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[#ef7f55] text-base font-black text-white shadow-sm">
+                                      {index + 1}
                                     </div>
-                                    <div className="rounded-full bg-[#f8efe5] px-4 py-2 text-sm font-black text-[#a75933]">
-                                      约 {stop.duration_minutes ?? stop.stay_minutes ?? '-'} 分钟
+                                    <div className="min-w-0 flex-1">
+                                      <div className="flex flex-wrap items-start justify-between gap-3">
+                                        <div>
+                                          <div className="flex flex-wrap items-center gap-2">
+                                            <h4 className="text-xl font-black tracking-tight">{stop.name}</h4>
+                                            <StopBadge stop={stop} />
+                                          </div>
+                                          <p className="mt-2 text-sm font-semibold text-[#667085]">{stop.arrival_time || '--:--'} - {stop.departure_time || '--:--'}</p>
+                                        </div>
+                                        <div className="rounded-full bg-[#f8efe5] px-4 py-2 text-sm font-black text-[#a75933]">
+                                          约 {stop.duration_minutes ?? stop.stay_minutes ?? '-'} 分钟
+                                        </div>
+                                      </div>
+                                      <p className="mt-3 text-sm leading-7 text-[#344054]">{stopDescription(stop)}</p>
+                                      {previousStop ? (
+                                        <p className="mt-3 rounded-2xl bg-[#eef8f3] p-3 text-sm leading-6 text-[#236247]">
+                                          上一站：{previousStop.name} → {stop.name}，约 {stop.transfer_from_previous_minutes ?? '-'} 分钟 · {stop.transfer_from_previous_meters ?? '-'} 米
+                                        </p>
+                                      ) : null}
                                     </div>
                                   </div>
-                                  <p className="mt-4 text-base leading-8 text-[#344054]">{stopDescription(stop)}</p>
-                                  <div className="mt-4 grid gap-3 md:grid-cols-3">
-                                    {stop.opening_hours_note ? (
-                                      <div className="rounded-2xl bg-[#fff8ed] p-3 text-sm leading-6 text-[#7a4d27]">
-                                        <span className="font-black">到访提醒</span>
-                                        <p>{stop.opening_hours_note}</p>
+                                </article>
+                              );
+                            })}
+                          </div>
+                        </section>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="space-y-9">
+                    {visibleGroups.map(group => (
+                      <section key={group.label} id={`trip-section-${group.label}`} className="scroll-mt-8">
+                        <div className="mb-4 flex items-center gap-3">
+                          <div className="h-px flex-1 bg-[#eadcc9]" />
+                          <span className="rounded-full border border-[#eadcc9] bg-white px-4 py-1.5 text-sm font-black text-[#9c5834]">{group.label}</span>
+                          <div className="h-px flex-1 bg-[#eadcc9]" />
+                        </div>
+                        <div className="space-y-5">
+                          {group.stops.map((stop: Record<string, any>, index: number) => {
+                            const globalIndex = selectedStops.findIndex((item: Record<string, any>) => item === stop);
+                            const previousStop = selectedStops[globalIndex - 1] as Record<string, any> | undefined;
+                            return (
+                              <article key={`${stop.poi_id ?? stop.name}-${group.label}-${index}`} className="group rounded-[1.75rem] border border-[#eadcc9] bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-[0_18px_50px_rgba(92,64,33,0.12)] sm:p-6">
+                                <div className="flex flex-col gap-4 md:flex-row md:items-start">
+                                  <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-[#ef7f55] text-lg font-black text-white shadow-sm">
+                                    {globalIndex + 1 || index + 1}
+                                  </div>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex flex-wrap items-start justify-between gap-3">
+                                      <div>
+                                        <div className="flex flex-wrap items-center gap-2">
+                                          <h3 className="text-2xl font-black tracking-tight">{stop.name}</h3>
+                                          <StopBadge stop={stop} />
+                                        </div>
+                                        <p className="mt-2 text-sm font-semibold text-[#667085]">{stop.arrival_time || '--:--'} - {stop.departure_time || '--:--'}</p>
                                       </div>
-                                    ) : null}
-                                    {previousStop ? (
-                                      <div className="rounded-2xl bg-[#eef8f3] p-3 text-sm leading-6 text-[#236247]">
-                                        <span className="font-black">上一站过来</span>
-                                        <p>{previousStop.name} → {stop.name}</p>
-                                        <p>{stop.transfer_from_previous_minutes ?? '-'} 分钟 · {stop.transfer_from_previous_meters ?? '-'} 米</p>
+                                      <div className="rounded-full bg-[#f8efe5] px-4 py-2 text-sm font-black text-[#a75933]">
+                                        约 {stop.duration_minutes ?? stop.stay_minutes ?? '-'} 分钟
                                       </div>
-                                    ) : null}
-                                    {selectionDescription(stop) ? (
-                                      <div className="rounded-2xl bg-[#f7f4ff] p-3 text-sm leading-6 text-[#5141a4]">
-                                        <span className="font-black">为什么选它</span>
-                                        <p>{selectionDescription(stop)}</p>
-                                      </div>
-                                    ) : null}
+                                    </div>
+                                    <p className="mt-4 text-base leading-8 text-[#344054]">{stopDescription(stop)}</p>
+                                    <div className="mt-4 grid gap-3 md:grid-cols-3">
+                                      {stop.opening_hours_note ? (
+                                        <div className="rounded-2xl bg-[#fff8ed] p-3 text-sm leading-6 text-[#7a4d27]">
+                                          <span className="font-black">到访提醒</span>
+                                          <p>{stop.opening_hours_note}</p>
+                                        </div>
+                                      ) : null}
+                                      {previousStop ? (
+                                        <div className="rounded-2xl bg-[#eef8f3] p-3 text-sm leading-6 text-[#236247]">
+                                          <span className="font-black">上一站过来</span>
+                                          <p>{previousStop.name} → {stop.name}</p>
+                                          <p>{stop.transfer_from_previous_minutes ?? '-'} 分钟 · {stop.transfer_from_previous_meters ?? '-'} 米</p>
+                                        </div>
+                                      ) : null}
+                                      {selectionDescription(stop) ? (
+                                        <div className="rounded-2xl bg-[#f7f4ff] p-3 text-sm leading-6 text-[#5141a4]">
+                                          <span className="font-black">为什么选它</span>
+                                          <p>{selectionDescription(stop)}</p>
+                                        </div>
+                                      ) : null}
+                                    </div>
                                   </div>
                                 </div>
-                              </div>
-                            </article>
-                          );
-                        })}
-                      </div>
-                    </section>
-                  ))}
-                </div>
+                              </article>
+                            );
+                          })}
+                        </div>
+                      </section>
+                    ))}
+                  </div>
+                )}
 
                 {hasRouteDiff ? (
                   <section className="mt-10 rounded-[1.75rem] border border-[#eadcc9] bg-[#fff6ec] p-6">
@@ -885,7 +945,16 @@ function TravelItineraryPreviewV2({ data }: { data: TravelItineraryData }) {
               <section className="rounded-[1.75rem] border border-[#eadcc9] bg-white p-6 shadow-sm">
                 <p className="text-sm font-black text-[#c46b42]">路线目录</p>
                 <div className="mt-4 space-y-2">
-                  {visibleGroups.map((group, index) => (
+                  {isMultiDay ? dailyItinerary.map((day: Record<string, any>, index: number) => {
+                    const dayStops = Array.isArray(day.proposal?.pois) ? day.proposal.pois : [];
+                    return (
+                      <a key={day.day ?? index} href={`#trip-day-${index + 1}`} className="flex items-center gap-3 rounded-2xl px-3 py-3 text-sm font-black text-[#344054] transition hover:bg-[#fff4e8] hover:text-[#c46b42]">
+                        <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[#f8efe5] text-xs text-[#a75933]">{index + 1}</span>
+                        <span>{day.title || `第 ${index + 1} 天`}</span>
+                        <span className="ml-auto text-xs font-bold text-[#98a2b3]">{dayStops.length} 站</span>
+                      </a>
+                    );
+                  }) : visibleGroups.map((group, index) => (
                     <a key={group.label} href={`#trip-section-${group.label}`} className="flex items-center gap-3 rounded-2xl px-3 py-3 text-sm font-black text-[#344054] transition hover:bg-[#fff4e8] hover:text-[#c46b42]">
                       <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[#f8efe5] text-xs text-[#a75933]">{index + 1}</span>
                       <span>{group.label}</span>

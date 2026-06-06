@@ -108,6 +108,49 @@ const cases = [
     },
     allowMinimaxMealInference: true,
   },
+  {
+    name: 'multi_day_food_area_combo',
+    text: '五天玩颐和园，想吃好吃的。',
+    expect: {
+      area: '颐和园',
+      duration_minutes: 2400,
+      day_count: 5,
+      needs_meal: true,
+      route_mode: 'mixed',
+      food_quality_preferred: true,
+    },
+    expectMustIncludePattern: /颐和园/,
+    allowMinimaxMealInference: true,
+  },
+  {
+    name: 'hotel_time_food_combo',
+    text: '住在王府井附近，明天下午开始，两天，想看文化景点，也要安排好吃的，少排队。',
+    expect: {
+      area: '王府井',
+      day_count: 2,
+      needs_meal: true,
+      route_mode: 'mixed',
+      avoid_queue: true,
+      food_quality_preferred: true,
+    },
+    expectHotelAnchor: true,
+    allowMinimaxMealInference: true,
+  },
+  {
+    name: 'numeric_random_day_combo',
+    text: '4天在北海附近慢慢玩，住酒店，想吃点靠谱的，不要太累。',
+    expect: {
+      area: '北海',
+      duration_minutes: 1920,
+      day_count: 4,
+      needs_meal: true,
+      walk_preference: 'low',
+      route_mode: 'mixed',
+      food_quality_preferred: true,
+    },
+    expectHotelAnchor: true,
+    allowMinimaxMealInference: true,
+  },
 ];
 
 function assertIntent(name, intent, expect) {
@@ -142,6 +185,24 @@ async function main() {
       );
     }
     assertIntent(item.name, intent, item.expect);
+    if (item.expectMustIncludePattern) {
+      assert(
+        Array.isArray(intent.must_include_names) && intent.must_include_names.some((name) => item.expectMustIncludePattern.test(name)),
+        `${item.name}: must_include_names should include requested area/place, got ${JSON.stringify(intent.must_include_names)}`,
+      );
+    }
+    if (item.expectAccommodation) {
+      assert(
+        Array.isArray(intent.accommodation_names) && intent.accommodation_names.length > 0,
+        `${item.name}: accommodation_names should be extracted, got ${JSON.stringify(intent.accommodation_names)}`,
+      );
+    }
+    if (item.expectHotelAnchor) {
+      assert(
+        /酒店|住宿|宾馆|民宿|住在/.test(intent.raw_text || '') || (Array.isArray(intent.accommodation_names) && intent.accommodation_names.length > 0),
+        `${item.name}: hotel accommodation signal should be preserved, got raw=${intent.raw_text} names=${JSON.stringify(intent.accommodation_names)}`,
+      );
+    }
     rows.push({
       case: item.name,
       parser: intent.parser,
@@ -152,6 +213,7 @@ async function main() {
       missing_fields: intent.missing_fields,
       area: intent.area,
       duration_minutes: intent.duration_minutes,
+      day_count: intent.day_count,
       persona: intent.persona,
       replan_action: intent.replan_action,
     });

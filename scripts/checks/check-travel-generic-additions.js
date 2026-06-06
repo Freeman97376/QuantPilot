@@ -58,6 +58,29 @@ async function act(projectId, instruction, capabilityId = 'culture_route', suffi
   });
 }
 
+async function assertArbitraryRouteAddition({
+  label,
+  seedGoal,
+  adjustment,
+  expectedPattern,
+  capabilityId = 'culture_route',
+}) {
+  const projectId = `project-generic-additions-${label}-${Date.now().toString(36)}`;
+  await createProject(projectId, capabilityId);
+  const seed = await act(projectId, seedGoal, capabilityId, 'seed');
+  const before = names(seed);
+  assert(seed.status === 'travel_plan_completed', `${label}: seed should plan, got ${seed.status}`);
+  assert(before.length >= 3, `${label}: seed should have at least 3 stops: ${before.join(' -> ')}`);
+
+  const added = await act(projectId, adjustment, capabilityId, 'add');
+  const after = names(added);
+  assert(added.status === 'travel_replan_completed', `${label}: add should replan, got ${added.status}`);
+  assert(after.some((name) => expectedPattern.test(name)), `${label}: add should include requested place: ${after.join(' -> ')}`);
+  for (const original of before) assert(after.includes(original), `${label}: add should preserve original route stop: ${original}; before=${before.join(' -> ')} after=${after.join(' -> ')}`);
+  assert(after.length >= before.length + 1, `${label}: route should grow after addition: ${before.join(' -> ')} => ${after.join(' -> ')}`);
+  return { before, after };
+}
+
 async function main() {
   const cultureProjectId = `project-generic-additions-culture-${Date.now().toString(36)}`;
   await createProject(cultureProjectId, 'culture_route');
@@ -90,6 +113,93 @@ async function main() {
   assert(slashAfter.length === slashBefore.length + 1, `slash add should add exactly one stop: ${slashBefore.join(' -> ')} => ${slashAfter.join(' -> ')}`);
   for (const original of slashBefore) assert(slashAfter.includes(original), `slash add should preserve original stop: ${original}`);
 
+  const naturalProjectId = `project-generic-additions-natural-${Date.now().toString(36)}`;
+  await createProject(naturalProjectId, 'culture_route');
+  const naturalSeed = await act(naturalProjectId, '故宫附近文化路线，少走路，不吃饭', 'culture_route', 'seed');
+  const naturalBefore = names(naturalSeed);
+  assert(naturalSeed.status === 'travel_plan_completed', `natural seed should plan, got ${naturalSeed.status}`);
+  assert(naturalBefore.length >= 3, `natural seed should have at least 3 stops: ${naturalBefore.join(' -> ')}`);
+
+  const naturalAdd = await act(naturalProjectId, '我有点想去长城', 'culture_route', 'natural-add-great-wall');
+  const naturalAfter = names(naturalAdd);
+  assert(naturalAdd.status === 'travel_replan_completed', `natural named add should replan, got ${naturalAdd.status}`);
+  assert(naturalAfter.some((name) => /长城|八达岭/.test(name)), `natural named add should include Great Wall: ${naturalAfter.join(' -> ')}`);
+  for (const original of naturalBefore) assert(naturalAfter.includes(original), `natural named add should preserve original stop: ${original}`);
+  assert(!naturalAfter[0]?.includes('什刹海'), `natural named add should not fall back to Shichahai route: ${naturalAfter.join(' -> ')}`);
+
+  const implicitProjectId = `project-generic-additions-implicit-${Date.now().toString(36)}`;
+  await createProject(implicitProjectId, 'culture_route');
+  const implicitSeed = await act(implicitProjectId, '故宫附近文化路线，少走路，不吃饭', 'culture_route', 'seed');
+  const implicitBefore = names(implicitSeed);
+  const implicitAdd = await act(implicitProjectId, '长城也不错？', 'culture_route', 'implicit-add-great-wall');
+  const implicitAfter = names(implicitAdd);
+  assert(implicitAdd.status === 'travel_replan_completed', `implicit named add should replan, got ${implicitAdd.status}`);
+  assert(implicitAfter.some((name) => /长城|八达岭/.test(name)), `implicit named add should include Great Wall: ${implicitAfter.join(' -> ')}`);
+  for (const original of implicitBefore) assert(implicitAfter.includes(original), `implicit named add should preserve original stop: ${original}`);
+
+  const tiantanProjectId = `project-generic-additions-tiantan-${Date.now().toString(36)}`;
+  await createProject(tiantanProjectId, 'culture_route');
+  const tiantanSeed = await act(tiantanProjectId, '故宫附近文化路线，少走路，不吃饭', 'culture_route', 'seed');
+  const tiantanBefore = names(tiantanSeed);
+  const tiantanAdd = await act(tiantanProjectId, '还想去天坛公园', 'culture_route', 'natural-add-tiantan');
+  const tiantanAfter = names(tiantanAdd);
+  assert(tiantanAdd.status === 'travel_replan_completed', `tiantan add should replan, got ${tiantanAdd.status}`);
+  assert(tiantanAfter.some((name) => /天坛公园/.test(name)), `tiantan add should include requested POI: ${tiantanAfter.join(' -> ')}`);
+  for (const original of tiantanBefore) assert(tiantanAfter.includes(original), `tiantan add should preserve original stop: ${original}`);
+
+  const universalProjectId = `project-generic-additions-universal-${Date.now().toString(36)}`;
+  await createProject(universalProjectId, 'culture_route');
+  const universalSeed = await act(universalProjectId, '故宫附近文化路线，少走路，不吃饭', 'culture_route', 'seed');
+  const universalBefore = names(universalSeed);
+  const universalAdd = await act(universalProjectId, '能不能把环球影城也放进去', 'culture_route', 'natural-add-universal');
+  const universalAfter = names(universalAdd);
+  assert(universalAdd.status === 'travel_replan_completed', `universal add should replan, got ${universalAdd.status}`);
+  assert(universalAfter.some((name) => /环球影城/.test(name)), `universal add should include requested arbitrary place: ${universalAfter.join(' -> ')}`);
+  for (const original of universalBefore) assert(universalAfter.includes(original), `universal add should preserve original stop: ${original}`);
+
+  const unknownProjectId = `project-generic-additions-unknown-${Date.now().toString(36)}`;
+  await createProject(unknownProjectId, 'culture_route');
+  const unknownSeed = await act(unknownProjectId, '故宫附近文化路线，少走路，不吃饭', 'culture_route', 'seed');
+  const unknownBefore = names(unknownSeed);
+  const unknownAdd = await act(unknownProjectId, '顺便去某某小众展馆', 'culture_route', 'natural-add-unknown');
+  const unknownAfter = names(unknownAdd);
+  const unknownPois = pois(unknownAdd);
+  assert(unknownAdd.status === 'travel_replan_completed', `unknown add should replan, got ${unknownAdd.status}`);
+  assert(unknownAfter.some((name) => /某某小众展馆/.test(name)), `unknown add should include fallback requested place: ${unknownAfter.join(' -> ')}`);
+  assert(unknownPois.some((poi) => /某某小众展馆/.test(poi.name) && Array.isArray(poi.planning_tags) && poi.planning_tags.includes('needs_address_confirmation')), 'unknown add should mark fallback POI as needing address confirmation');
+  for (const original of unknownBefore) assert(unknownAfter.includes(original), `unknown add should preserve original stop: ${original}`);
+
+  const arbitraryRouteCases = [
+    {
+      label: 'qianmen-mixed-add-tiantan',
+      capabilityId: 'mixed_food_route',
+      seedGoal: '前门附近玩4小时，中午吃饭，想吃好但不想排队，预算200以内，少走路',
+      adjustment: '还想去天坛公园',
+      expectedPattern: /天坛公园/,
+    },
+    {
+      label: 'shichahai-culture-add-summer-palace',
+      capabilityId: 'culture_route',
+      seedGoal: '什刹海附近安排4小时文化路线，少走路，不吃饭',
+      adjustment: '也想去颐和园',
+      expectedPattern: /颐和园/,
+    },
+    {
+      label: 'wangfujing-budget-add-unknown',
+      capabilityId: 'budget_route',
+      seedGoal: '王府井附近玩3小时，预算80以内，少走路，不吃饭',
+      adjustment: '顺便去临时朋友推荐的小展馆',
+      expectedPattern: /临时朋友推荐的小展馆/,
+    },
+  ];
+  const arbitraryResults = [];
+  for (const item of arbitraryRouteCases) {
+    arbitraryResults.push({
+      label: item.label,
+      ...(await assertArbitraryRouteAddition(item)),
+    });
+  }
+
   const addLunchToCulture = await act(cultureProjectId, '再加一个顺路的午餐地点，原来的点都保留', 'culture_route', 'add-lunch');
   const lunchNames = names(addLunchToCulture);
   const lunchStops = foodPois(addLunchToCulture);
@@ -111,6 +221,14 @@ async function main() {
 
   console.log('[travel-generic-additions] passed');
   console.log(`generic add: ${before.join(' -> ')} => ${genericAfter.join(' -> ')}`);
+  console.log(`natural named add: ${naturalBefore.join(' -> ')} => ${naturalAfter.join(' -> ')}`);
+  console.log(`implicit named add: ${implicitBefore.join(' -> ')} => ${implicitAfter.join(' -> ')}`);
+  console.log(`tiantan add: ${tiantanBefore.join(' -> ')} => ${tiantanAfter.join(' -> ')}`);
+  console.log(`universal add: ${universalBefore.join(' -> ')} => ${universalAfter.join(' -> ')}`);
+  console.log(`unknown add: ${unknownBefore.join(' -> ')} => ${unknownAfter.join(' -> ')}`);
+  for (const item of arbitraryResults) {
+    console.log(`${item.label}: ${item.before.join(' -> ')} => ${item.after.join(' -> ')}`);
+  }
   console.log(`add lunch: ${lunchNames.join(' -> ')}`);
 }
 

@@ -146,10 +146,10 @@ export default function HomePage() {
     ROLE_MODULES.find((r) => r.capabilityId === selectedCapability) ??
     ROLE_MODULES[0];
   const scenicImages = [
-    "https://images.unsplash.com/photo-1508804185872-d7badad00f7d?auto=format&fit=crop&w=1600&q=80",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/1/17/Beijing_China_Forbidden-City-01.jpg/1280px-Beijing_China_Forbidden-City-01.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6d/20200110_Temple_of_Heaven-13.jpg/1280px-20200110_Temple_of_Heaven-13.jpg",
-    "https://images.unsplash.com/photo-1510332981392-36692ea3a195?auto=format&fit=crop&w=1200&q=90",
+    "/travel-images/qianmen.jpg",
+    "/travel-images/forbidden-city.jpg",
+    "/travel-images/temple-of-heaven.jpg",
+    "/travel-images/temple-of-heaven.jpg",
   ];
   const formFieldClass =
     "h-12 w-full rounded-[1.35rem] border border-white/60 bg-white/40 px-4 text-sm font-semibold text-neutral-800 outline-none transition focus:border-white focus:bg-white/65 focus:ring-2 focus:ring-white/70";
@@ -578,7 +578,7 @@ export default function HomePage() {
                 <img
                   src={scenicImages[3]}
                   alt=""
-                  className="h-full w-full object-cover saturate-150 contrast-115 brightness-105"
+                  className="h-full w-full object-cover opacity-70 saturate-105 contrast-105 brightness-125"
                 />
               </div>
               <div className="absolute inset-0 bg-white/5 mix-blend-overlay" />

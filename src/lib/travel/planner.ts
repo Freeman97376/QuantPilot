@@ -5,13 +5,14 @@ import { buildTravelQueryPlan, executeTravelQueryPlan } from '@/lib/travel/sql-q
 import {
   intentToPlannerLikeRequest,
   parseTravelQueryIntentMiniMaxPreferred,
+  parseTravelQueryIntent,
   type TravelQueryIntent,
 } from '@/lib/travel/semantic-intent';
 import { rerankTravelProposals } from '@/lib/travel/llm-rerank';
 import { retrieveTravelWiki } from '@/lib/travel/wiki-retrieval';
 import { applyTravelPlanningAdvice, getTravelPlanningAdvice, type TravelPlanningAdvice } from '@/lib/travel/llm-planning-advice';
 import { generateTravelRouteDraft, type TravelRouteDraft, type TravelRouteDraftValidation } from '@/lib/travel/llm-route-draft';
-import { buildPlanningResponseFromRouteCorpus, findPrecomputedTravelRoutes } from '@/lib/travel/route-corpus';
+import { buildPlanningResponseFromRouteCorpus, findPrecomputedTravelRoutes, findRouteCorpusPoiHints } from '@/lib/travel/route-corpus';
 
 type JsonRecord = Record<string, any>;
 type RouteMode = 'culture' | 'mixed';
@@ -20,6 +21,7 @@ type Pace = 'relaxed' | 'balanced' | 'compact';
 type Strategy = 'balanced' | 'budget' | 'efficient';
 type MealType = 'meal' | 'snack' | 'coffee' | 'dessert' | 'hotel_dining' | 'invalid' | 'non_food';
 type TransferSource = 'commute_edge' | 'coordinate_estimate';
+const MAX_TRIP_DAYS = Number(process.env.TRAVELPILOT_MAX_TRIP_DAYS || 7);
 
 interface CommuteEdge {
   origin_poi_id: string;
@@ -69,6 +71,24 @@ export interface TravelPlanningRequest {
   exclude_poi_ids?: string[];
   route_order_poi_ids?: string[];
   preference_signals?: Record<string, boolean>;
+  replan_acceleration_cache?: TravelReplanAccelerationCache | null;
+}
+
+interface TravelReplanPoiHint {
+  poi_id: string;
+  name: string;
+  area?: string | null;
+  district?: string | null;
+  poi_type?: string | null;
+  category?: string | null;
+  source: string;
+  semantic_keys: string[];
+}
+
+interface TravelReplanAccelerationCache {
+  source: string;
+  created_at: string;
+  poi_hints: TravelReplanPoiHint[];
 }
 
 export interface TravelCandidateBuckets {
@@ -143,6 +163,36 @@ let dataLoadElapsedMs: number | null = null;
 let commuteEdgeCache: Promise<CommuteEdgeIndex> | null = null;
 let commuteEdgeLoadedAt: string | null = null;
 let commuteEdgeLoadElapsedMs: number | null = null;
+
+const LANDMARK_FIXTURE_POIS: Poi[] = [
+  {
+    poi_id: 'fixture_badaling_great_wall',
+    name: '八达岭长城',
+    district: '延庆区',
+    area: '长城',
+    category: '景区',
+    poi_type: 'culture',
+    address: '北京市延庆区G6京藏高速58号出口',
+    lng: 116.016736,
+    lat: 40.356213,
+    rating: 4.8,
+    avg_cost: 40,
+    review_count: 12000,
+    open_time: '07:30',
+    close_time: '17:00',
+    suggested_duration_min: 180,
+    planning_tags: ['landmark', 'scene:outdoor', 'theme:great_wall', 'walk:high', 'classic_first_timer'],
+    evidence_tags: ['北京经典地标', '适合半日或一日游', '与市区 POI 转场较远'],
+    queue_risk: 'high',
+    value_for_money: 'medium',
+    family_friendliness: 'medium',
+    environment_quality: 'high',
+    meal_type: 'invalid',
+    is_lunch_suitable: false,
+    is_coffee_stop: false,
+    is_meal_stop: false,
+  },
+];
 
 async function readJsonArray<T>(fileName: string): Promise<T[]> {
   const content = await fs.readFile(path.join(DATA_ROOT, fileName), 'utf8');
@@ -234,9 +284,10 @@ async function loadTravelData(): Promise<TravelData> {
       readJsonArray<ReviewAggregate>('beijing_poi_feature_aggregates.json'),
       readJsonArray<ReviewRecord>('beijing_review_records.json'),
     ]).then(([culturePois, mixedPois, plannerEntities, reviewAggregates, reviewRecords]) => {
-      const normalizedCulturePois = culturePois.map(normalizePoi);
-      const normalizedMixedPois = mixedPois.map(normalizePoi);
-      const normalizedPlannerEntities = plannerEntities.map(normalizePoi);
+      const landmarkFixtures = LANDMARK_FIXTURE_POIS.map(normalizePoi);
+      const normalizedCulturePois = [...landmarkFixtures, ...culturePois.map(normalizePoi)];
+      const normalizedMixedPois = [...landmarkFixtures, ...mixedPois.map(normalizePoi)];
+      const normalizedPlannerEntities = [...landmarkFixtures, ...plannerEntities.map(normalizePoi)];
       const poiById = new Map<string, Poi>();
       for (const poi of [...normalizedMixedPois, ...normalizedCulturePois, ...normalizedPlannerEntities]) {
         poiById.set(poi.poi_id, poi);
@@ -276,7 +327,7 @@ function commuteModeRank(mode: string): number {
 }
 
 async function loadCommuteEdges(): Promise<CommuteEdgeIndex> {
-  if (process.env.TRAVELPILOT_COMMUTE_ENABLED === '0' || process.env.SKIP_DB_SYNC === '1') {
+  if (process.env.TRAVELPILOT_COMMUTE_ENABLED === '0') {
     return { edgesByPair: new Map(), loaded: false, edge_count: 0, loaded_at: null, error: null };
   }
   if (!commuteEdgeCache) {
@@ -336,7 +387,10 @@ async function loadCommuteEdges(): Promise<CommuteEdgeIndex> {
 }
 
 export async function warmTravelData() {
-  const data = await loadTravelData();
+  const [data, commuteEdges] = await Promise.all([
+    loadTravelData(),
+    loadCommuteEdges(),
+  ]);
   return {
     status: 'ok',
     data_loaded: true,
@@ -347,7 +401,10 @@ export async function warmTravelData() {
     cache: {
       poi_index_ready: data.poiById.size > 0,
       review_index_ready: data.reviewAggregatesByPoiId.size > 0,
+      commute_edge_index_ready: commuteEdges.loaded && commuteEdges.edge_count > 0,
     },
+    commute_edge_count: commuteEdges.edge_count,
+    commute_edge_load_elapsed_ms: commuteEdgeLoadElapsedMs,
   };
 }
 
@@ -357,6 +414,208 @@ function normalizePoiName(name?: string): string {
     .replace(/[-—·\s]/g, '')
     .trim()
     .toLowerCase();
+}
+
+function semanticKeysForPoiName(name?: string): string[] {
+  const raw = String(name || '').trim();
+  const normalized = normalizePoiName(raw);
+  const keys = new Set<string>();
+  if (raw) keys.add(raw);
+  if (normalized) keys.add(normalized);
+  const withoutSuffix = normalizePoiName(raw.replace(/[（(].*?[）)]/g, '').replace(/(公园|博物院|博物馆|景区|景点|店|门店|餐厅|饭店|咖啡|茶馆|小食铺|小吃)$/g, ''));
+  if (withoutSuffix && withoutSuffix.length >= 2) keys.add(withoutSuffix);
+  if (/长城|八达岭|慕田峪|居庸关|greatwall|badaling/i.test(normalized)) keys.add('长城');
+  return Array.from(keys).filter(Boolean);
+}
+
+function buildReplanAccelerationCacheFromProposals(proposals: Array<Record<string, any>> = []): TravelReplanAccelerationCache {
+  const hints = new Map<string, TravelReplanPoiHint>();
+  for (const proposal of proposals) {
+    const stops = Array.isArray(proposal.pois) ? proposal.pois : [];
+    const ids = Array.isArray(proposal.ordered_poi_ids) ? proposal.ordered_poi_ids.map(String) : [];
+    const names = Array.isArray(proposal.ordered_poi_names) ? proposal.ordered_poi_names.map(String) : [];
+    const maxLength = Math.max(stops.length, ids.length, names.length);
+    for (let index = 0; index < maxLength; index += 1) {
+      const stop = stops[index] || {};
+      const poiId = String(stop.poi_id || ids[index] || '');
+      const name = String(stop.name || names[index] || '');
+      if (!poiId || !name) continue;
+      const existing = hints.get(poiId);
+      const semanticKeys = Array.from(new Set([...(existing?.semantic_keys || []), ...semanticKeysForPoiName(name)]));
+      hints.set(poiId, {
+        poi_id: poiId,
+        name,
+        area: stop.area || null,
+        district: stop.district || null,
+        poi_type: stop.poi_type || null,
+        category: stop.category || null,
+        source: existing?.source || 'initial_route_proposals',
+        semantic_keys: semanticKeys,
+      });
+    }
+  }
+  return {
+    source: 'initial_route_proposals',
+    created_at: new Date().toISOString(),
+    poi_hints: Array.from(hints.values()).slice(0, 80),
+  };
+}
+
+function mergeReplanAccelerationCaches(
+  current?: TravelReplanAccelerationCache | null,
+  next?: TravelReplanAccelerationCache | null,
+): TravelReplanAccelerationCache | null {
+  const hints = new Map<string, TravelReplanPoiHint>();
+  for (const cache of [current, next]) {
+    for (const hint of cache?.poi_hints || []) {
+      if (!hint.poi_id || !hint.name) continue;
+      const existing = hints.get(hint.poi_id);
+      hints.set(hint.poi_id, {
+        ...hint,
+        semantic_keys: Array.from(new Set([...(existing?.semantic_keys || []), ...(hint.semantic_keys || []), ...semanticKeysForPoiName(hint.name)])),
+        source: existing?.source ? `${existing.source}+${hint.source}` : hint.source,
+      });
+    }
+  }
+  if (!hints.size) return current || next || null;
+  return {
+    source: 'merged_route_replan_cache',
+    created_at: new Date().toISOString(),
+    poi_hints: Array.from(hints.values()).slice(0, 120),
+  };
+}
+
+function applyReplanAccelerationCache<T extends { proposals?: Array<Record<string, any>>; request_snapshot?: Record<string, any> }>(response: T): T {
+  const cache = buildReplanAccelerationCacheFromProposals(response.proposals || []);
+  const existing = response.request_snapshot?.replan_acceleration_cache || null;
+  return {
+    ...response,
+    request_snapshot: {
+      ...(response.request_snapshot || {}),
+      replan_acceleration_cache: mergeReplanAccelerationCaches(existing, cache),
+    },
+  } as T;
+}
+
+function resolveIdsFromReplanAccelerationCache(request: TravelPlanningRequest): string[] {
+  const names = (request.must_include_names || []).filter((name) => !isGenericIncludeName(String(name)));
+  if (!names.length) return [];
+  const ids = new Set<string>();
+  const hints = request.replan_acceleration_cache?.poi_hints || [];
+  for (const includeName of names) {
+    const include = normalizePoiName(includeName);
+    if (!include) continue;
+    const best = hints
+      .filter((hint) => {
+        const hintKeys = [hint.name, ...(hint.semantic_keys || [])];
+        return hintKeys.some((key) => {
+          const normalizedKey = normalizePoiName(key);
+          return Boolean(normalizedKey && (normalizedKey.includes(include) || include.includes(normalizedKey)));
+        });
+      })
+      .sort((a, b) => {
+        const aName = normalizePoiName(a.name);
+        const bName = normalizePoiName(b.name);
+        const aExact = aName === include ? 1 : 0;
+        const bExact = bName === include ? 1 : 0;
+        const aParent = aName.startsWith(include) && !aName.includes('-') ? 1 : 0;
+        const bParent = bName.startsWith(include) && !bName.includes('-') ? 1 : 0;
+        return bExact - aExact
+          || bParent - aParent
+          || aName.length - bName.length;
+      })[0];
+    if (best?.poi_id) ids.add(best.poi_id);
+  }
+  return Array.from(ids);
+}
+
+function filterBestCorpusHintsForNames(hints: Array<{
+  poi_id: string;
+  name: string;
+  area?: string | null;
+  district?: string | null;
+  poi_type?: string | null;
+  category?: string | null;
+  source?: string;
+  semantic_keys?: string[];
+}>, names: string[]) {
+  const selected = new Map<string, typeof hints[number]>();
+  for (const includeName of names.filter((name) => !isGenericIncludeName(String(name)))) {
+    const include = normalizePoiName(includeName);
+    if (!include) continue;
+    const best = hints
+      .filter((hint) => {
+        const hintKeys = [hint.name, ...(hint.semantic_keys || [])];
+        return hintKeys.some((key) => {
+          const normalizedKey = normalizePoiName(key);
+          return Boolean(normalizedKey && (normalizedKey.includes(include) || include.includes(normalizedKey)));
+        });
+      })
+      .sort((a, b) => {
+        const aName = normalizePoiName(a.name);
+        const bName = normalizePoiName(b.name);
+        const aExact = aName === include ? 1 : 0;
+        const bExact = bName === include ? 1 : 0;
+        const aParent = aName.startsWith(include) && !aName.includes('-') ? 1 : 0;
+        const bParent = bName.startsWith(include) && !bName.includes('-') ? 1 : 0;
+        return bExact - aExact
+          || bParent - aParent
+          || aName.length - bName.length;
+      })[0];
+    if (best?.poi_id) selected.set(best.poi_id, best);
+  }
+  return Array.from(selected.values());
+}
+
+function replanCacheFromCorpusHints(hints: Array<{
+  poi_id: string;
+  name: string;
+  area?: string | null;
+  district?: string | null;
+  poi_type?: string | null;
+  category?: string | null;
+  source?: string;
+  semantic_keys?: string[];
+}>): TravelReplanAccelerationCache | null {
+  if (!hints.length) return null;
+  return {
+    source: 'route_corpus_poi_hint',
+    created_at: new Date().toISOString(),
+    poi_hints: hints.map((hint) => ({
+      poi_id: String(hint.poi_id),
+      name: String(hint.name),
+      area: hint.area ?? null,
+      district: hint.district ?? null,
+      poi_type: hint.poi_type ?? null,
+      category: hint.category ?? null,
+      source: String(hint.source || 'route_corpus_poi_hint'),
+      semantic_keys: Array.from(new Set([...(hint.semantic_keys || []), ...semanticKeysForPoiName(hint.name)])),
+    })),
+  };
+}
+
+function landmarkPoiIdsForName(name: string): string[] {
+  const normalized = normalizePoiName(name);
+  if (/(长城|八达岭|慕田峪|居庸关|greatwall|badaling)/i.test(normalized)) {
+    return ['fixture_badaling_great_wall'];
+  }
+  return [];
+}
+
+function requestHasLandmarkInclude(request: TravelPlanningRequest): boolean {
+  return (request.must_include_names || []).some((name) => landmarkPoiIdsForName(name).length > 0)
+    || (request.must_include_poi_ids || []).some((id) => id === 'fixture_badaling_great_wall');
+}
+
+function requestHasNamedInclude(request: TravelPlanningRequest): boolean {
+  return (request.must_include_names || []).length > 0 || (request.must_include_poi_ids || []).length > 0;
+}
+
+function normalizeMustIncludeIds(payload: Partial<TravelPlanningRequest>): string[] {
+  const ids = Array.isArray(payload.must_include_poi_ids) ? payload.must_include_poi_ids.map(String) : [];
+  const names = Array.isArray(payload.must_include_names) ? payload.must_include_names : [];
+  for (const name of names) ids.push(...landmarkPoiIdsForName(String(name)));
+  return Array.from(new Set(ids));
 }
 
 function extractExcludedNames(text: string): string[] {
@@ -379,12 +638,121 @@ function extractExcludedNames(text: string): string[] {
   return Array.from(new Set(names));
 }
 
+function isGenericIncludeName(name: string): boolean {
+  return /^(一个|一个点|一个景点|景点|景区|地点|地方|点|室内点|文化点|好玩的|午餐地点|吃饭地点|餐厅|饭店|吃饭|午餐|午饭|顺路|原来的点都保留|其他地方不变)$/.test(name);
+}
+
+function cleanupIncludedName(rawName: string): string {
+  return String(rawName || '')
+    .replace(/^(把|去|到|一个|一处|一家|顺路的|附近的|新的|这个|那个)/, '')
+    .replace(/^(景点|景区|地点|地方|点位|地方吧|景点吧)/, '')
+    .replace(/(也)?(?:放进去|排进去|安排进去|加进去|加上|安排一下|安排|进去|也想去|想去)$/g, '')
+    .replace(/(吧|呀|啊|呢|了|原来的点都保留|其他地方不变)$/g, '')
+    .trim();
+}
+
+function splitIncludedNameParts(rawName: string): string[] {
+  const coarseParts = rawName.split(/[、,，]/).map((item) => item.trim()).filter(Boolean);
+  const parts: string[] = [];
+  for (const coarse of coarseParts) {
+    const connectiveParts = coarse.split(/(?:以及|跟|和)/).map((item) => item.trim()).filter(Boolean);
+    const shouldSplitConnective = connectiveParts.length > 1 && connectiveParts.every((item) => item.length >= 2);
+    parts.push(...(shouldSplitConnective ? connectiveParts : [coarse]));
+  }
+  return parts;
+}
+
+function extractIncludedNames(text: string): string[] {
+  const names: string[] = [];
+  const normalizedText = normalizeUserTravelText(text);
+  const pattern = /(?:还想去|也想去|有点想去|想去|必须去|一定去|加上|添加|增加|安排|顺便去|能不能(?:帮我)?(?:把)?(?:安排|加上|放进去|排进去)?)([^，,。；;]+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(normalizedText)) !== null) {
+    const raw = cleanupIncludedName(String(match[1] || ''));
+    if (!raw) continue;
+    for (const part of splitIncludedNameParts(raw).map(cleanupIncludedName).filter(Boolean)) {
+      if (!isGenericIncludeName(part)) names.push(part);
+    }
+  }
+  return Array.from(new Set(names));
+}
+
 function matchesExcludedName(item: Pick<Poi, 'name'>, excludedNames: string[]): boolean {
   const name = normalizePoiName(item.name);
   return excludedNames.some((excluded) => {
     const normalizedExcluded = normalizePoiName(excluded);
     return Boolean(normalizedExcluded && (name.includes(normalizedExcluded) || normalizedExcluded.includes(name)));
   });
+}
+
+function matchesIncludeName(item: Pick<Poi, 'name'>, includeName: string): boolean {
+  const name = normalizePoiName(item.name);
+  const include = normalizePoiName(includeName);
+  return Boolean(include && (name.includes(include) || include.includes(name)));
+}
+
+function resolveMustIncludePoiIds(data: TravelData, request: TravelPlanningRequest): string[] {
+  const ids = new Set(request.must_include_poi_ids || []);
+  const pool = [...data.plannerEntities, ...data.mixedPois, ...data.culturePois];
+  for (const name of request.must_include_names || []) {
+    for (const landmarkId of landmarkPoiIdsForName(name)) ids.add(landmarkId);
+    if (isGenericIncludeName(String(name))) continue;
+    const exactOrContains = pool
+      .filter((item) => matchesIncludeName(item, String(name)))
+      .sort((a, b) => {
+        const aExact = normalizePoiName(a.name) === normalizePoiName(name) ? 1 : 0;
+        const bExact = normalizePoiName(b.name) === normalizePoiName(name) ? 1 : 0;
+        return bExact - aExact
+          || Number(b.rating || 0) - Number(a.rating || 0)
+          || Number(b.review_count || 0) - Number(a.review_count || 0);
+      })[0];
+    if (exactOrContains) ids.add(exactOrContains.poi_id);
+  }
+  return Array.from(ids);
+}
+
+function unresolvedMustIncludeNames(data: TravelData, request: TravelPlanningRequest): string[] {
+  const ids = new Set(resolveMustIncludePoiIds(data, request));
+  const pool = [...data.plannerEntities, ...data.mixedPois, ...data.culturePois];
+  return (request.must_include_names || [])
+    .filter((name) => !isGenericIncludeName(String(name)))
+    .filter((name) => landmarkPoiIdsForName(String(name)).length === 0)
+    .filter((name) => !pool.some((item) => ids.has(item.poi_id) && matchesIncludeName(item, String(name))));
+}
+
+function buildFallbackPoiForIncludeName(name: string, request: TravelPlanningRequest, index: number): Poi {
+  const normalizedName = String(name || '').trim() || '用户指定地点';
+  const anchorByArea: Record<string, { lng: number; lat: number; district: string }> = {
+    前门: { lng: 116.3976, lat: 39.9006, district: '东城区' },
+    故宫: { lng: 116.3972, lat: 39.9163, district: '东城区' },
+    什刹海: { lng: 116.3844, lat: 39.9417, district: '西城区' },
+    天坛: { lng: 116.4108, lat: 39.8819, district: '东城区' },
+    颐和园: { lng: 116.2755, lat: 39.9999, district: '海淀区' },
+    王府井: { lng: 116.4114, lat: 39.9149, district: '东城区' },
+  };
+  const anchor = (request.area && anchorByArea[request.area]) || { lng: 116.4074, lat: 39.9042, district: '北京市' };
+  const isFoodName = /餐|饭|吃|咖啡|小吃|烤鸭|涮肉|面|甜品|茶/.test(normalizedName);
+  return normalizePoi({
+    poi_id: `user_requested_${normalizePoiName(normalizedName) || index}`,
+    name: normalizedName,
+    district: anchor.district,
+    area: request.area || '用户指定地点',
+    category: isFoodName ? '餐饮' : '用户指定地点',
+    poi_type: isFoodName ? 'food' : 'culture',
+    address: '用户指定地点，本地 POI 库未命中，建议出发前确认精确地址',
+    lng: anchor.lng + index * 0.002,
+    lat: anchor.lat + index * 0.002,
+    rating: 4.2,
+    avg_cost: isFoodName ? 80 : 0,
+    review_count: 0,
+    suggested_duration_min: isFoodName ? 60 : 90,
+    planning_tags: ['user_requested', 'needs_address_confirmation'],
+    evidence_tags: ['用户明确指定，但本地 POI 库未命中'],
+    queue_risk: 'unknown',
+    value_for_money: 'unknown',
+    family_friendliness: 'unknown',
+    environment_quality: 'unknown',
+  } as Poi);
 }
 
 function uniqueByName(items: Poi[]): Poi[] {
@@ -558,7 +926,7 @@ function stableWantsIndoor(text: string): boolean {
 }
 
 function stableWantsAddStop(text: string): boolean {
-  return /\u52a0\u4e00\u4e2a|\u6dfb\u52a0|\u52a0\u4e0a|\u987a\u8def\u52a0|\u518d\u5b89\u6392\u4e00\u4e2a|\u591a\u4e00\u4e2a|\u589e\u52a0\u4e00\u4e2a|\u518d\u52a0/.test(text);
+  return /\u52a0\u4e00\u4e2a|\u6dfb\u52a0|\u52a0\u4e0a|\u987a\u8def\u52a0|\u518d\u5b89\u6392\u4e00\u4e2a|\u591a\u4e00\u4e2a|\u589e\u52a0\u4e00\u4e2a|\u518d\u52a0|\u8fd8\u60f3|\u4e5f\u60f3|\u60f3\u53bb|\u6709\u70b9\u60f3\u53bb|\u987a\u4fbf|\u653e\u8fdb\u53bb|\u6392\u8fdb\u53bb/.test(text);
 }
 
 function stableWantsGenericAttraction(text: string): boolean {
@@ -591,6 +959,25 @@ function stableTargetedReplacementIndex(text: string, total: number): number | n
 }
 
 function normalizeRequest(payload: Partial<TravelPlanningRequest>): TravelPlanningRequest {
+  const replanCache = payload.replan_acceleration_cache && Array.isArray(payload.replan_acceleration_cache.poi_hints)
+    ? {
+        source: String(payload.replan_acceleration_cache.source || 'request_snapshot'),
+        created_at: String(payload.replan_acceleration_cache.created_at || new Date().toISOString()),
+        poi_hints: payload.replan_acceleration_cache.poi_hints
+          .map((hint) => ({
+            poi_id: String(hint.poi_id || ''),
+            name: String(hint.name || ''),
+            area: hint.area ?? null,
+            district: hint.district ?? null,
+            poi_type: hint.poi_type ?? null,
+            category: hint.category ?? null,
+            source: String(hint.source || 'request_snapshot'),
+            semantic_keys: Array.isArray(hint.semantic_keys) ? hint.semantic_keys.map(String).filter(Boolean) : semanticKeysForPoiName(hint.name),
+          }))
+          .filter((hint) => hint.poi_id && hint.name)
+          .slice(0, 120),
+      }
+    : null;
   return {
     goal: String(payload.goal || ''),
     route_mode: payload.route_mode === 'culture' ? 'culture' : 'mixed',
@@ -600,16 +987,17 @@ function normalizeRequest(payload: Partial<TravelPlanningRequest>): TravelPlanni
     max_budget: payload.max_budget === undefined ? null : payload.max_budget,
     max_total_pois: Math.max(3, Math.min(8, Number(payload.max_total_pois || 4))),
     max_duration_min: payload.max_duration_min === undefined ? null : payload.max_duration_min,
-    day_count: Math.max(1, Math.min(5, Number(payload.day_count || 1))),
+    day_count: Math.max(1, Math.min(MAX_TRIP_DAYS, Number(payload.day_count || 1))),
     pace: payload.pace || 'balanced',
     walk_preference: payload.walk_preference || 'medium',
     persona_id: payload.persona_id || 'classic_first_timer',
     must_include_names: Array.isArray(payload.must_include_names) ? payload.must_include_names : [],
     exclude_names: Array.isArray(payload.exclude_names) ? payload.exclude_names : [],
-    must_include_poi_ids: Array.isArray(payload.must_include_poi_ids) ? payload.must_include_poi_ids : [],
+    must_include_poi_ids: normalizeMustIncludeIds(payload),
     exclude_poi_ids: Array.isArray(payload.exclude_poi_ids) ? payload.exclude_poi_ids : [],
     route_order_poi_ids: Array.isArray(payload.route_order_poi_ids) ? payload.route_order_poi_ids : [],
     preference_signals: payload.preference_signals || {},
+    replan_acceleration_cache: replanCache,
   };
 }
 
@@ -620,21 +1008,32 @@ function parseGoal(goal: string, defaults: Partial<TravelPlanningRequest> = {}):
   const wantsKids = /亲子|孩子|小孩|儿童|带娃|遛娃|家庭/.test(goal);
   const noFood = /不吃饭|不安排吃饭|不要吃饭|不用吃饭/.test(goal);
   const explicitCulture = /文化路线|文化景点|经典文化/.test(goal);
-  const asksFood = !noFood && /吃|饭|餐|美食|午餐|午饭|晚餐|咖啡|喝咖啡|烤鸭|炸酱面|小吃|吃逛|每天安排吃饭/.test(goal);
-  const asksLunch = !noFood && !/晚上|夜间|夜游|晚餐/.test(goal) && /中午|午餐|午饭|午间|每天安排吃饭/.test(goal);
+  const asksFood = !noFood && /吃|好吃|饭|餐|美食|午餐|午饭|晚餐|咖啡|喝咖啡|烤鸭|炸酱面|小吃|吃逛|每天安排吃饭/.test(goal);
+  const asksLunch = !noFood && !/晚上|夜间|夜游|晚餐/.test(goal) && /中午|午餐|午饭|午间|每天安排吃饭|好吃|美食/.test(goal);
   const routeMode: RouteMode = noFood || (explicitCulture && !asksFood) ? 'culture' : defaults.route_mode ?? (asksFood ? 'mixed' : 'culture');
-  const areas = ['前门', '故宫', '什刹海', '南锣鼓巷', '王府井', '天坛', '天安门', '西单', '地坛', '建国门', '宣武门', '北海', '景山'];
+  const areas = ['前门', '故宫', '什刹海', '后海', '南锣鼓巷', '王府井', '天坛', '天安门', '西单', '地坛', '建国门', '宣武门', '北海', '景山', '颐和园', '圆明园', '雍和宫', '三里屯', '798', '奥林匹克公园'];
   const budgetMatch = goal.match(/预算(?:降到|控制在|不超|不超过|以内)?(\d+)/) ?? goal.match(/(\d+)元?(?:以内|以下|内)/);
   const durationMatch = goal.match(/(\d+(?:\.\d+)?)(?:个)?小时/);
   const dayMatch = goal.match(/(\d+)(?:天|日)/);
   const poiMatch = goal.match(/(\d+)(?:个|处|站|家)?(?:POI|点|景点|地方)/i);
   const parsedExcludedNames = extractExcludedNames(goal);
-  const dayCount = dayMatch?.[1] ? Number(dayMatch[1]) : /一日|一天|整天|全天/.test(goal) ? 1 : /两天|二天|两日|二日/.test(goal) ? 2 : defaults.day_count ?? 1;
+  const parsedIncludedNames = extractIncludedNames(goal);
+  const chineseDayMatch = goal.match(/([一二两三四五六七八九十])(?:天|日)/)?.[1];
+  const chineseDayCount = chineseDayMatch
+    ? ({ 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 } as Record<string, number>)[chineseDayMatch]
+    : null;
+  const dayCount = dayMatch?.[1]
+    ? Math.max(1, Math.min(MAX_TRIP_DAYS, Number(dayMatch[1])))
+    : chineseDayCount
+      ? Math.max(1, Math.min(MAX_TRIP_DAYS, chineseDayCount))
+      : /整天|全天/.test(goal)
+        ? 1
+        : defaults.day_count ?? 1;
   const maxDuration = durationMatch?.[1]
     ? Math.round(Number(durationMatch[1]) * 60)
     : /半日|半天/.test(goal)
       ? 4 * 60
-      : defaults.max_duration_min ?? (dayCount >= 1 && /(天|日|整天|全天)/.test(goal) ? 8 * 60 : null);
+      : defaults.max_duration_min ?? (dayCount > 1 ? dayCount * 8 * 60 : dayCount >= 1 && /(天|日|整天|全天)/.test(goal) ? 8 * 60 : null);
   const excludeNames = [...(defaults.exclude_names || [])];
   excludeNames.push(...parsedExcludedNames);
   const coffeeWanted = /咖啡|喝咖啡/.test(goal) && !/(去掉|不要|排除)[^，,。；;]*咖啡/.test(goal);
@@ -661,13 +1060,23 @@ function parseGoal(goal: string, defaults: Partial<TravelPlanningRequest> = {}):
     walk_preference: /少走路|少步行|别太累|老人|轻松|长辈|父母|带娃|亲子|孩子|小孩/.test(goal) ? 'low' : defaults.walk_preference ?? 'medium',
     pace: /紧凑|多逛|效率/.test(goal) ? 'compact' : /轻松|慢|老人|长辈|父母|带娃|亲子|孩子|小孩|别太累/.test(goal) ? 'relaxed' : defaults.pace ?? 'balanced',
     exclude_names: excludeNames,
+    must_include_names: Array.from(new Set([
+      ...(defaults.must_include_names || []),
+      ...parsedIncludedNames,
+      ...(areas.find((item) => compactGoal.includes(item)) && /(去|玩|逛|看|附近|周边|路线)/.test(goal)
+        ? [areas.find((item) => compactGoal.includes(item)) as string]
+        : []),
+    ])),
     preference_signals: {
       avoid_queue: /不想排队|少排队|排队/.test(goal) || Boolean(inheritedSignals.avoid_queue),
       value_for_money: /性价比|预算|便宜|实惠/.test(goal) || Boolean(inheritedSignals.value_for_money),
+      quality_food: /好吃|吃好|吃点好的|靠谱|美食|口碑|招牌|特色|不踩雷|推荐餐厅/.test(goal) || Boolean(inheritedSignals.quality_food),
+      hotel_anchor: /住宿|酒店|宾馆|民宿|住在|从.*出发/.test(goal) || Boolean(inheritedSignals.hotel_anchor),
       family: wantsKids || Boolean(inheritedSignals.family),
       senior: wantsSenior || Boolean(inheritedSignals.senior),
       couple: wantsCouple || Boolean(inheritedSignals.couple),
       lunch: asksLunch || Boolean(inheritedSignals.lunch),
+      formal_meal: asksFood && !/咖啡|甜品|下午茶|小吃/.test(goal) || Boolean(inheritedSignals.formal_meal),
       coffee: coffeeWanted,
     },
   });
@@ -782,8 +1191,15 @@ function scorePoi(item: Poi, request: TravelPlanningRequest, strategy: Strategy,
   if (values.environment_quality === 'high') score += 2;
   if (request.walk_preference === 'low' && item.walk_intensity === 'high') score -= 8;
   if (request.preference_signals?.lunch && isFoodPoi(item) && !isLunchPoi(item)) score -= 20;
+  if (request.preference_signals?.quality_food && isFoodPoi(item)) {
+    score += Number(item.rating || 0) * 8 + Math.min(Number(item.review_count || 0), 800) / 80;
+    if (values.value_for_money === 'low') score -= 4;
+    if (item.meal_type === 'hotel_dining' || item.meal_type === 'invalid') score -= 28;
+  }
   if (request.preference_signals?.indoor) {
     if (/scene:indoor|museum|art_gallery|theme:museum|theme:art|\u535a\u7269\u9986|\u7f8e\u672f\u9986|\u827a\u672f\u4e2d\u5fc3|\u5c55\u89c8\u9986/.test(text)) score += 28;
+    if (/博物馆|美术馆|艺术中心|展览馆/.test(item.name)) score += 42;
+    if (/博物院/.test(item.name) && !/博物馆|美术馆|艺术中心|展览馆/.test(item.name)) score -= 24;
     if (/scene:outdoor|park|\u516c\u56ed|\u5e7f\u573a|\u6b65\u884c\u8857/.test(text)) score -= 18;
   }
 
@@ -980,26 +1396,44 @@ function buildQualitySummary(params: {
   stops: Array<Record<string, any>>;
   totalBudget: number;
   totalDuration: number;
+  totalDistance: number;
   transferSummary: { commute_edges_used: number; coordinate_estimates_used: number; commute_edge_hit_rate: number };
   categorySatisfied: boolean;
 }) {
-  const { request, stops, totalBudget, totalDuration, transferSummary, categorySatisfied } = params;
+  const { request, stops, totalBudget, totalDuration, totalDistance, transferSummary, categorySatisfied } = params;
   const budgetSatisfied = request.max_budget === null || request.max_budget === undefined || totalBudget <= Number(request.max_budget);
   const durationSatisfied = request.max_duration_min === null || request.max_duration_min === undefined || totalDuration <= Number(request.max_duration_min);
   const timelineReady = stops.every((stop) => /^\d{2}:\d{2}$/.test(String(stop.arrival_time || '')) && /^\d{2}:\d{2}$/.test(String(stop.departure_time || '')));
   const transferReady = stops.every((stop, index) => index === 0 || ['commute_edge', 'coordinate_estimate'].includes(String(stop.transfer_source)));
+  const openingHoursSatisfied = stops.every((stop) => String(stop.opening_status || 'unknown') !== 'conflict');
   const groundedStops = countGroundedStops(stops);
+  const hasQueueConflict = stops.some((stop) => /high|高|long|排队久/i.test(String(stop.evidence_summary?.signals?.queue_risk || '')));
+  const queueSatisfied = !request.preference_signals?.avoid_queue || !hasQueueConflict;
+  const walkSatisfied = request.walk_preference !== 'low' || totalDistance <= 3000;
   const activeSignals = Object.entries(request.preference_signals || {})
     .filter(([, enabled]) => Boolean(enabled))
     .map(([key]) => key);
+  const validations = {
+    poi_count_valid: stops.length >= 3,
+    category_coverage_valid: categorySatisfied,
+    timeline_valid: timelineReady,
+    transfer_valid: transferReady,
+    budget_valid: budgetSatisfied,
+    duration_valid: durationSatisfied,
+    opening_hours_valid: openingHoursSatisfied,
+    evidence_valid: groundedStops >= Math.min(2, stops.length),
+    queue_valid: queueSatisfied,
+    walk_valid: walkSatisfied,
+  };
   const readinessChecks = [
-    stops.length >= 3,
-    timelineReady,
-    transferReady,
-    budgetSatisfied,
-    durationSatisfied,
-    categorySatisfied,
-    groundedStops >= Math.min(2, stops.length),
+    validations.poi_count_valid,
+    validations.timeline_valid,
+    validations.transfer_valid,
+    validations.budget_valid,
+    validations.duration_valid,
+    validations.category_coverage_valid,
+    validations.evidence_valid,
+    validations.queue_valid,
     stops.every((stop) => String(stop.recommendation_reason || '').length > 0),
   ];
   const passedChecks = readinessChecks.filter(Boolean).length;
@@ -1011,7 +1445,11 @@ function buildQualitySummary(params: {
       budget_satisfied: budgetSatisfied,
       duration_satisfied: durationSatisfied,
       category_coverage_satisfied: categorySatisfied,
+      queue_satisfied: queueSatisfied,
+      walk_satisfied: walkSatisfied,
+      opening_hours_satisfied: openingHoursSatisfied,
     },
+    validations,
     personalization: {
       persona_id: request.persona_id || 'classic_first_timer',
       walk_preference: request.walk_preference || 'medium',
@@ -1031,9 +1469,496 @@ function buildQualitySummary(params: {
   };
 }
 
+function buildConstraintReport(params: {
+  request: TravelPlanningRequest;
+  stops: Array<Record<string, any>>;
+  totalBudget: number;
+  totalDuration: number;
+  totalDistance: number;
+  categorySatisfied: boolean;
+}) {
+  const { request, stops, totalBudget, totalDuration, totalDistance, categorySatisfied } = params;
+  const foodCount = stops.filter((stop) => stop.poi_type === 'food').length;
+  const cultureCount = stops.length - foodCount;
+  const highQueueStops = stops
+    .filter((stop) => /high|高|long|排队久/i.test(String(stop.evidence_summary?.signals?.queue_risk || '')))
+    .map((stop) => stop.name);
+  const openingConflicts = stops
+    .filter((stop) => String(stop.opening_status || 'unknown') === 'conflict')
+    .map((stop) => stop.name);
+  const checks = {
+    poi_count: {
+      required_min: 3,
+      actual: stops.length,
+      satisfied: stops.length >= 3,
+    },
+    category_coverage: {
+      route_mode: request.route_mode,
+      food_count: foodCount,
+      culture_or_entertainment_count: cultureCount,
+      required_food_count: request.route_mode === 'mixed' ? 1 : 0,
+      required_culture_or_entertainment_count: request.route_mode === 'mixed' ? 2 : 3,
+      satisfied: categorySatisfied,
+    },
+    budget: {
+      max_budget: request.max_budget ?? null,
+      estimated_budget: totalBudget,
+      satisfied: request.max_budget === null || request.max_budget === undefined || totalBudget <= Number(request.max_budget),
+    },
+    duration: {
+      max_duration_min: request.max_duration_min ?? null,
+      estimated_duration_min: totalDuration,
+      satisfied: request.max_duration_min === null || request.max_duration_min === undefined || totalDuration <= Number(request.max_duration_min),
+    },
+    distance: {
+      walk_preference: request.walk_preference || 'medium',
+      estimated_transfer_distance_m: Math.round(totalDistance),
+      satisfied: request.walk_preference !== 'low' || totalDistance <= 3000,
+    },
+    queue: {
+      avoid_queue_requested: Boolean(request.preference_signals?.avoid_queue),
+      high_queue_stop_names: highQueueStops,
+      satisfied: !request.preference_signals?.avoid_queue || highQueueStops.length === 0,
+    },
+    opening_hours: {
+      conflict_stop_names: openingConflicts,
+      unknown_count: stops.filter((stop) => String(stop.opening_status || 'unknown') === 'unknown').length,
+      satisfied: openingConflicts.length === 0,
+    },
+    personalization: {
+      persona_id: request.persona_id || 'classic_first_timer',
+      active_preference_signals: Object.entries(request.preference_signals || {})
+        .filter(([, enabled]) => Boolean(enabled))
+        .map(([key]) => key),
+      applied: Boolean(request.persona_id && request.persona_id !== 'classic_first_timer') || Object.values(request.preference_signals || {}).some(Boolean),
+    },
+  };
+  const satisfiedCount = Object.values(checks).filter((item: any) => item.satisfied !== false).length;
+  return {
+    overall_satisfied: Object.values(checks).every((item: any) => item.satisfied !== false),
+    satisfied_count: satisfiedCount,
+    total_count: Object.keys(checks).length,
+    checks,
+  };
+}
+
+function buildConstraintResolution(report: Record<string, any>) {
+  const checks = report.checks || {};
+  const violations = Object.entries(checks)
+    .filter(([, value]: [string, any]) => value?.satisfied === false)
+    .map(([key]) => key);
+  const priorityOrder = ['poi_count', 'category_coverage', 'duration', 'budget', 'distance', 'queue', 'opening_hours'];
+  const protectedConstraints = priorityOrder.filter((key) => checks[key]?.satisfied === true);
+  const tradeoffs = violations.map((key) => {
+    if (key === 'duration') return '时长约束偏紧，系统优先保留 3+ POI 与餐饮/文化覆盖，并在风险中提示可能超时。';
+    if (key === 'budget') return '预算约束偏紧，系统优先保留可执行路线，并通过预算优先方案提供更低成本备选。';
+    if (key === 'distance') return '少走路偏好与点位覆盖存在冲突，系统优先使用同片区与本地通勤边降低转场。';
+    if (key === 'queue') return '少排队偏好无法完全保证，系统基于本地 UGC 排队风险规避明显高风险点。';
+    if (key === 'opening_hours') return '本地营业时间存在不确定或冲突，系统显式标注风险，建议出发前复核。';
+    if (key === 'category_coverage') return '当前数据召回未完全覆盖餐饮/文化组合，系统保留多方案用于替换。';
+    return `${key} 未完全满足，系统已在方案风险中显式提示。`;
+  });
+  return {
+    strategy: violations.length ? 'partial_satisfaction_with_explicit_tradeoff' : 'all_core_constraints_satisfied',
+    priority_order: priorityOrder,
+    protected_constraints: protectedConstraints,
+    relaxed_constraints: violations,
+    tradeoffs,
+    user_visible_summary: violations.length
+      ? `已优先保证 ${protectedConstraints.join(', ') || '核心可执行性'}，但 ${violations.join(', ')} 需要取舍。`
+      : '路线满足 3+ POI、餐饮/文化覆盖、时间轴、预算/时长等核心约束。',
+  };
+}
+
+function buildSlaMetrics(params: {
+  started: number;
+  fastPath: string;
+  llmBlocking: boolean;
+  fallbackUsed?: boolean;
+}) {
+  const elapsedMs = Number((performance.now() - params.started).toFixed(2));
+  return {
+    elapsed_ms: elapsedMs,
+    within_10s: elapsedMs < 10000,
+    sla: {
+      target_ms: 10000,
+      elapsed_ms: elapsedMs,
+      within_10s: elapsedMs < 10000,
+      fast_path: params.fastPath,
+      llm_blocking: params.llmBlocking,
+      fallback_used: Boolean(params.fallbackUsed),
+    },
+  };
+}
+
+function buildRoutePatchSummary(params: {
+  beforeIds: string[];
+  beforeNames: string[];
+  afterProposal?: Record<string, any> | null;
+  adjustmentText?: string;
+}) {
+  const afterIds = ((params.afterProposal?.ordered_poi_ids || []) as unknown[]).map(String);
+  const afterNames = ((params.afterProposal?.ordered_poi_names || []) as unknown[]).map(String);
+  const beforeIdSet = new Set(params.beforeIds.map(String));
+  const afterIdSet = new Set(afterIds);
+  return {
+    adjustment_text: params.adjustmentText || '',
+    before_poi_count: params.beforeIds.length,
+    after_poi_count: afterIds.length,
+    preserved_poi_ids: afterIds.filter((id) => beforeIdSet.has(id)),
+    removed_poi_ids: params.beforeIds.filter((id) => !afterIdSet.has(String(id))),
+    added_poi_ids: afterIds.filter((id) => !beforeIdSet.has(id)),
+    before_route_names: params.beforeNames,
+    after_route_names: afterNames,
+    kept: params.beforeNames.filter((name) => afterNames.includes(name)),
+    removed: params.beforeNames.filter((name) => !afterNames.includes(name)),
+    added: afterNames.filter((name) => !params.beforeNames.includes(name)),
+    changed: params.beforeIds.join('|') !== afterIds.join('|'),
+  };
+}
+
+function mergeIntentIntoReplanRequest(request: TravelPlanningRequest, intent: TravelQueryIntent | null): TravelPlanningRequest {
+  if (!intent) return request;
+  const patch = intentToPlannerLikeRequest(intent);
+  return normalizeRequest({
+    ...request,
+    route_mode: patch.route_mode || request.route_mode,
+    area: patch.area ?? request.area,
+    max_budget: patch.max_budget ?? request.max_budget,
+    max_duration_min: patch.max_duration_min ?? request.max_duration_min,
+    walk_preference: patch.walk_preference || request.walk_preference,
+    persona_id: patch.persona_id || request.persona_id,
+    must_include_names: Array.from(new Set([
+      ...(request.must_include_names || []),
+      ...(patch.must_include_names || []),
+    ])),
+    exclude_names: Array.from(new Set([
+      ...(request.exclude_names || []),
+      ...(patch.exclude_names || []),
+    ])),
+    preference_signals: {
+      ...(request.preference_signals || {}),
+      ...(patch.preference_signals || {}),
+    },
+  });
+}
+
+function poiFromProposalStop(stop: Record<string, any>): Poi | null {
+  const id = String(stop.poi_id || '').trim();
+  const name = String(stop.name || '').trim();
+  const lng = Number(stop.lng ?? stop.longitude);
+  const lat = Number(stop.lat ?? stop.latitude);
+  if (!id || !name) return null;
+  return normalizePoi({
+    poi_id: id,
+    name,
+    district: String(stop.district || stop.area || '未知'),
+    area: String(stop.area || stop.district || '未知'),
+    category: String(stop.category || 'unknown'),
+    poi_type: stop.poi_type === 'food' ? 'food' : 'culture',
+    address: String(stop.address || ''),
+    lng: Number.isFinite(lng) ? lng : 116.4074,
+    lat: Number.isFinite(lat) ? lat : 39.9042,
+    rating: Number(stop.rating || 0),
+    avg_cost: Number(stop.estimated_cost ?? stop.avg_cost ?? 0),
+    review_count: Number(stop.review_count || 0),
+    open_time: stop.open_time || undefined,
+    close_time: stop.close_time || undefined,
+    suggested_duration_min: Number(stop.stay_minutes || stop.suggested_duration_min || 90),
+    planning_tags: Array.isArray(stop.planning_tags) ? stop.planning_tags.map(String) : [],
+    evidence_tags: Array.isArray(stop.evidence_tags) ? stop.evidence_tags.map(String) : [],
+    queue_risk: stop.evidence_summary?.signals?.queue_risk || stop.queue_risk || 'unknown',
+    value_for_money: stop.evidence_summary?.signals?.value_for_money || stop.value_for_money || 'unknown',
+    family_friendliness: stop.evidence_summary?.signals?.family_friendliness || stop.family_friendliness || 'unknown',
+    environment_quality: stop.evidence_summary?.signals?.environment_quality || stop.environment_quality || 'unknown',
+    is_meal_stop: stop.poi_type === 'food' || stop.meal_slot === 'lunch',
+    is_lunch_suitable: stop.meal_slot === 'lunch' || stop.is_lunch_suitable,
+    is_coffee_stop: Boolean(stop.is_coffee_stop),
+    meal_type: stop.meal_type || (stop.poi_type === 'food' ? 'meal' : 'non_food'),
+  } as Poi);
+}
+
+function selectedPoisFromProposal(data: TravelData, selectedProposal?: Record<string, any> | null): Poi[] {
+  const ids = Array.isArray(selectedProposal?.ordered_poi_ids) ? selectedProposal?.ordered_poi_ids.map(String) : [];
+  const stops = Array.isArray(selectedProposal?.pois) ? selectedProposal?.pois : [];
+  const fromStops = new Map<string, Poi>();
+  for (const stop of stops) {
+    const poi = poiFromProposalStop(stop);
+    if (poi) fromStops.set(poi.poi_id, poi);
+  }
+  return ids
+    .map((id) => data.poiById.get(id) || fromStops.get(id))
+    .filter(Boolean) as Poi[];
+}
+
+function resolveIncrementalMustPois(data: TravelData, request: TravelPlanningRequest): Poi[] {
+  const byId = new Map<string, Poi>();
+  for (const id of request.must_include_poi_ids || []) {
+    const poi = data.poiById.get(String(id));
+    if (poi) byId.set(poi.poi_id, poi);
+  }
+  const unresolvedNames = unresolvedMustIncludeNames(data, request);
+  for (const name of unresolvedNames) {
+    const fallback = buildFallbackPoiForIncludeName(name, request, byId.size + 1);
+    byId.set(fallback.poi_id, fallback);
+  }
+  return [...byId.values()];
+}
+
+async function buildIncrementalReplanPatch(params: {
+  started: number;
+  previous: TravelPlanningRequest;
+  parsed: TravelPlanningRequest;
+  selectedProposal?: Record<string, any> | null;
+  selectedPois: Poi[];
+  selectedIds: string[];
+  selectedNames: string[];
+  adjustmentText: string;
+  excludedIds: Set<string>;
+  replanAccelerationHit: 'request_snapshot' | 'route_corpus_poi_hint' | null;
+  routeCorpusPoiHintElapsedMs: number;
+  targetReplacementIndex: number | null;
+  wantsNamedInclude: boolean;
+  wantsAddStop: boolean;
+  wantsIndoor: boolean;
+  wantsGenericAttraction: boolean;
+  wantsFoodChange: boolean;
+  wantsSnack: boolean;
+}) {
+  if (params.selectedPois.length < 3 || params.selectedPois.length !== params.selectedIds.length) return null;
+  if (params.excludedIds.size > 0 && params.targetReplacementIndex === null) return null;
+
+  const data = await loadTravelData();
+  const commuteEdges = await loadCommuteEdges();
+  const selectedIdSet = new Set(params.selectedIds);
+  const excludedIds = params.excludedIds;
+  let orderedPois = params.selectedPois.filter((poi) => !excludedIds.has(poi.poi_id));
+  let fastPath: 'incremental_named_add' | 'incremental_generic_add' | 'incremental_target_replace' | null = null;
+
+  if (params.targetReplacementIndex !== null) {
+    const targetPoi = params.selectedPois[params.targetReplacementIndex];
+    if (!targetPoi) return null;
+    const replacementRequest = normalizeRequest({
+      ...params.parsed,
+      must_include_poi_ids: [],
+      must_include_names: [],
+      area: targetPoi.area || targetPoi.district || params.previous.area || null,
+      max_total_pois: 3,
+      route_mode: params.wantsFoodChange ? 'mixed' : params.parsed.route_mode,
+      preference_signals: {
+        ...(params.parsed.preference_signals || {}),
+        indoor: params.wantsIndoor || Boolean(params.parsed.preference_signals?.indoor),
+      },
+    });
+    const replacement = selectAdditionalStop({
+      data,
+      request: replacementRequest,
+      selectedPois: params.selectedPois.filter((_, index) => index !== params.targetReplacementIndex),
+      excludedIds: new Set([...excludedIds, ...params.selectedIds]),
+      excludedNames: params.parsed.exclude_names || [],
+      wantsFood: params.wantsFoodChange,
+      wantsSnack: params.wantsSnack,
+      wantsIndoor: params.wantsIndoor,
+    });
+    if (!replacement) return null;
+    orderedPois = params.selectedPois.map((poi, index) => index === params.targetReplacementIndex ? replacement : poi);
+    fastPath = 'incremental_target_replace';
+  } else if (params.wantsNamedInclude) {
+    const additions = resolveIncrementalMustPois(data, params.parsed)
+      .filter((poi) => !selectedIdSet.has(poi.poi_id) && !excludedIds.has(poi.poi_id));
+    if (!additions.length) return null;
+    orderedPois = [...orderedPois, ...additions].slice(0, 8);
+    fastPath = 'incremental_named_add';
+  } else if (params.wantsAddStop && (params.wantsGenericAttraction || params.wantsIndoor || params.wantsFoodChange || params.wantsSnack)) {
+    const additional = selectAdditionalStop({
+      data,
+      request: params.parsed,
+      selectedPois: params.selectedPois,
+      excludedIds,
+      excludedNames: params.parsed.exclude_names || [],
+      wantsFood: params.wantsFoodChange,
+      wantsSnack: params.wantsSnack,
+      wantsIndoor: params.wantsIndoor,
+    });
+    if (!additional || selectedIdSet.has(additional.poi_id)) return null;
+    orderedPois = [...orderedPois, additional].slice(0, 8);
+    fastPath = 'incremental_generic_add';
+  }
+
+  if (!fastPath || orderedPois.length < 3) return null;
+
+  const request = normalizeRequest({
+    ...params.parsed,
+    area: params.previous.area || params.selectedPois[0]?.area || params.selectedPois[0]?.district || null,
+    max_total_pois: orderedPois.length,
+    must_include_poi_ids: orderedPois.map((poi) => poi.poi_id),
+    route_order_poi_ids: orderedPois.map((poi) => poi.poi_id),
+    must_include_names: [],
+  });
+  const selectedArea = request.area || orderedPois[0]?.area || orderedPois[0]?.district || '北京';
+  const proposals = (['balanced', 'budget', 'efficient'] as Strategy[]).map((strategy) => buildProposal({
+    request,
+    strategy,
+    selectedArea,
+    candidates: orderedPois,
+    data,
+    commuteEdges,
+  }));
+  const transferSummary = summarizeProposalTransfers(proposals);
+  const routePatchSummary = buildRoutePatchSummary({
+    beforeIds: params.selectedIds,
+    beforeNames: params.selectedNames,
+    afterProposal: proposals[0],
+    adjustmentText: params.adjustmentText,
+  });
+  const slaMetrics = buildSlaMetrics({ started: params.started, fastPath, llmBlocking: false });
+  const response = applyReplanAccelerationCache({
+    request_id: `travel-replan-fast-${Math.random().toString(16).slice(2, 12)}`,
+    city_id: 'beijing',
+    route_mode: request.route_mode,
+    goal: request.goal,
+    resolved_area: selectedArea,
+    persona_id: request.persona_id,
+    evidence_summary: {
+      data_root: DATA_ROOT,
+      poi_count: data.plannerEntities.length,
+      review_feature_count: data.reviewAggregates.length,
+      static_data_notice: 'UGC and opening hours come from local static data, not realtime queue or realtime operations.',
+    },
+    request_snapshot: request,
+    day_count: 1,
+    daily_itinerary: [{ day: 1, title: 'Day 1', area: selectedArea, theme: 'Incremental replan patch', proposal: proposals[0] }],
+    proposals,
+    generation_metrics: {
+      ...slaMetrics,
+      commute_edges_loaded: commuteEdges.loaded,
+      commute_edge_count: commuteEdges.edge_count,
+      commute_edge_loaded_at: commuteEdges.loaded_at,
+      commute_edge_load_elapsed_ms: commuteEdgeLoadElapsedMs,
+      commute_edge_error: commuteEdges.error,
+      ...transferSummary,
+      replan_acceleration_hit: params.replanAccelerationHit,
+      route_corpus_poi_hint_elapsed_ms: params.routeCorpusPoiHintElapsedMs,
+      route_corpus_poi_hint_used: params.replanAccelerationHit === 'route_corpus_poi_hint',
+      acceleration_layers: {
+        incremental_replan_patch: true,
+        replan_request_snapshot_cache: params.replanAccelerationHit === 'request_snapshot',
+        route_corpus_poi_hint: params.replanAccelerationHit === 'route_corpus_poi_hint',
+        memory_data_cache: true,
+        commute_edge_cache: commuteEdges.loaded,
+      },
+    },
+    route_patch_summary: routePatchSummary,
+    replan_metadata: {
+      source_request_applied: true,
+      adjustment_text: params.adjustmentText,
+      locked_poi_ids: request.must_include_poi_ids,
+      route_patch_summary: routePatchSummary,
+      applied_adjustments: [
+        'Incremental replan patch reused the previous route skeleton.',
+        fastPath === 'incremental_named_add' ? 'Named stop inserted without full route regeneration.' : null,
+        fastPath === 'incremental_generic_add' ? 'Generic additional stop inserted near the existing route.' : null,
+        fastPath === 'incremental_target_replace' ? 'Target stop replaced without rebuilding unrelated stops.' : null,
+        params.replanAccelerationHit === 'request_snapshot' ? 'Added stop resolved from previous route acceleration cache.' : null,
+        params.replanAccelerationHit === 'route_corpus_poi_hint' ? 'Added stop resolved from precomputed route corpus POI hints.' : null,
+      ].filter(Boolean),
+    },
+  });
+  return response;
+}
+
+function buildAccelerationSummary(params: {
+  intent?: TravelQueryIntent | null;
+  fastPath: string;
+  routeCorpusUsed?: boolean;
+  databaseRecallUsed?: boolean;
+  wikiRetrievalUsed?: boolean;
+  planningAdviceUsed?: boolean;
+  sqlResults?: Array<Record<string, any>>;
+}) {
+  const sqlResults = Array.isArray(params.sqlResults) ? params.sqlResults : [];
+  const sqlCacheHit = sqlResults.length > 0 && sqlResults.every((item) => Boolean(item.cache_hit));
+  const parser = params.intent?.parser || null;
+  const semanticFastPath = parser === 'dictionary'
+    || (parser === 'cache' && (params.intent?.notes || []).some((note) => /Dictionary parser|Common semantic fast path/i.test(String(note))));
+  return {
+    enabled: true,
+    fast_path: params.fastPath,
+    layers: {
+      common_semantic_fast_path: semanticFastPath,
+      intent_cache: Boolean(params.intent?.cache_hit),
+      route_corpus: Boolean(params.routeCorpusUsed),
+      sql_result_cache: sqlCacheHit,
+      memory_data_cache: true,
+      wiki_cache: Boolean(params.wikiRetrievalUsed),
+    },
+    parser,
+    cache_hit: Boolean(params.intent?.cache_hit) || sqlCacheHit || Boolean(params.routeCorpusUsed),
+    cache_layers_hit: [
+      params.intent?.cache_hit ? 'intent' : null,
+      params.routeCorpusUsed ? 'route_corpus' : null,
+      sqlCacheHit ? 'sql_result' : null,
+      'memory_data',
+      params.wikiRetrievalUsed ? 'wiki' : null,
+    ].filter(Boolean),
+    notes: [
+      semanticFastPath ? '常见语义已由本地规则解析，跳过阻塞式 LLM 意图解析。' : null,
+      params.routeCorpusUsed ? '命中预生成路线库，直接返回可执行路线候选。' : '未命中路线库时使用本地 POI/UGC planner 即时规划。',
+      sqlCacheHit ? 'SQL 候选查询命中内存结果缓存。' : null,
+    ].filter(Boolean),
+  };
+}
+
+function buildKnowledgeGuidanceSummary(params: {
+  wikiRetrieval?: Record<string, any> | null;
+  planningAdvice?: TravelPlanningAdvice | null;
+  routeDraft?: TravelRouteDraft | null;
+  llmRerank?: Record<string, any> | null;
+}) {
+  const hits = Array.isArray(params.wikiRetrieval?.hits) ? params.wikiRetrieval?.hits : [];
+  const linkedEntities = Array.isArray(params.wikiRetrieval?.linked_entities) ? params.wikiRetrieval?.linked_entities : [];
+  return {
+    enabled: Boolean(params.wikiRetrieval || params.planningAdvice || params.routeDraft || params.llmRerank),
+    knowledge_base: {
+      type: 'local_obsidian_llm_wiki',
+      retrieval_used: Boolean(params.wikiRetrieval),
+      hit_count: hits.length,
+      linked_entity_count: linkedEntities.length,
+      top_titles: hits.slice(0, 5).map((hit: Record<string, any>) => hit.title).filter(Boolean),
+    },
+    guidance_steps: {
+      planning_advice_used: Boolean(params.planningAdvice),
+      planning_advice_source: params.planningAdvice?.source || null,
+      route_draft_used: Boolean(params.routeDraft),
+      route_draft_source: params.routeDraft?.draft_source || null,
+      rerank_used: Boolean(params.llmRerank),
+      rerank_source: params.llmRerank?.rerank_source || null,
+    },
+    user_visible_summary: hits.length
+      ? '已用本地知识库召回区域/主题/POI 证据，并将其用于参数建议、草案生成或方案重排。'
+      : '本次主链路以本地路线库/规划器为主，知识库作为可选增强层。',
+  };
+}
+
 function candidatePool(data: TravelData, request: TravelPlanningRequest): Poi[] {
   const source = request.route_mode === 'culture' ? data.culturePois : data.plannerEntities.length ? data.plannerEntities : data.mixedPois;
-  return source.filter((item) => Number.isFinite(item.lng) && Number.isFinite(item.lat));
+  const requiredById = (request.must_include_poi_ids || [])
+    .map((id) => data.poiById.get(String(id)))
+    .filter(Boolean) as Poi[];
+  const fallbackPois = unresolvedMustIncludeNames(data, request).map((name, index) => buildFallbackPoiForIncludeName(name, request, index + 1));
+  return uniqueByName([...requiredById, ...fallbackPois, ...source]).filter((item) => Number.isFinite(item.lng) && Number.isFinite(item.lat));
+}
+
+function preparePlanningRequest(data: TravelData, payload: Partial<TravelPlanningRequest>): TravelPlanningRequest {
+  const request = normalizeRequest(payload);
+  request.must_include_poi_ids = Array.from(new Set([
+    ...(request.must_include_poi_ids || []),
+    ...resolveMustIncludePoiIds(data, request),
+  ]));
+  if (requestHasNamedInclude(request)) {
+    request.max_total_pois = Math.max(Number(request.max_total_pois || 4), new Set(request.must_include_poi_ids || []).size, 3);
+  }
+  return request;
 }
 
 function buildProposal(params: {
@@ -1045,18 +1970,30 @@ function buildProposal(params: {
   commuteEdges?: CommuteEdgeIndex;
 }) {
   const { request, strategy, selectedArea, candidates, data, commuteEdges } = params;
-  const targetCount = Math.max(3, request.max_total_pois || 4);
+  const requestedMustCount = new Set(request.must_include_poi_ids || []).size + unresolvedMustIncludeNames(data, request).length;
+  const targetCount = Math.max(3, request.max_total_pois || 4, requestedMustCount);
   const sameArea = candidates.filter((item) => item.area === selectedArea || item.district === selectedArea);
   const sameAreaDiversified = uniqueByAttractionGroup(uniqueByName(sameArea));
-  const pool = sameAreaDiversified.length >= targetCount
+  const basePool = sameAreaDiversified.length >= targetCount
     ? sameAreaDiversified
     : uniqueByAttractionGroup(uniqueByName(candidates));
+  const effectiveMustNames = unresolvedMustIncludeNames(data, request);
+  const requiredCandidates = candidates.filter((item) => {
+    return (request.must_include_poi_ids || []).includes(item.poi_id)
+      || effectiveMustNames.some((name) => matchesIncludeName(item, String(name)));
+  });
+  const pool = uniqueByName([...requiredCandidates, ...basePool]);
   const excludedIds = new Set(request.exclude_poi_ids || []);
   const excludedNames = (request.exclude_names || []).map(normalizePoiName);
   const available = pool.filter((item) => {
     if (excludedIds.has(item.poi_id)) return false;
     return !matchesExcludedName(item, request.exclude_names || []);
-  }).filter((item) => !String(item.poi_id).startsWith('fixture_') && !String(item.name).includes('未知'));
+  }).filter((item) => {
+    const required = (request.must_include_poi_ids || []).includes(item.poi_id)
+      || effectiveMustNames.some((name) => matchesIncludeName(item, String(name)));
+    if (required) return true;
+    return !String(item.poi_id).startsWith('fixture_') && !String(item.name).includes('未知');
+  });
 
   const recommendable = available.filter(isRecommendablePoi);
   const scopedRecommendable = request.preference_signals?.indoor && request.route_mode === 'culture'
@@ -1077,6 +2014,12 @@ function buildProposal(params: {
     if (request.preference_signals?.lunch) {
       const quality = mealQualityScore(b) - mealQualityScore(a);
       if (quality !== 0) return quality;
+    }
+    if (request.preference_signals?.quality_food) {
+      const rating = Number(b.rating || 0) - Number(a.rating || 0);
+      if (rating !== 0) return rating;
+      const reviews = Number(b.review_count || 0) - Number(a.review_count || 0);
+      if (reviews !== 0) return reviews;
     }
     return 0;
   });
@@ -1116,13 +2059,18 @@ function buildProposal(params: {
   }
 
   const mustIds = new Set(request.must_include_poi_ids || []);
-  const mustNames = new Set(request.must_include_names || []);
+  const mustNames = new Set(effectiveMustNames);
   const requiredFoodIds = new Set(candidates
     .filter((item) => mustIds.has(item.poi_id) && isFoodPoi(item))
     .map((item) => item.poi_id));
   for (const required of candidates.filter((item) => {
     if (excludedIds.has(item.poi_id) || matchesExcludedName(item, request.exclude_names || [])) return false;
-    return mustIds.has(item.poi_id) || mustNames.has(item.name);
+    const normalizedName = normalizePoiName(item.name);
+    const matchesMustName = [...mustNames].some((name) => {
+      const normalizedMust = normalizePoiName(name);
+      return Boolean(normalizedMust && (normalizedName.includes(normalizedMust) || normalizedMust.includes(normalizedName)));
+    });
+    return mustIds.has(item.poi_id) || matchesMustName;
   })) {
     if (!selected.some((item) => item.poi_id === required.poi_id)) selected.unshift(required);
   }
@@ -1131,8 +2079,15 @@ function buildProposal(params: {
   }
 
   const selectedUnique = uniqueByName(selected);
-  const mustSelected = selectedUnique.filter((item) => mustIds.has(item.poi_id) || mustNames.has(item.name));
-  const optionalSelected = selectedUnique.filter((item) => !mustIds.has(item.poi_id) && !mustNames.has(item.name));
+  const isMustSelected = (item: Poi) => {
+    const normalizedName = normalizePoiName(item.name);
+    return mustIds.has(item.poi_id) || [...mustNames].some((name) => {
+      const normalizedMust = normalizePoiName(name);
+      return Boolean(normalizedMust && (normalizedName.includes(normalizedMust) || normalizedMust.includes(normalizedName)));
+    });
+  };
+  const mustSelected = selectedUnique.filter(isMustSelected);
+  const optionalSelected = selectedUnique.filter((item) => !isMustSelected(item));
   let ordered = orderNearest([...mustSelected, ...optionalSelected].slice(0, targetCount), commuteEdges);
   if (request.route_order_poi_ids?.length) {
     const byId = new Map(ordered.map((item) => [item.poi_id, item]));
@@ -1228,6 +2183,8 @@ function buildProposal(params: {
       area: item.area || item.district || '未知',
       district: item.district || '未知',
       address: item.address || '',
+      planning_tags: Array.isArray(item.planning_tags) ? item.planning_tags : [],
+      evidence_tags: Array.isArray(item.evidence_tags) ? item.evidence_tags : [],
       arrival_time: minutesToTime(arrival),
       departure_time: minutesToTime(cursor),
       stay_minutes: stay,
@@ -1269,6 +2226,7 @@ function buildProposal(params: {
       : 'Walking distance and transfer time are local coordinate estimates, not real-time navigation.',
   ].filter(Boolean).map(translateRisk);
   const title = strategy === 'balanced' ? '均衡体验方案' : strategy === 'budget' ? '预算优先方案' : '效率优先方案';
+  const constraintReport = buildConstraintReport({ request, stops, totalBudget, totalDuration, totalDistance, categorySatisfied });
   return {
     proposal_id: `${strategy}-${Math.random().toString(16).slice(2, 10)}`,
     strategy,
@@ -1295,7 +2253,9 @@ function buildProposal(params: {
       required_culture_or_entertainment_count: request.route_mode === 'mixed' ? 2 : 3,
       satisfies_coverage: categorySatisfied,
     },
-    quality_summary: buildQualitySummary({ request, stops, totalBudget, totalDuration, transferSummary, categorySatisfied }),
+    quality_summary: buildQualitySummary({ request, stops, totalBudget, totalDuration, totalDistance, transferSummary, categorySatisfied }),
+    constraint_report: constraintReport,
+    constraint_resolution: buildConstraintResolution(constraintReport),
     opening_hours_check: { has_conflict: hasOpeningConflict, unknown_hours_count: unknownHours },
     risks,
   };
@@ -1405,7 +2365,7 @@ export async function getTravelEvidence(poiId: string) {
 
 export async function getTravelCandidateBuckets(payload: Partial<TravelPlanningRequest>): Promise<TravelCandidateBuckets> {
   const data = await loadTravelData();
-  const request = normalizeRequest(payload);
+  const request = preparePlanningRequest(data, payload);
   const pool = candidatePool(data, request);
   const resolvedArea = selectArea(request, pool);
   const scoped = pool
@@ -1484,6 +2444,21 @@ async function enrichPlanningResponseWithLlm(params: {
   const llmRerank = intent ? await rerankTravelProposals({ intent, proposals, wikiRetrieval }) : null;
   const reorderedProposals = llmRerank ? reorderProposalsByIds(proposals, llmRerank.ranked_proposal_ids) : proposals;
   const finalSelectedProposalId = llmRerank?.primary_proposal_id || reorderedProposals[0]?.proposal_id || null;
+  const acceleration = buildAccelerationSummary({
+    intent,
+    fastPath: params.planningResponse.generation_metrics?.sla?.fast_path || 'local_planner',
+    routeCorpusUsed: Boolean(params.planningResponse.generation_metrics?.route_corpus_used),
+    databaseRecallUsed: databaseRecall.used,
+    wikiRetrievalUsed: Boolean(wikiRetrieval),
+    planningAdviceUsed: Boolean(params.planningAdvice),
+    sqlResults: databaseRecall.results as Array<Record<string, any>>,
+  });
+  const knowledgeGuidance = buildKnowledgeGuidanceSummary({
+    wikiRetrieval,
+    planningAdvice: params.planningAdvice || null,
+    routeDraft: params.routeDraft || null,
+    llmRerank,
+  });
 
   return {
     parsed_request: params.plannerRequest,
@@ -1502,6 +2477,8 @@ async function enrichPlanningResponseWithLlm(params: {
       validator_result: params.routeDraftValidation || null,
       repair_actions: params.routeDraftValidation?.repair_actions || [],
       llm_rerank: llmRerank,
+      acceleration,
+      knowledge_guidance: knowledgeGuidance,
       final_selected_proposal_id: finalSelectedProposalId,
       natural_language_explanation: llmRerank?.final_user_explanation || reorderedProposals[0]?.summary || '',
       generation_metrics: {
@@ -1525,6 +2502,9 @@ async function enrichPlanningResponseWithLlm(params: {
         draft_elapsed_ms: params.routeDraft?.elapsed_ms || 0,
         draft_fallback_reason: params.routeDraft?.fallback_reason || null,
         validator_status: params.routeDraftValidation?.status || null,
+        acceleration_layers: acceleration.layers,
+        knowledge_guidance_used: knowledgeGuidance.enabled,
+        knowledge_hit_count: knowledgeGuidance.knowledge_base.hit_count,
       },
     },
   };
@@ -1534,24 +2514,31 @@ export async function planTravelRoute(payload: Partial<TravelPlanningRequest>) {
   const started = performance.now();
   const data = await loadTravelData();
   const commuteEdges = await loadCommuteEdges();
-  const request = normalizeRequest(payload);
+  const request = preparePlanningRequest(data, payload);
   const pool = candidatePool(data, request);
   const selectedArea = selectArea(request, pool);
   const proposals = (['balanced', 'budget', 'efficient'] as Strategy[]).map((strategy) => buildProposal({ request, strategy, selectedArea, candidates: pool, data, commuteEdges }));
-  const dayCount = Math.max(1, Math.min(5, Number(request.day_count || 1)));
-  const dayAreas = request.area ? [selectedArea] : selectPopularAreas(pool, dayCount);
+  const dayCount = Math.max(1, Math.min(MAX_TRIP_DAYS, Number(request.day_count || 1)));
+  const popularAreas = selectPopularAreas(pool, dayCount + 2).filter((area) => area !== selectedArea);
+  const dayAreas = request.area ? [selectedArea, ...popularAreas] : selectPopularAreas(pool, dayCount);
+  const usedDailyPoiIds = new Set<string>();
   const dailyItinerary = Array.from({ length: dayCount }, (_, index) => {
     const dayArea = dayAreas[index % dayAreas.length] || selectedArea;
-    const dayRequest = normalizeRequest({
+    const dayRequest = preparePlanningRequest(data, {
       ...request,
       area: dayArea,
       max_total_pois: request.max_duration_min && request.max_duration_min >= 420 ? 4 : request.max_total_pois,
-      exclude_poi_ids: [...(request.exclude_poi_ids || []), ...proposals[0].ordered_poi_ids.slice(0, index * 2)],
+      must_include_names: index === 0 ? request.must_include_names : [],
+      must_include_poi_ids: index === 0 ? request.must_include_poi_ids : [],
+      route_order_poi_ids: index === 0 ? request.route_order_poi_ids : [],
+      exclude_poi_ids: [...(request.exclude_poi_ids || []), ...Array.from(usedDailyPoiIds)],
     });
     const dayProposal = buildProposal({ request: dayRequest, strategy: index % 3 === 0 ? 'balanced' : index % 3 === 1 ? 'efficient' : 'budget', selectedArea: dayArea, candidates: pool, data, commuteEdges });
-    return { day: index + 1, title: `Day ${index + 1}`, area: dayArea, theme: index === 0 ? 'Classic area' : index === 1 ? 'Food and culture mix' : 'Budget-friendly culture', proposal: dayProposal };
+    for (const id of dayProposal.ordered_poi_ids || []) usedDailyPoiIds.add(String(id));
+    return { day: index + 1, title: `第 ${index + 1} 天`, area: dayArea, theme: index === 0 ? '核心目的地体验' : index === 1 ? '餐饮与文化扩展' : '顺路补充与轻松探索', proposal: dayProposal };
   });
   const transferSummary = summarizeProposalTransfers(proposals);
+  const slaMetrics = buildSlaMetrics({ started, fastPath: 'local_planner', llmBlocking: false });
   const baseResponse = {
     request_id: `travel-${Math.random().toString(16).slice(2, 12)}`,
     city_id: 'beijing',
@@ -1570,8 +2557,7 @@ export async function planTravelRoute(payload: Partial<TravelPlanningRequest>) {
     daily_itinerary: dailyItinerary,
     proposals,
     generation_metrics: {
-      elapsed_ms: Number((performance.now() - started).toFixed(2)),
-      within_10s: performance.now() - started < 10000,
+      ...slaMetrics,
       commute_edges_loaded: commuteEdges.loaded,
       commute_edge_count: commuteEdges.edge_count,
       commute_edge_loaded_at: commuteEdges.loaded_at,
@@ -1600,20 +2586,27 @@ export async function buildStaticTravelRoute(payload: Partial<TravelPlanningRequ
   const pool = candidatePool(data, request);
   const selectedArea = selectArea(request, pool);
   const proposals = (['balanced', 'budget', 'efficient'] as Strategy[]).map((strategy) => buildProposal({ request, strategy, selectedArea, candidates: pool, data, commuteEdges }));
-  const dayCount = Math.max(1, Math.min(5, Number(request.day_count || 1)));
-  const dayAreas = request.area ? [selectedArea] : selectPopularAreas(pool, dayCount);
+  const dayCount = Math.max(1, Math.min(MAX_TRIP_DAYS, Number(request.day_count || 1)));
+  const popularAreas = selectPopularAreas(pool, dayCount + 2).filter((area) => area !== selectedArea);
+  const dayAreas = request.area ? [selectedArea, ...popularAreas] : selectPopularAreas(pool, dayCount);
+  const usedDailyPoiIds = new Set<string>();
   const dailyItinerary = Array.from({ length: dayCount }, (_, index) => {
     const dayArea = dayAreas[index % dayAreas.length] || selectedArea;
     const dayRequest = normalizeRequest({
       ...request,
       area: dayArea,
       max_total_pois: request.max_duration_min && request.max_duration_min >= 420 ? 4 : request.max_total_pois,
-      exclude_poi_ids: [...(request.exclude_poi_ids || []), ...proposals[0].ordered_poi_ids.slice(0, index * 2)],
+      must_include_names: index === 0 ? request.must_include_names : [],
+      must_include_poi_ids: index === 0 ? request.must_include_poi_ids : [],
+      route_order_poi_ids: index === 0 ? request.route_order_poi_ids : [],
+      exclude_poi_ids: [...(request.exclude_poi_ids || []), ...Array.from(usedDailyPoiIds)],
     });
     const dayProposal = buildProposal({ request: dayRequest, strategy: index % 3 === 0 ? 'balanced' : index % 3 === 1 ? 'efficient' : 'budget', selectedArea: dayArea, candidates: pool, data, commuteEdges });
-    return { day: index + 1, title: `Day ${index + 1}`, area: dayArea, theme: index === 0 ? 'Classic area' : index === 1 ? 'Food and culture mix' : 'Budget-friendly culture', proposal: dayProposal };
+    for (const id of dayProposal.ordered_poi_ids || []) usedDailyPoiIds.add(String(id));
+    return { day: index + 1, title: `第 ${index + 1} 天`, area: dayArea, theme: index === 0 ? '核心目的地体验' : index === 1 ? '餐饮与文化扩展' : '顺路补充与轻松探索', proposal: dayProposal };
   });
   const transferSummary = summarizeProposalTransfers(proposals);
+  const slaMetrics = buildSlaMetrics({ started, fastPath: 'static_local_planner', llmBlocking: false });
   return {
     request_id: `travel-static-${Math.random().toString(16).slice(2, 12)}`,
     city_id: 'beijing',
@@ -1632,8 +2625,7 @@ export async function buildStaticTravelRoute(payload: Partial<TravelPlanningRequ
     daily_itinerary: dailyItinerary,
     proposals,
     generation_metrics: {
-      elapsed_ms: Number((performance.now() - started).toFixed(2)),
-      within_10s: performance.now() - started < 10000,
+      ...slaMetrics,
       commute_edges_loaded: commuteEdges.loaded,
       commute_edge_count: commuteEdges.edge_count,
       commute_edge_loaded_at: commuteEdges.loaded_at,
@@ -1658,8 +2650,16 @@ export async function parseAndPlanTravel(payload: { goal?: string; defaults?: Pa
     if (corpusMatch.matched) {
       return buildPlanningResponseFromRouteCorpus({ intent, match: corpusMatch, request: corpusRequest });
     }
-    const planningResponse = await buildStaticTravelRoute(corpusRequest);
+    const planningResponse = applyReplanAccelerationCache(await buildStaticTravelRoute(corpusRequest));
     const databaseRecall = await executeDatabaseRecall(intent);
+    const acceleration = buildAccelerationSummary({
+      intent,
+      fastPath: planningResponse.generation_metrics?.sla?.fast_path || 'static_local_planner',
+      routeCorpusUsed: false,
+      databaseRecallUsed: databaseRecall.used,
+      sqlResults: databaseRecall.results as Array<Record<string, any>>,
+    });
+    const knowledgeGuidance = buildKnowledgeGuidanceSummary({});
     return {
       parsed_request: corpusRequest,
       parser_confidence: intent.confidence,
@@ -1673,6 +2673,8 @@ export async function parseAndPlanTravel(payload: { goal?: string; defaults?: Pa
         ...planningResponse,
         query_plan: databaseRecall.query_plan,
         query_results: databaseRecall.results,
+        acceleration,
+        knowledge_guidance: knowledgeGuidance,
         route_corpus_match: {
           used: false,
           source: 'none',
@@ -1685,6 +2687,8 @@ export async function parseAndPlanTravel(payload: { goal?: string; defaults?: Pa
           route_corpus_used: false,
           database_recall_used: databaseRecall.used,
           llm_role: 'semantic_intent_only',
+          acceleration_layers: acceleration.layers,
+          knowledge_guidance_used: knowledgeGuidance.enabled,
         },
       },
     };
@@ -1730,7 +2734,7 @@ export async function parseAndPlanTravel(payload: { goal?: string; defaults?: Pa
     : advisedRequest;
   const planningRequest = { ...draftConstrainedRequest };
   delete planningRequest.goal;
-  const planningResponse = await planTravelRoute(planningRequest);
+  const planningResponse = applyReplanAccelerationCache(await planTravelRoute(planningRequest));
   return await enrichPlanningResponseWithLlm({
     rawText: rawGoal,
     planningResponse,
@@ -1752,7 +2756,8 @@ async function stableReplanTravelRoute(payload: {
   const data = await loadTravelData();
   const previous = normalizeRequest(payload.previous_request || {});
   const adjustmentText = payload.adjustment_text || '';
-  const parsed = parseGoal(adjustmentText, previous);
+  const llmIntent = await parseTravelQueryIntent(adjustmentText, { timeoutMs: Number(process.env.TRAVELPILOT_REPLAN_INTENT_TIMEOUT_MS || 3500) }).catch(() => null);
+  const parsed = mergeIntentIntoReplanRequest(parseGoal(adjustmentText, previous), llmIntent);
   const selectedIds = payload.selected_proposal?.ordered_poi_ids || [];
   const selectedFirst = selectedIds[0];
   const selectedPois = selectedIds
@@ -1763,7 +2768,9 @@ async function stableReplanTravelRoute(payload: {
   const excludedNames = (parsed.exclude_names || []).map(normalizePoiName);
   const excludedIds = new Set(parsed.exclude_poi_ids || []);
   const locked = [...(payload.locked_poi_ids || [])];
-  const wantsFoodChange = stableWantsFoodChange(adjustmentText) || adjustmentWantsFoodChange(adjustmentText);
+  const explicitFoodChangeText = /(\u53bb\u6389|\u5220\u9664|\u4e0d\u8981|\u4e0d\u53bb|\u6362\u6389|\u6362\u6210|\u6362\u4e00\u4e2a|\u66ff\u6362|\u6539\u6210).*(\u5403\u996d|\u9910\u996e|\u5348\u9910|\u5348\u996d|\u9910\u5385|\u996d\u5e97|\u5c0f\u5403|\u5496\u5561|\u4e0b\u5348\u8336)|(\u5403\u996d|\u9910\u996e|\u5348\u9910|\u5348\u996d|\u9910\u5385|\u996d\u5e97|\u5c0f\u5403|\u5496\u5561|\u4e0b\u5348\u8336).*(\u53bb\u6389|\u5220\u9664|\u4e0d\u8981|\u4e0d\u53bb|\u6362\u6389|\u6362\u6210|\u6362\u4e00\u4e2a|\u66ff\u6362|\u6539\u6210)/.test(adjustmentText);
+  const explicitFoodAdditionText = /(\u518d\u52a0|\u52a0\u4e00\u4e2a|\u6dfb\u52a0|\u589e\u52a0|\u987a\u8def).*(\u5403\u996d|\u9910\u996e|\u5348\u9910|\u5348\u996d|\u9910\u5385|\u996d\u5e97|\u5c0f\u5403|\u5496\u5561|\u4e0b\u5348\u8336)|(\u5403\u996d|\u9910\u996e|\u5348\u9910|\u5348\u996d|\u9910\u5385|\u996d\u5e97|\u5c0f\u5403|\u5496\u5561|\u4e0b\u5348\u8336).*(\u518d\u52a0|\u52a0\u4e00\u4e2a|\u6dfb\u52a0|\u589e\u52a0|\u987a\u8def)/.test(adjustmentText);
+  const wantsFoodChange = (explicitFoodChangeText || explicitFoodAdditionText) && (stableWantsFoodChange(adjustmentText) || adjustmentWantsFoodChange(adjustmentText));
   const wantsSnack = stableWantsSnack(adjustmentText) || adjustmentWantsSnack(adjustmentText);
   const wantsFormalMeal = stableWantsFormalMeal(adjustmentText);
   const preserveFood = stablePreservesFood(adjustmentText);
@@ -1773,6 +2780,33 @@ async function stableReplanTravelRoute(payload: {
   const wantsIndoor = stableWantsIndoor(adjustmentText);
   const wantsAddStop = stableWantsAddStop(adjustmentText);
   const wantsGenericAttraction = stableWantsGenericAttraction(adjustmentText);
+  let replanAccelerationHit: 'request_snapshot' | 'route_corpus_poi_hint' | null = null;
+  let routeCorpusPoiHintElapsedMs = 0;
+  parsed.must_include_poi_ids = Array.from(new Set([
+    ...(parsed.must_include_poi_ids || []),
+    ...resolveIdsFromReplanAccelerationCache(parsed),
+    ...resolveMustIncludePoiIds(data, parsed),
+  ]));
+  if (resolveIdsFromReplanAccelerationCache(parsed).length > 0) {
+    replanAccelerationHit = 'request_snapshot';
+  }
+  if (!replanAccelerationHit && (parsed.must_include_names || []).length > 0) {
+    const corpusHints = await findRouteCorpusPoiHints(parsed.must_include_names || [], 16).catch(() => null);
+    routeCorpusPoiHintElapsedMs = Number(corpusHints?.elapsed_ms || 0);
+    if (corpusHints?.matched) {
+      const bestCorpusHints = filterBestCorpusHintsForNames(corpusHints.hints, parsed.must_include_names || []);
+      parsed.replan_acceleration_cache = mergeReplanAccelerationCaches(
+        parsed.replan_acceleration_cache,
+        replanCacheFromCorpusHints(bestCorpusHints.length ? bestCorpusHints : corpusHints.hints.slice(0, 1)),
+      );
+      const corpusHintIds = resolveIdsFromReplanAccelerationCache(parsed);
+      if (corpusHintIds.length > 0) {
+        parsed.must_include_poi_ids = Array.from(new Set([...(parsed.must_include_poi_ids || []), ...corpusHintIds]));
+        replanAccelerationHit = 'route_corpus_poi_hint';
+      }
+    }
+  }
+  const wantsNamedInclude = requestHasNamedInclude(parsed);
 
   if (selectedFirst && /(\u4fdd\u7559|\u9501\u5b9a|\u4e0d\u8981\u5220)/.test(adjustmentText)) locked.push(selectedFirst);
   if (targetedReplacementId) excludedIds.add(targetedReplacementId);
@@ -1809,6 +2843,11 @@ async function stableReplanTravelRoute(payload: {
   if (wantsIndoor) {
     parsed.preference_signals = { ...(parsed.preference_signals || {}), indoor: true };
   }
+  if (wantsNamedInclude) {
+    locked.push(...(parsed.must_include_poi_ids || []));
+    parsed.max_total_pois = Math.min(8, Math.max(Number(previous.max_total_pois || selectedIds.length || 3), selectedIds.length + 1));
+    parsed.area = null;
+  }
   if (wantsAddStop && selectedIds.length > 0) {
     parsed.max_total_pois = Math.min(8, Math.max(Number(previous.max_total_pois || selectedIds.length), selectedIds.length) + 1);
     const explicitFoodAdd = wantsFoodChange || wantsSnack;
@@ -1822,17 +2861,21 @@ async function stableReplanTravelRoute(payload: {
       wantsSnack,
       wantsIndoor,
     });
-    if (additionalStop && (wantsGenericAttraction || wantsIndoor || explicitFoodAdd)) {
+    if (additionalStop && (wantsGenericAttraction || wantsIndoor || explicitFoodAdd) && !wantsNamedInclude) {
       locked.push(additionalStop.poi_id);
     }
   }
   parsed.must_include_poi_ids = Array.from(new Set([...(parsed.must_include_poi_ids || []), ...locked]))
     .filter((id) => !excludedIds.has(id));
-  parsed.route_order_poi_ids = wantsAddStop
-    ? selectedIds.filter((id) => parsed.must_include_poi_ids?.includes(id))
+  const orderedLockedIds = [
+    ...selectedIds.filter((id) => parsed.must_include_poi_ids?.includes(id)),
+    ...(parsed.must_include_poi_ids || []).filter((id) => !selectedIds.includes(id)),
+  ];
+  parsed.route_order_poi_ids = wantsAddStop || wantsNamedInclude
+    ? orderedLockedIds
     : selectedIds.filter((id) => targetedReplacementId === id || parsed.must_include_poi_ids?.includes(id));
 
-  let result = await planTravelRoute(parsed);
+  let result = applyReplanAccelerationCache(await planTravelRoute(parsed));
   const leakedNames = result.proposals
     .flatMap((proposal) => proposal.pois || [])
     .filter((poi: Pick<Poi, 'poi_id' | 'name'>) => excludedIds.has(poi.poi_id) || matchesExcludedName(poi, parsed.exclude_names || []))
@@ -1840,22 +2883,56 @@ async function stableReplanTravelRoute(payload: {
   if (leakedNames.length > 0) {
     parsed.must_include_poi_ids = (parsed.must_include_poi_ids || []).filter((id) => !excludedIds.has(id));
     parsed.route_order_poi_ids = selectedIds.filter((id) => parsed.must_include_poi_ids?.includes(id));
-    result = await planTravelRoute(parsed);
+    result = applyReplanAccelerationCache(await planTravelRoute(parsed));
   }
+  const routePatchSummary = buildRoutePatchSummary({
+    beforeIds: selectedIds.map(String),
+    beforeNames: (payload.selected_proposal?.ordered_poi_names || selectedPois.map((poi) => poi.name)).map(String),
+    afterProposal: result.proposals?.[0] || null,
+    adjustmentText,
+  });
   return {
     ...result,
+    generation_metrics: {
+      ...(result.generation_metrics || {}),
+      replan_acceleration_hit: replanAccelerationHit,
+      replan_intent_parser: llmIntent?.parser || 'rule_fallback',
+      replan_intent_llm_used: Boolean(llmIntent?.llm_used),
+      replan_intent_llm_attempted: Boolean(llmIntent?.llm_attempted),
+      replan_intent_llm_elapsed_ms: llmIntent?.llm_elapsed_ms || 0,
+      replan_intent_confidence: llmIntent?.confidence ?? null,
+      replan_intent_action: llmIntent?.replan_action || null,
+      replan_intent_must_include_names: llmIntent?.must_include_names || [],
+      replan_intent_exclude_names: llmIntent?.exclude_names || [],
+      replan_intent_error: llmIntent?.llm_error || null,
+      route_corpus_poi_hint_elapsed_ms: routeCorpusPoiHintElapsedMs,
+      route_corpus_poi_hint_used: replanAccelerationHit === 'route_corpus_poi_hint',
+      acceleration_layers: {
+        ...(result.generation_metrics?.acceleration_layers || {}),
+        replan_llm_semantic_patch: Boolean(llmIntent?.llm_used),
+        replan_semantic_cache: Boolean(llmIntent?.cache_hit),
+        replan_request_snapshot_cache: replanAccelerationHit === 'request_snapshot',
+        route_corpus_poi_hint: replanAccelerationHit === 'route_corpus_poi_hint',
+      },
+    },
+    route_patch_summary: routePatchSummary,
     replan_metadata: {
       source_request_applied: Boolean(payload.previous_request),
       adjustment_text: payload.adjustment_text || '',
       locked_poi_ids: parsed.must_include_poi_ids,
+      route_patch_summary: routePatchSummary,
       applied_adjustments: [
         parsed.max_budget !== previous.max_budget ? 'Budget constraint updated.' : null,
         parsed.walk_preference !== previous.walk_preference ? 'Walking preference updated.' : null,
         parsed.max_duration_min !== previous.max_duration_min ? 'Duration constraint updated.' : null,
         targetedReplacementId ? `Targeted replacement applied for stop ${Number(targetedReplacementIndex) + 1}.` : null,
         parsed.must_include_poi_ids?.length ? 'Unchanged POIs preserved for local replan.' : null,
+        llmIntent?.llm_used ? 'MiniMax semantic patch applied before deterministic route validation.' : null,
+        llmIntent?.llm_attempted && !llmIntent.llm_used ? 'MiniMax semantic patch unavailable; deterministic parser handled replan.' : null,
         wantsFoodChange ? 'Food stop replacement applied without rebuilding the full route.' : null,
         wantsAddStop ? 'Additional stop inserted near the existing route.' : null,
+        replanAccelerationHit === 'request_snapshot' ? 'Added stop resolved from previous route acceleration cache.' : null,
+        replanAccelerationHit === 'route_corpus_poi_hint' ? 'Added stop resolved from precomputed route corpus POI hints.' : null,
         leakedNames.length ? 'Excluded POI leak prevented by final guard.' : null,
       ].filter(Boolean),
     },
