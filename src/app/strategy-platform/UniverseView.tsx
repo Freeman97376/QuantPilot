@@ -15,7 +15,7 @@ import type {
   StrategyUniverse,
   StrategyUniverseMembersPage,
 } from "@/lib/quant/strategies";
-import { StockKlineDetail } from "./StockKlineDetail";
+import { StockKlineDetail } from "@/components/quant/StockKlineDetail";
 import {
   type IngestionRangeMode,
   API_BASE,

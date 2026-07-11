@@ -199,7 +199,38 @@ curl -X POST 'http://127.0.0.1:8000/api/v1/foundation/data-quality/scan' \
 curl 'http://127.0.0.1:8000/api/v1/indicators/technical/600519?period=daily&adjustment=qfq&limit=120'
 ```
 
-返回 MA5/MA10/MA20/MA30/MA60、单日收益率、回撤序列、区间收益、最大回撤、年化波动率和 20 日平均成交量。
+返回 MA5/MA10/MA20/MA30/MA60/MA120/MA250、MA5/MA10/MA20 的 5 日斜率、MA60 的 20 日斜率、EMA12/EMA26、RSI6/RSI14、MACD DIF/DEA/柱、K 线形态、量比、单日收益率、回撤序列、区间收益、最大回撤、年化波动率和 20 日平均成交量。均线斜率口径为 `(ma_today - ma_n_days_ago) / ma_n_days_ago * 100`。
+
+### 技术指标选股
+
+LLM 或前端先把自然语言策略转换成 `StrategyIntent[]`，再由 Next.js 服务端编译成受控 JSON，最后由 market-data 读取本地 TimescaleDB 日 K 横截面执行筛选。策略 JSON 只允许白名单字段、比较操作和排序字段，不允许直接拼 SQL。
+
+第一批技术选股白名单额外支持 `ma120`、`ma250`、`ma5_slope_5d_pct`、`ma10_slope_5d_pct`、`ma20_slope_5d_pct`、`ma60_slope_20d_pct`、`ema12`、`ema26`、`rsi6`、`rsi14`、`macd_dif`、`macd_dea`、`macd_hist`、`upper_shadow_pct`、`lower_shadow_pct`、`body_pct`、`amplitude`、`close_position_pct`、`amount_ratio_5d`、`volume_ratio_5d` 和 `turnover_avg_20d`。`macd_hist` 使用 `(DIF - DEA) * 2` 口径；KDJ、BOLL、ATR、资金流、主力、大单、盘口暂缓到后续真实数据源接入后支持。
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/api/v1/research/screeners/a-share/technical' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "universe_id":"a-share-sample-research-pool",
+    "limit":20,
+    "spec":{
+      "name":"均线多头放量选股",
+      "timeframe":"daily",
+      "adjustment":"qfq",
+      "min_sample_count":60,
+      "exclude_st":true,
+      "exclude_limit_up":true,
+      "conditions":[
+        {"field":"ma5","operator":"gte","value_field":"ma10","label":"MA5 >= MA10"},
+        {"field":"ma10","operator":"gte","value_field":"ma20","label":"MA10 >= MA20"},
+        {"field":"close","operator":"gte","value_field":"ma5","label":"收盘价站上 MA5"},
+        {"field":"strength_20d_pct","operator":"gte","value":8,"label":"20日强弱 >= 8%"},
+        {"field":"amount_ratio_20d","operator":"gte","value":1.5,"label":"成交额较20日均额放大"}
+      ],
+      "sort":{"field":"score","direction":"desc"}
+    }
+  }'
+```
 
 ### 指数与 ETF
 

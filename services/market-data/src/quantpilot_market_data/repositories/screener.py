@@ -19,11 +19,18 @@ from quantpilot_market_data.database_core import (
     percent_change,
     security_sector_fields,
 )
+from quantpilot_market_data.indicators import (
+    TECHNICAL_INDICATOR_FIELD_LABELS,
+    build_technical_feature_rows,
+)
 from quantpilot_market_data.models import (
     AnalyticsExecutionMetadata,
     AShareScreenerCandidate,
     AShareScreenerResponse,
     ScreenerMode,
+    TechnicalScreenerCondition,
+    TechnicalScreenerRequest,
+    TechnicalScreenerResponse,
 )
 from quantpilot_market_data.repositories.analytics import sync_clickhouse_daily_bars
 
@@ -33,7 +40,7 @@ _SCREENER_CACHE: dict[tuple[str, str, str, int], tuple[datetime, AShareScreenerR
 _SCREENER_TRADE_DATE_CACHE: dict[tuple[str, str], tuple[datetime, date | None]] = {}
 _SCREENER_REDIS_CACHE = RedisJsonCache()
 
-__all__ = ["screen_a_share_short_term_candidates"]
+__all__ = ["screen_a_share_short_term_candidates", "screen_a_share_technical_strategy"]
 
 
 def _screener_missing_fields(row: dict[str, Any]) -> list[str]:
@@ -823,3 +830,592 @@ async def screen_a_share_short_term_candidates(
         _screener_cache_set(cache_key, response)
         await _screener_redis_set(cache_key, response)
     return response
+
+
+TECHNICAL_SCREENER_FIELD_LABELS: dict[str, str] = {
+    "open": "开盘价",
+    "close": "收盘价",
+    "high": "最高价",
+    "low": "最低价",
+    "previous_close": "昨收",
+    "change_percent": "涨跌幅",
+    "amount": "成交额",
+    "volume": "成交量",
+    "turnover": "换手率",
+    "ma5": "MA5",
+    "ma10": "MA10",
+    "ma20": "MA20",
+    "ma30": "MA30",
+    "ma60": "MA60",
+    "strength_5d_pct": "5日强弱",
+    "strength_10d_pct": "10日强弱",
+    "strength_20d_pct": "20日强弱",
+    "strength_60d_pct": "60日强弱",
+    "amount_ratio_20d": "成交额/20日均额",
+    "volume_ratio_20d": "成交量/20日均量",
+    "close_to_ma5_pct": "收盘价距MA5",
+    "close_to_ma20_pct": "收盘价距MA20",
+    "close_to_ma60_pct": "收盘价距MA60",
+    "limit_up_count_4d": "4日涨停次数",
+    "limit_up_count_10d": "10日涨停次数",
+    "sample_count": "样本根数",
+    "score": "综合分",
+    "is_limit_up": "当日涨停",
+    "is_st": "ST",
+}
+TECHNICAL_SCREENER_FIELD_LABELS.update(
+    {
+        field: label
+        for field, label in TECHNICAL_INDICATOR_FIELD_LABELS.items()
+        if field not in TECHNICAL_SCREENER_FIELD_LABELS
+    }
+)
+
+TECHNICAL_NUMERIC_FIELDS = {
+    field
+    for field in TECHNICAL_SCREENER_FIELD_LABELS
+    if field not in {"is_limit_up", "is_st"}
+}
+TECHNICAL_BOOLEAN_FIELDS = {"is_limit_up", "is_st"}
+
+
+def _technical_screener_field_label(field: str) -> str:
+    return TECHNICAL_SCREENER_FIELD_LABELS.get(field, field)
+
+
+def _ensure_technical_field(field: str) -> None:
+    if field not in TECHNICAL_SCREENER_FIELD_LABELS:
+        allowed = "、".join(sorted(TECHNICAL_SCREENER_FIELD_LABELS))
+        raise ValueError(f"不支持的技术筛选字段：{field}。允许字段：{allowed}")
+
+
+def _technical_value(row: dict[str, Any], field: str) -> Decimal | bool | None:
+    _ensure_technical_field(field)
+    close = decimal_or_none(row.get("latest_close"))
+    if field == "open":
+        return decimal_or_none(row.get("latest_open"))
+    if field == "close":
+        return close
+    if field == "high":
+        return decimal_or_none(row.get("latest_high"))
+    if field == "low":
+        return decimal_or_none(row.get("latest_low"))
+    if field == "previous_close":
+        return decimal_or_none(row.get("previous_close"))
+    if field == "change_percent":
+        return decimal_or_none(row.get("latest_change_percent"))
+    if field == "amount":
+        return decimal_or_none(row.get("latest_amount"))
+    if field == "volume":
+        return decimal_or_none(row.get("latest_volume"))
+    if field == "turnover":
+        return decimal_or_none(row.get("latest_turnover"))
+    if field in TECHNICAL_INDICATOR_FIELD_LABELS:
+        direct = decimal_or_none(row.get(field))
+        if direct is not None:
+            return direct
+    if field in {"ma5", "ma10", "ma20", "ma30", "ma60", "ma120", "ma250"}:
+        return decimal_or_none(row.get(field))
+    if field == "strength_5d_pct":
+        return percent_change(close, decimal_or_none(row.get("close_5d")))
+    if field == "strength_10d_pct":
+        return percent_change(close, decimal_or_none(row.get("close_10d")))
+    if field == "strength_20d_pct":
+        return percent_change(close, decimal_or_none(row.get("close_20d")))
+    if field == "strength_60d_pct":
+        return percent_change(close, decimal_or_none(row.get("close_60d")))
+    if field == "amount_ratio_20d":
+        return decimal_ratio(
+            decimal_or_none(row.get("latest_amount")),
+            decimal_or_none(row.get("avg_amount_20d")),
+        )
+    if field == "amount_ratio_5d":
+        return decimal_ratio(
+            decimal_or_none(row.get("latest_amount")),
+            decimal_or_none(row.get("avg_amount_5d")),
+        )
+    if field == "volume_ratio_20d":
+        return decimal_ratio(
+            decimal_or_none(row.get("latest_volume")),
+            decimal_or_none(row.get("avg_volume_20d")),
+        )
+    if field == "volume_ratio_5d":
+        return decimal_ratio(
+            decimal_or_none(row.get("latest_volume")),
+            decimal_or_none(row.get("avg_volume_5d")),
+        )
+    if field == "turnover_avg_20d":
+        return decimal_or_none(row.get("avg_turnover_20d"))
+    if field == "close_to_ma5_pct":
+        return percent_change(close, decimal_or_none(row.get("ma5")))
+    if field == "close_to_ma20_pct":
+        return percent_change(close, decimal_or_none(row.get("ma20")))
+    if field == "close_to_ma60_pct":
+        return percent_change(close, decimal_or_none(row.get("ma60")))
+    if field == "close_to_ma120_pct":
+        return percent_change(close, decimal_or_none(row.get("ma120")))
+    if field == "limit_up_count_4d":
+        return Decimal(int(row.get("limit_up_count_4d") or 0))
+    if field == "limit_up_count_10d":
+        return Decimal(int(row.get("limit_up_count_10d") or 0))
+    if field == "sample_count":
+        return Decimal(int(row.get("sample_count") or 0))
+    if field == "score":
+        return _screener_score(row)
+    if field == "is_limit_up":
+        return bool_or_none(row.get("latest_limit_up")) is True
+    if field == "is_st":
+        return bool_or_none(row.get("latest_is_st")) is True
+    return None
+
+
+def _technical_condition_rhs(
+    condition: TechnicalScreenerCondition,
+    row: dict[str, Any],
+) -> Decimal | bool | None:
+    if condition.value_field:
+        _ensure_technical_field(condition.value_field)
+        return _technical_value(row, condition.value_field)
+    if isinstance(condition.value, bool):
+        return condition.value
+    if condition.value is None:
+        return None
+    return decimal_or_none(condition.value)
+
+
+def _technical_condition_passes(
+    condition: TechnicalScreenerCondition,
+    row: dict[str, Any],
+) -> bool:
+    _ensure_technical_field(condition.field)
+    left = _technical_value(row, condition.field)
+    right = _technical_condition_rhs(condition, row)
+    if condition.field in TECHNICAL_BOOLEAN_FIELDS:
+        if condition.operator != "eq":
+            raise ValueError(f"布尔字段 {condition.field} 只支持 eq 操作符")
+        return left is right
+    if condition.operator == "between":
+        if left is None or condition.value is None or condition.upper_value is None:
+            return False
+        lower = decimal_or_none(condition.value)
+        upper = decimal_or_none(condition.upper_value)
+        return lower is not None and upper is not None and lower <= left <= upper
+    if left is None or right is None:
+        return False
+    if condition.operator == "gt":
+        return left > right
+    if condition.operator == "gte":
+        return left >= right
+    if condition.operator == "lt":
+        return left < right
+    if condition.operator == "lte":
+        return left <= right
+    if condition.operator == "eq":
+        return left == right
+    return False
+
+
+def _technical_condition_label(condition: TechnicalScreenerCondition) -> str:
+    if condition.label:
+        return condition.label
+    field = _technical_screener_field_label(condition.field)
+    op = {
+        "gt": ">",
+        "gte": ">=",
+        "lt": "<",
+        "lte": "<=",
+        "eq": "=",
+        "between": "介于",
+    }[condition.operator]
+    if condition.value_field:
+        target = _technical_screener_field_label(condition.value_field)
+    elif condition.operator == "between":
+        target = f"{condition.value} 到 {condition.upper_value}"
+    else:
+        target = str(condition.value)
+    return f"{field} {op} {target}"
+
+
+def _technical_candidate_signals(
+    row: dict[str, Any],
+    conditions: list[TechnicalScreenerCondition],
+) -> list[str]:
+    signals = _screener_signals(row)
+    for condition in conditions:
+        label = _technical_condition_label(condition)
+        if label not in signals:
+            signals.append(label)
+    return signals[:10]
+
+
+def _technical_screener_sort_key(
+    row: dict[str, Any],
+    field: str,
+) -> Decimal:
+    value = _technical_value(row, field)
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, bool):
+        return Decimal("1") if value else Decimal("0")
+    return Decimal("-999999999")
+
+
+async def _resolve_technical_screener_trade_date(
+    cursor,
+    *,
+    universe_id: str,
+    trade_date: date | None,
+    timeframe: str,
+    adjustment: str,
+) -> date | None:
+    await cursor.execute(
+        """
+        SELECT max((bars.ts AT TIME ZONE 'Asia/Shanghai')::date) AS trade_date
+        FROM quant.security_universe_members members
+        JOIN quant.securities securities
+          ON securities.symbol = members.symbol
+        JOIN quant.stock_bars bars
+          ON bars.symbol = members.symbol
+         AND bars.timeframe = %s
+         AND bars.adjustment = %s
+        WHERE members.universe_id = %s
+          AND securities.asset_type = 'stock'
+          AND COALESCE(members.role, 'member') <> 'inactive'
+          AND COALESCE(securities.status, 'active') NOT IN ('inactive', 'delisted')
+          AND (
+            %s::date IS NULL
+            OR bars.ts < ((%s::date + 1)::timestamp AT TIME ZONE 'Asia/Shanghai')
+          )
+        """,
+        (timeframe, adjustment, universe_id, trade_date, trade_date),
+    )
+    row = await cursor.fetchone()
+    return row["trade_date"] if row else None
+
+
+def _enrich_technical_screener_row(row: dict[str, Any]) -> dict[str, Any]:
+    history = row.get("bar_history") or []
+    if not isinstance(history, list):
+        return row
+    feature_rows = build_technical_feature_rows(history)
+    if not feature_rows:
+        return row
+    latest_features = feature_rows[-1]
+    for field in TECHNICAL_INDICATOR_FIELD_LABELS:
+        value = latest_features.get(field)
+        if value is not None:
+            row[field] = value
+    return row
+
+
+async def _fetch_technical_screener_rows(
+    cursor,
+    *,
+    universe_id: str,
+    trade_date: date,
+    timeframe: str,
+    adjustment: str,
+    min_sample_count: int,
+    exclude_st: bool,
+    exclude_limit_up: bool,
+) -> list[dict[str, Any]]:
+    await cursor.execute(
+        """
+        WITH member_symbols AS (
+          SELECT
+            securities.symbol,
+            securities.code,
+            securities.name,
+            securities.exchange,
+            securities.metadata AS security_metadata
+          FROM quant.security_universe_members members
+          JOIN quant.securities securities
+            ON securities.symbol = members.symbol
+          WHERE members.universe_id = %s
+            AND securities.asset_type = 'stock'
+            AND COALESCE(members.role, 'member') <> 'inactive'
+            AND COALESCE(securities.status, 'active') NOT IN ('inactive', 'delisted')
+            AND securities.exchange <> 'BJ'
+            AND securities.code !~ '^(688|8|4)'
+        ),
+        features AS (
+          SELECT
+            members.symbol,
+            members.code,
+            members.name,
+            members.exchange,
+            members.security_metadata,
+            count(recent_bars.*)::INT AS sample_count,
+            max(recent_bars.trade_date) FILTER (WHERE recent_bars.rn = 1)
+              AS latest_trade_date,
+            max(recent_bars.provider) FILTER (WHERE recent_bars.rn = 1)
+              AS latest_provider,
+            max(recent_bars.open) FILTER (WHERE recent_bars.rn = 1) AS latest_open,
+            max(recent_bars.high) FILTER (WHERE recent_bars.rn = 1) AS latest_high,
+            max(recent_bars.low) FILTER (WHERE recent_bars.rn = 1) AS latest_low,
+            max(recent_bars.close) FILTER (WHERE recent_bars.rn = 1) AS latest_close,
+            max(recent_bars.previous_close) FILTER (WHERE recent_bars.rn = 1)
+              AS previous_close,
+            max(recent_bars.amount) FILTER (WHERE recent_bars.rn = 1)
+              AS latest_amount,
+            max(recent_bars.volume) FILTER (WHERE recent_bars.rn = 1)
+              AS latest_volume,
+            max(recent_bars.turnover) FILTER (WHERE recent_bars.rn = 1)
+              AS latest_turnover,
+            max(recent_bars.change_percent) FILTER (WHERE recent_bars.rn = 1)
+              AS latest_change_percent,
+            max(recent_bars.change_percent) FILTER (WHERE recent_bars.rn = 2)
+              AS previous_change_percent,
+            bool_or(recent_bars.limit_up) FILTER (WHERE recent_bars.rn = 1)
+              AS latest_limit_up,
+            bool_or(recent_bars.is_st) FILTER (WHERE recent_bars.rn = 1)
+              AS latest_is_st,
+            avg(recent_bars.close) FILTER (WHERE recent_bars.rn <= 5) AS ma5,
+            avg(recent_bars.close) FILTER (WHERE recent_bars.rn <= 10) AS ma10,
+            avg(recent_bars.close) FILTER (WHERE recent_bars.rn <= 20) AS ma20,
+            avg(recent_bars.close) FILTER (WHERE recent_bars.rn <= 30) AS ma30,
+            avg(recent_bars.close) FILTER (WHERE recent_bars.rn <= 60) AS ma60,
+            avg(recent_bars.close) FILTER (WHERE recent_bars.rn <= 120) AS ma120,
+            avg(recent_bars.close) FILTER (WHERE recent_bars.rn <= 250) AS ma250,
+            avg(recent_bars.amount) FILTER (
+              WHERE recent_bars.rn <= 5 AND recent_bars.amount IS NOT NULL
+            ) AS avg_amount_5d,
+            avg(recent_bars.amount) FILTER (
+              WHERE recent_bars.rn <= 20 AND recent_bars.amount IS NOT NULL
+            ) AS avg_amount_20d,
+            avg(recent_bars.volume) FILTER (
+              WHERE recent_bars.rn <= 5 AND recent_bars.volume IS NOT NULL
+            ) AS avg_volume_5d,
+            avg(recent_bars.volume) FILTER (
+              WHERE recent_bars.rn <= 20 AND recent_bars.volume IS NOT NULL
+            ) AS avg_volume_20d,
+            avg(recent_bars.turnover) FILTER (
+              WHERE recent_bars.rn <= 20 AND recent_bars.turnover IS NOT NULL
+            ) AS avg_turnover_20d,
+            max(recent_bars.close) FILTER (WHERE recent_bars.rn = 6) AS close_5d,
+            max(recent_bars.close) FILTER (WHERE recent_bars.rn = 11) AS close_10d,
+            max(recent_bars.close) FILTER (WHERE recent_bars.rn = 21) AS close_20d,
+            max(recent_bars.close) FILTER (WHERE recent_bars.rn = 61) AS close_60d,
+            count(*) FILTER (
+              WHERE recent_bars.rn <= 4 AND recent_bars.limit_up IS TRUE
+            )::INT AS limit_up_count_4d,
+            count(*) FILTER (
+              WHERE recent_bars.rn <= 10 AND recent_bars.limit_up IS TRUE
+            )::INT AS limit_up_count_10d,
+            max(recent_bars.trade_date) FILTER (
+              WHERE recent_bars.rn <= 10 AND recent_bars.limit_up IS TRUE
+            ) AS latest_limit_up_date,
+            jsonb_agg(
+              jsonb_build_object(
+                'date', recent_bars.trade_date,
+                'open', recent_bars.open,
+                'high', recent_bars.high,
+                'low', recent_bars.low,
+                'close', recent_bars.close,
+                'previous_close', recent_bars.previous_close,
+                'amount', recent_bars.amount,
+                'volume', recent_bars.volume,
+                'turnover', recent_bars.turnover,
+                'amplitude', recent_bars.amplitude
+              )
+              ORDER BY recent_bars.rn DESC
+            ) FILTER (WHERE recent_bars.rn IS NOT NULL) AS bar_history
+          FROM member_symbols members
+          LEFT JOIN LATERAL (
+            SELECT
+              local_bars.*,
+              row_number() OVER (ORDER BY local_bars.ts DESC) AS rn
+            FROM (
+              SELECT
+                bars.ts,
+                (bars.ts AT TIME ZONE 'Asia/Shanghai')::date AS trade_date,
+                bars.open,
+                bars.high,
+                bars.low,
+                bars.close,
+                bars.previous_close,
+                bars.amount,
+                bars.volume,
+                bars.turnover,
+                bars.amplitude,
+                bars.change_percent,
+                bars.limit_up,
+                bars.is_st,
+                bars.provider
+              FROM quant.stock_bars bars
+              WHERE bars.symbol = members.symbol
+                AND bars.timeframe = %s
+                AND bars.adjustment = %s
+                AND bars.ts >= ((%s::date - 460)::timestamp AT TIME ZONE 'Asia/Shanghai')
+                AND bars.ts < ((%s::date + 1)::timestamp AT TIME ZONE 'Asia/Shanghai')
+              ORDER BY bars.ts DESC
+              LIMIT 260
+            ) local_bars
+          ) recent_bars ON TRUE
+          GROUP BY
+            members.symbol,
+            members.code,
+            members.name,
+            members.exchange,
+            members.security_metadata
+        )
+        SELECT
+          features.*,
+          count(*) OVER ()::INT AS scanned_symbols
+        FROM features
+        WHERE features.latest_trade_date = %s::date
+          AND features.latest_close IS NOT NULL
+          AND features.sample_count >= %s
+          AND (%s IS FALSE OR COALESCE(features.latest_is_st, FALSE) IS FALSE)
+          AND (%s IS FALSE OR COALESCE(features.latest_limit_up, FALSE) IS FALSE)
+        """,
+        (
+            universe_id,
+            timeframe,
+            adjustment,
+            trade_date,
+            trade_date,
+            trade_date,
+            min_sample_count,
+            exclude_st,
+            exclude_limit_up,
+        ),
+    )
+    rows = await cursor.fetchall()
+    return [_enrich_technical_screener_row(row) for row in rows]
+
+
+def _technical_candidate_from_row(
+    row: dict[str, Any],
+    conditions: list[TechnicalScreenerCondition],
+) -> AShareScreenerCandidate:
+    sector_fields = security_sector_fields(row["security_metadata"])
+    amount_ratio = decimal_ratio(
+        decimal_or_none(row.get("latest_amount")),
+        decimal_or_none(row.get("avg_amount_20d")),
+    )
+    return AShareScreenerCandidate(
+        symbol=str(row["symbol"]),
+        code=str(row["code"]),
+        name=row["name"],
+        exchange=row["exchange"] or "UNKNOWN",
+        sector_tags=sector_fields["sector_tags"],
+        trade_date=row["latest_trade_date"],
+        close=decimal_or_none(row.get("latest_close")),
+        open=decimal_or_none(row.get("latest_open")),
+        high=decimal_or_none(row.get("latest_high")),
+        low=decimal_or_none(row.get("latest_low")),
+        previous_close=decimal_or_none(row.get("previous_close")),
+        change_percent=decimal_or_none(row.get("latest_change_percent")),
+        amount=decimal_or_none(row.get("latest_amount")),
+        turnover=decimal_or_none(row.get("latest_turnover")),
+        ma5=decimal_or_none(row.get("ma5")),
+        ma10=decimal_or_none(row.get("ma10")),
+        ma20=decimal_or_none(row.get("ma20")),
+        ma30=decimal_or_none(row.get("ma30")),
+        ma60=decimal_or_none(row.get("ma60")),
+        strength_20d_pct=percent_change(
+            decimal_or_none(row.get("latest_close")),
+            decimal_or_none(row.get("close_20d")),
+        ),
+        amount_ratio_20d=amount_ratio,
+        limit_up_count_4d=int(row.get("limit_up_count_4d") or 0),
+        limit_up_count_10d=int(row.get("limit_up_count_10d") or 0),
+        latest_limit_up_date=row.get("latest_limit_up_date"),
+        is_limit_up=bool_or_none(row.get("latest_limit_up")),
+        is_st=bool_or_none(row.get("latest_is_st")),
+        sample_count=int(row.get("sample_count") or 0),
+        score=_screener_score(row),
+        signals=_technical_candidate_signals(row, conditions),
+        warnings=_screener_warnings(row),
+        missing_fields=_screener_missing_fields(row),
+    )
+
+
+async def screen_a_share_technical_strategy(
+    request: TechnicalScreenerRequest,
+) -> TechnicalScreenerResponse:
+    spec = request.spec
+    timeframe = str(spec.timeframe)
+    adjustment = str(spec.adjustment)
+    if timeframe != "daily":
+        raise ValueError("技术选股当前只支持 daily K 线")
+    for condition in spec.conditions:
+        _ensure_technical_field(condition.field)
+        if condition.value_field:
+            _ensure_technical_field(condition.value_field)
+    _ensure_technical_field(spec.sort.field)
+
+    async with await connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
+        trade_date = await _resolve_technical_screener_trade_date(
+            cursor,
+            universe_id=request.universe_id,
+            trade_date=request.trade_date,
+            timeframe=timeframe,
+            adjustment=adjustment,
+        )
+        if trade_date is None:
+            return TechnicalScreenerResponse(
+                universe_id=request.universe_id,
+                trade_date=None,
+                scanned_symbols=0,
+                limit=request.limit,
+                spec=spec,
+                candidates=[],
+                notes=["本地股票池尚未找到可筛选的交易日。"],
+            )
+        rows = await _fetch_technical_screener_rows(
+            cursor,
+            universe_id=request.universe_id,
+            trade_date=trade_date,
+            timeframe=timeframe,
+            adjustment=adjustment,
+            min_sample_count=spec.min_sample_count,
+            exclude_st=spec.exclude_st,
+            exclude_limit_up=spec.exclude_limit_up,
+        )
+
+    filtered_rows = [
+        row
+        for row in rows
+        if all(_technical_condition_passes(condition, row) for condition in spec.conditions)
+    ]
+    reverse = spec.sort.direction == "desc"
+    filtered_rows.sort(
+        key=lambda row: _technical_screener_sort_key(row, spec.sort.field),
+        reverse=reverse,
+    )
+    safe_limit = max(1, min(request.limit, 100))
+    candidates = [
+        _technical_candidate_from_row(row, spec.conditions)
+        for row in filtered_rows[:safe_limit]
+    ]
+    response_trade_date = next(
+        (row.get("latest_trade_date") for row in rows if row.get("latest_trade_date")),
+        trade_date,
+    )
+    notes = [
+        (
+            "EMA/RSI/MACD, candlestick morphology, and volume features are computed "
+            "deterministically from the latest local daily bars."
+        ),
+        "LLM 只生成白名单策略 JSON；实际筛选由 QuantPilot market-data 后端执行。",
+        "当前技术筛选使用本地 TimescaleDB 日 K、均线、强弱、成交额/成交量放大和涨停次数。",
+        "DDE 大单资金、分钟线盘口和行业中性化不在本接口内，不能把代理指标当真实资金流。",
+    ]
+    return TechnicalScreenerResponse(
+        universe_id=request.universe_id,
+        trade_date=response_trade_date,
+        scanned_symbols=int(rows[0]["scanned_symbols"] or len(rows)) if rows else 0,
+        limit=safe_limit,
+        spec=spec,
+        candidates=candidates,
+        analytics=AnalyticsExecutionMetadata(
+            engine="timescaledb",
+            status="disabled",
+            basis="timescaledb.stock_bars",
+            target_trade_date=response_trade_date,
+            message="自定义技术筛选当前固定读取 TimescaleDB 横截面特征。",
+        ),
+        notes=notes,
+    )

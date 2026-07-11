@@ -202,6 +202,7 @@ running -> failed
 | 因子 | 类型 | 数据依赖 | 状态 |
 | --- | --- | --- | --- |
 | `ma5/ma10/ma20/ma30/ma60` | 技术趋势 | `stock_bars.close` | 可计算 |
+| `ma5_slope_5d_pct/ma10_slope_5d_pct/ma20_slope_5d_pct/ma60_slope_20d_pct` | 均线斜率 | MA 族；口径 `(ma_today - ma_n_days_ago) / ma_n_days_ago * 100` | 可计算 |
 | `ret_20d/ret_60d` | 相对强弱 | `stock_bars.close` | 可计算 |
 | `ma_stack_score` | 均线多头质量 | MA 族 | 可计算 |
 | `amount_ratio_20d` | 成交额放大倍数 | `stock_bars.amount` | 字段完整后可计算 |

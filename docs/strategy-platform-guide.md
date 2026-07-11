@@ -29,6 +29,7 @@ http://localhost:3000/strategy-platform
 | K 线详情 | 点击某行后展开日/周/月 K 线、MA5/10/20/30/60、涨跌停和分红标记 | 不在表格里一次性加载全部股票明细 |
 | 补数弹窗 | 选择增量、近 5 年或自定义日期范围，控制暂停、继续和停止 | 不把长任务铺满股票池主页面 |
 | 策略目录 | 保存有实际数据依赖的选股策略和买卖价格策略 | 不放空泛的“策略方案”占位 |
+| 技术选股 | 将用户自然语言描述先转换为 `StrategyIntent[]`，再编译成受控技术指标策略 JSON，并执行本地股票池筛选 | 不让 LLM 直接拼 SQL、直接访问数据库、绕过字段白名单或把未支持词静默替换成别的指标 |
 | 因子目录 | 沉淀动量、低波、流动性、估值、质量、成长和资金流因子 | 不把缺数据的研究想法标成可执行 |
 | 基础组件 | 展示交易日历、因子定义、数据质量扫描和平台任务底座 | 不替代具体策略说明 |
 | 金融知识 | 解释指标怎么算、适用边界和对股价判断的影响 | 不写成只有名词的百科摘抄 |
@@ -89,6 +90,57 @@ MA5 > MA10 > MA20 > MA30 > MA60；
 这类策略目前的关键缺口是 DDE 大单资金。没有 DDE 字段时，策略目录应该标记“需补数据”，不能用成交额或换手率假装替代。成交额、换手率可以辅助流动性判断，但不能等价成主力大单。
 
 价格策略则更偏风控。它通常依赖 ATR、均线、前高前低、涨跌停、开盘强弱和计划成本。例如：买入价不追高过多，回踩 MA5 或前收附近更有性价比；跌破 MA10 或放量阴线要降低仓位；涨停次日如果高开过度且回落，要避免追入。
+
+## LLM 技术选股范式
+
+技术选股页的边界是“LLM 只做意图识别，服务端编译白名单策略，后端执行确定性筛选”。用户可以描述均线、斜率、强弱、放量、成交额、换手率、K 线形态、涨停次数等条件；平台会先把描述转换为 `StrategyIntent[]`，展示“系统理解”，再编译为 `TechnicalScreenerSpec`，并调用 market-data 的 `/api/v1/research/screeners/a-share/technical`。
+
+当前链路：
+
+```text
+自然语言 -> parse-intent -> StrategyIntent[] -> compile -> TechnicalScreenerSpec -> market-data 技术筛选
+```
+
+`/api/quant/smart-strategy` 支持：
+
+- `action: "parse-intent"`：只返回系统识别到的意图和映射字段，不执行筛选。
+- `action: "compile"`：输入意图数组，输出受控策略 JSON。
+- `action: "draft"`：兼容旧前端流程，内部执行 `parse-intent -> compile`。
+- `action: "run"`：用策略 JSON 调用 market-data 执行筛选。
+
+第一批白名单指标包括：
+
+- 趋势：`ma5/10/20/30/60/120/250`、`ma5_slope_5d_pct`、`ma10_slope_5d_pct`、`ma20_slope_5d_pct`、`ma60_slope_20d_pct`、`ema12`、`ema26`、`close_to_ma120_pct`
+- 动量：`rsi6`、`rsi14`、`macd_dif`、`macd_dea`、`macd_hist`
+- K 线形态：`upper_shadow_pct`、`lower_shadow_pct`、`body_pct`、`amplitude`、`close_position_pct`
+- 量能：`amount_ratio_5d`、`amount_ratio_20d`、`volume_ratio_5d`、`volume_ratio_20d`、`turnover_avg_20d`
+
+均线斜率统一使用 `(ma_today - ma_n_days_ago) / ma_n_days_ago * 100`。`ma5/10/20` 默认比较 5 个交易日前的均线，`ma60` 默认比较 20 个交易日前的均线。`macd_hist` 使用 A 股常见口径 `(DIF - DEA) * 2`。KDJ、BOLL、ATR 暂缓到第二批，避免在窗口和口径尚未固定时让 LLM 生成不稳定字段。资金流、主力、大单、盘口当前也不在日级技术筛选白名单里，不能映射成成交额或换手率。
+
+策略草案只允许白名单字段和操作符，例如：
+
+```json
+{
+  "name": "均线多头放量选股",
+  "timeframe": "daily",
+  "adjustment": "qfq",
+  "min_sample_count": 60,
+  "exclude_st": true,
+  "exclude_limit_up": true,
+  "conditions": [
+    { "field": "ma5", "operator": "gte", "value_field": "ma10", "label": "MA5 >= MA10" },
+    { "field": "ma10", "operator": "gte", "value_field": "ma20", "label": "MA10 >= MA20" },
+    { "field": "close", "operator": "gte", "value_field": "ma5", "label": "收盘价站上 MA5" },
+    { "field": "strength_20d_pct", "operator": "gte", "value": 8, "label": "20日强弱 >= 8%" },
+    { "field": "macd_dif", "operator": "gte", "value_field": "macd_dea", "label": "MACD 金叉/多头" },
+    { "field": "upper_shadow_pct", "operator": "lte", "value": 3, "label": "上影线 <= 3%" },
+    { "field": "ma20_slope_5d_pct", "operator": "gte", "value": 2, "label": "MA20 5日斜率 >= 2%" }
+  ],
+  "sort": { "field": "score", "direction": "desc" }
+}
+```
+
+这个范式刻意不支持任意 SQL。以后接入真实 LLM 时，只需要让 LLM 输出同一份 JSON schema；筛选、数据质量、候选解释和风控说明仍由 QuantPilot 后端负责。
 
 ## 因子目录
 

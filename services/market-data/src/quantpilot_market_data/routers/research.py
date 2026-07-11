@@ -23,6 +23,8 @@ from quantpilot_market_data.models import (
     ResearchUniverseSummaryResponse,
     ScreenerMode,
     SectorCapitalFlowResponse,
+    TechnicalScreenerRequest,
+    TechnicalScreenerResponse,
 )
 from quantpilot_market_data.providers.base import ResearchUniverseProvider
 from quantpilot_market_data.providers.eastmoney import EastMoneyError
@@ -30,6 +32,7 @@ from quantpilot_market_data.services.research import (
     add_research_universe_member,
     clean_research_universe_members,
     get_a_share_short_term_candidates,
+    get_a_share_technical_candidates,
     get_research_data_coverage,
     get_research_local_bars,
     get_research_sector_capital_flow,
@@ -194,6 +197,20 @@ def create_research_router(client: ResearchUniverseProvider) -> APIRouter:
                 mode=mode,
                 limit=limit,
             )
+        except DatabaseError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @router.post(
+        "/screeners/a-share/technical",
+        response_model=TechnicalScreenerResponse,
+    )
+    async def get_a_share_technical_candidates_endpoint(
+        request: TechnicalScreenerRequest,
+    ) -> TechnicalScreenerResponse:
+        try:
+            return await get_a_share_technical_candidates(request)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
         except DatabaseError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
 

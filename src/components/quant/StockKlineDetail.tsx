@@ -25,7 +25,7 @@ import {
   formatSignedNumberValue,
   formatSignedPercent,
   signedToneClass,
-} from "./strategy-platform-helpers";
+} from "@/app/strategy-platform/strategy-platform-helpers";
 
 const KLINE_TIMEFRAMES = [
   { id: "realtime", label: "实时" },

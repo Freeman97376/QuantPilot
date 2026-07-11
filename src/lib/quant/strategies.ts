@@ -24,6 +24,13 @@ export type {
   StrategyScreenerCandidate,
   StrategyAnalyticsExecutionMetadata,
   StrategyScreenerResponse,
+  TechnicalScreenerCondition,
+  TechnicalScreenerDraft,
+  TechnicalScreenerSpec,
+  TechnicalScreenerResponse,
+  StrategyIntent,
+  StrategyIntentSupportStatus,
+  StrategyIntentType,
   StrategyDataCoverageItem,
   StrategyLocalKlineBar,
   StrategyDividendEvent,
@@ -86,6 +93,13 @@ import type {
   StrategyScreenerCandidate,
   StrategyAnalyticsExecutionMetadata,
   StrategyScreenerResponse,
+  TechnicalScreenerOperator,
+  TechnicalScreenerSortDirection,
+  TechnicalScreenerCondition,
+  TechnicalScreenerSort,
+  TechnicalScreenerSpec,
+  TechnicalScreenerDraft,
+  TechnicalScreenerResponse,
   StrategyDataCoverageItem,
   StrategyLocalKlineBar,
   StrategyDividendEvent,
@@ -615,6 +629,401 @@ function mapScreenerResponse(value: unknown): StrategyScreenerResponse {
   };
 }
 
+const TECHNICAL_SCREENER_LLM_SYSTEM_PROMPT = `你是 QuantPilot 技术选股策略生成器。把用户中文描述转换为 JSON，不要输出 SQL、代码或投资建议。
+只能使用这些字段：open, close, high, low, previous_close, change_percent, amount, volume, turnover, ma5, ma10, ma20, ma30, ma60, strength_5d_pct, strength_10d_pct, strength_20d_pct, strength_60d_pct, amount_ratio_20d, volume_ratio_20d, close_to_ma5_pct, close_to_ma20_pct, close_to_ma60_pct, limit_up_count_4d, limit_up_count_10d, sample_count, score, is_limit_up, is_st。
+条件格式：{ "field": "...", "operator": "gt|gte|lt|lte|eq|between", "value": number|boolean|null, "value_field": "...", "upper_value": number, "label": "..." }。
+排序格式：{ "field": "score|strength_20d_pct|amount_ratio_20d|amount", "direction": "desc" }。
+输出必须是 TechnicalScreenerSpec JSON，实际筛选由后端执行。`;
+
+const TECHNICAL_SCREENER_ALLOWED_FIELDS = [
+  'open', 'close', 'high', 'low', 'previous_close', 'change_percent',
+  'amount', 'volume', 'turnover',
+  'ma5', 'ma10', 'ma20', 'ma30', 'ma60', 'ma120', 'ma250',
+  'ma5_slope_5d_pct', 'ma10_slope_5d_pct', 'ma20_slope_5d_pct', 'ma60_slope_20d_pct',
+  'ema12', 'ema26',
+  'strength_5d_pct', 'strength_10d_pct', 'strength_20d_pct', 'strength_60d_pct',
+  'rsi6', 'rsi14', 'macd_dif', 'macd_dea', 'macd_hist',
+  'upper_shadow_pct', 'lower_shadow_pct', 'body_pct', 'amplitude', 'close_position_pct',
+  'amount_ratio_5d', 'amount_ratio_20d', 'volume_ratio_5d', 'volume_ratio_20d',
+  'turnover_avg_20d',
+  'close_to_ma5_pct', 'close_to_ma20_pct', 'close_to_ma60_pct', 'close_to_ma120_pct',
+  'limit_up_count_4d', 'limit_up_count_10d', 'sample_count', 'score',
+  'is_limit_up', 'is_st',
+];
+
+const TECHNICAL_SCREENER_EXTENDED_LLM_SYSTEM_PROMPT = `${TECHNICAL_SCREENER_LLM_SYSTEM_PROMPT}
+Additional allowed fields: ${TECHNICAL_SCREENER_ALLOWED_FIELDS.join(', ')}.
+Mappings: MACD golden cross => macd_dif >= macd_dea; RSI not overheated => rsi14 <= 70; volume breakout => amount_ratio_20d >= 1.5 and close >= ma20; long upper shadow => upper_shadow_pct >= 3; close near high => close_position_pct >= 70.
+Do not invent unsupported fields such as kdj, boll, or atr in this v1 screener.`;
+
+function technicalCondition(
+  field: string,
+  operator: TechnicalScreenerCondition['operator'],
+  value: number | boolean | string | null,
+  label: string,
+  valueField?: string,
+  upperValue?: number
+): TechnicalScreenerCondition {
+  return {
+    field,
+    operator,
+    value,
+    valueField: valueField ?? null,
+    upperValue: upperValue ?? null,
+    label,
+  };
+}
+
+function technicalConditionKey(condition: TechnicalScreenerCondition) {
+  return [
+    condition.field,
+    condition.operator,
+    condition.value ?? '',
+    condition.valueField ?? '',
+    condition.upperValue ?? '',
+  ].join('|');
+}
+
+function addTechnicalCondition(
+  conditions: TechnicalScreenerCondition[],
+  condition: TechnicalScreenerCondition
+) {
+  const key = technicalConditionKey(condition);
+  if (!conditions.some((item) => technicalConditionKey(item) === key)) {
+    conditions.push(condition);
+  }
+}
+
+function extractPromptNumber(prompt: string, patterns: RegExp[], fallback: number) {
+  for (const pattern of patterns) {
+    const match = pattern.exec(prompt);
+    if (!match) continue;
+    const parsed = Number(match[1]);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
+}
+
+function extractAmountYuan(prompt: string, fallback: number) {
+  const match = /成交额.{0,8}?(\d+(?:\.\d+)?)(亿|万)?/.exec(prompt);
+  if (!match) return fallback;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value)) return fallback;
+  if (match[2] === '万') return value * 10_000;
+  return value * 100_000_000;
+}
+
+function normalizeTechnicalPrompt(prompt: string) {
+  return prompt.trim().replace(/\s+/g, ' ');
+}
+
+export function buildTechnicalScreenerDraft(params: {
+  prompt: string;
+  universeId?: string;
+  limit?: number;
+}): TechnicalScreenerDraft {
+  const prompt = normalizeTechnicalPrompt(params.prompt);
+  if (!prompt) {
+    throw new Error('请输入技术选股描述');
+  }
+  const conditions: TechnicalScreenerCondition[] = [];
+  const lower = prompt.toLowerCase();
+  const needsMa250 = /ma250|250|年线/i.test(prompt);
+  const needsMa120 = /ma120|120|半年线/i.test(prompt);
+  const minSampleCount = needsMa250 ? 250 : needsMa120 ? 120 : 60;
+  if (minSampleCount > 60) {
+    addTechnicalCondition(
+      conditions,
+      technicalCondition(
+        'sample_count',
+        'gte',
+        minSampleCount,
+        `至少 ${minSampleCount} 根日 K，保证长周期指标可用`
+      )
+    );
+  }
+  const hasMaKeyword = /均线|多头|ma|MA/.test(prompt);
+  const hasPullback = /回踩|贴近|靠近/.test(prompt);
+  const hasMomentum = /强势|涨幅|收益|动量|突破/.test(prompt);
+  const hasVolume = /放量|量能|成交量|成交额/.test(prompt);
+
+  addTechnicalCondition(
+    conditions,
+    technicalCondition('sample_count', 'gte', 60, '至少 60 根日 K，保证 MA60 和强弱指标可用')
+  );
+  addTechnicalCondition(conditions, technicalCondition('is_st', 'eq', false, '排除 ST'));
+
+  if (!/涨停也要|包含涨停|允许涨停/.test(prompt)) {
+    addTechnicalCondition(conditions, technicalCondition('is_limit_up', 'eq', false, '排除当日涨停'));
+  }
+
+  if (hasMaKeyword || !conditions.length) {
+    addTechnicalCondition(conditions, technicalCondition('ma5', 'gte', null, 'MA5 >= MA10', 'ma10'));
+    addTechnicalCondition(conditions, technicalCondition('ma10', 'gte', null, 'MA10 >= MA20', 'ma20'));
+    if (/60|中期|长线|多头排列/.test(prompt)) {
+      addTechnicalCondition(conditions, technicalCondition('ma20', 'gte', null, 'MA20 >= MA60', 'ma60'));
+    }
+  }
+
+  if (/站上|收盘.*上|突破|在.*上方|强势/.test(prompt)) {
+    const maField = /60/.test(prompt) ? 'ma60' : /20/.test(prompt) ? 'ma20' : 'ma5';
+    addTechnicalCondition(
+      conditions,
+      technicalCondition('close', 'gte', null, `收盘价站上 ${maField.toUpperCase()}`, maField)
+    );
+  }
+
+  if (needsMa120) {
+    addTechnicalCondition(conditions, technicalCondition('close', 'gte', null, '收盘价站上 MA120', 'ma120'));
+  }
+
+  if (needsMa250) {
+    addTechnicalCondition(conditions, technicalCondition('close', 'gte', null, '收盘价站上 MA250', 'ma250'));
+  }
+
+  if (/ema|EMA|指数均线/.test(prompt)) {
+    addTechnicalCondition(conditions, technicalCondition('ema12', 'gte', null, 'EMA12 >= EMA26', 'ema26'));
+  }
+
+  if (/macd|MACD|金叉|死叉|红柱|绿柱|翻红/.test(prompt)) {
+    if (/死叉|绿柱/.test(prompt)) {
+      addTechnicalCondition(conditions, technicalCondition('macd_dif', 'lte', null, 'MACD DIF <= DEA', 'macd_dea'));
+    } else {
+      addTechnicalCondition(conditions, technicalCondition('macd_dif', 'gte', null, 'MACD DIF >= DEA', 'macd_dea'));
+    }
+    if (/红柱|翻红|柱/.test(prompt) && !/绿柱/.test(prompt)) {
+      addTechnicalCondition(conditions, technicalCondition('macd_hist', 'gt', 0, 'MACD 柱 > 0'));
+    }
+  }
+
+  if (/rsi|RSI|超买|过热|不高|不过热/.test(prompt)) {
+    const rsiThreshold = extractPromptNumber(prompt, [/rsi.{0,8}?(\d+(?:\.\d+)?)/i, /RSI.{0,8}?(\d+(?:\.\d+)?)/], 70);
+    if (/大于|高于|强/.test(prompt) && !/不高|不过热|超买|过热/.test(prompt)) {
+      addTechnicalCondition(conditions, technicalCondition('rsi14', 'gte', rsiThreshold || 50, `RSI14 >= ${rsiThreshold || 50}`));
+    } else {
+      addTechnicalCondition(conditions, technicalCondition('rsi14', 'lte', rsiThreshold || 70, `RSI14 <= ${rsiThreshold || 70}`));
+    }
+  }
+
+  if (/放量突破|量价突破/.test(prompt)) {
+    const ratio = extractPromptNumber(prompt, [/(?:放量突破|量价突破).{0,8}?(\d+(?:\.\d+)?)倍/], 1.5);
+    addTechnicalCondition(conditions, technicalCondition('amount_ratio_20d', 'gte', ratio, `成交额较 20 日均额放大 >= ${ratio} 倍`));
+    addTechnicalCondition(conditions, technicalCondition('close', 'gte', null, '放量突破收盘站上 MA20', 'ma20'));
+  }
+
+  if (/上影线|上引线|长上影|冲高回落/.test(prompt)) {
+    const threshold = extractPromptNumber(prompt, [/(?:上影线|上引线|长上影).{0,8}?(\d+(?:\.\d+)?)%/], 3);
+    const avoid = /不要|避免|排除|不能|没有|无/.test(prompt);
+    addTechnicalCondition(
+      conditions,
+      technicalCondition(
+        'upper_shadow_pct',
+        avoid ? 'lte' : 'gte',
+        threshold,
+        avoid ? `上影线 <= ${threshold}%` : `上影线 >= ${threshold}%`
+      )
+    );
+    if (/冲高回落/.test(prompt)) {
+      addTechnicalCondition(conditions, technicalCondition('close_position_pct', 'lte', 40, '收盘位置 <= 40%'));
+    }
+  }
+
+  if (/下影线|长下影|探底回升/.test(prompt)) {
+    const threshold = extractPromptNumber(prompt, [/(?:下影线|长下影).{0,8}?(\d+(?:\.\d+)?)%/], 3);
+    addTechnicalCondition(conditions, technicalCondition('lower_shadow_pct', 'gte', threshold, `下影线 >= ${threshold}%`));
+  }
+
+  if (/收盘.*(?:靠近|接近).*高点|收在高位|收盘强/.test(prompt)) {
+    addTechnicalCondition(conditions, technicalCondition('close_position_pct', 'gte', 70, '收盘位置 >= 70%'));
+  }
+
+  if (/收盘.*(?:靠近|接近).*低点|收在低位/.test(prompt)) {
+    addTechnicalCondition(conditions, technicalCondition('close_position_pct', 'lte', 30, '收盘位置 <= 30%'));
+  }
+
+  if (/十字星|实体小|小实体/.test(prompt)) {
+    addTechnicalCondition(conditions, technicalCondition('body_pct', 'lte', 1.5, '实体 <= 1.5%'));
+  }
+
+  if (hasPullback) {
+    const band = extractPromptNumber(prompt, [/(\d+(?:\.\d+)?)%?.{0,4}(?:以内|附近|区间)/], 3);
+    addTechnicalCondition(
+      conditions,
+      technicalCondition('close_to_ma20_pct', 'between', -Math.abs(band), `收盘价距 MA20 在 ${band}% 内`, undefined, Math.abs(band))
+    );
+  }
+
+  if (hasMomentum) {
+    const threshold = extractPromptNumber(
+      prompt,
+      [/(?:20日|20天|二十日).{0,8}?(\d+(?:\.\d+)?)%/, /涨幅.{0,8}?(\d+(?:\.\d+)?)%/],
+      /强势|突破/.test(prompt) ? 8 : 5
+    );
+    addTechnicalCondition(
+      conditions,
+      technicalCondition('strength_20d_pct', 'gte', threshold, `20日强弱 >= ${threshold}%`)
+    );
+  }
+
+  if (hasVolume) {
+    const ratio = extractPromptNumber(
+      prompt,
+      [/(?:放量|量能).{0,8}?(\d+(?:\.\d+)?)倍/, /(\d+(?:\.\d+)?)倍.{0,8}(?:放量|量能)/],
+      1.2
+    );
+    addTechnicalCondition(
+      conditions,
+      technicalCondition('amount_ratio_20d', 'gte', ratio, `成交额较 20 日均额放大 >= ${ratio} 倍`)
+    );
+  }
+
+  if (/成交额/.test(prompt) || /流动性|活跃/.test(prompt)) {
+    const amount = extractAmountYuan(prompt, 100_000_000);
+    addTechnicalCondition(
+      conditions,
+      technicalCondition('amount', 'gte', amount, `成交额 >= ${(amount / 100_000_000).toFixed(1)} 亿`)
+    );
+  }
+
+  if (/换手/.test(prompt)) {
+    const turnover = extractPromptNumber(prompt, [/换手.{0,8}?(\d+(?:\.\d+)?)%/], 2);
+    addTechnicalCondition(conditions, technicalCondition('turnover', 'gte', turnover, `换手率 >= ${turnover}%`));
+  }
+
+  if (/涨停/.test(prompt)) {
+    addTechnicalCondition(conditions, technicalCondition('limit_up_count_10d', 'gte', 1, '近 10 日出现过涨停'));
+  }
+
+  if (/5日|5天|五日|短期/.test(prompt) && /放量|量能|成交额/.test(prompt)) {
+    const ratio = extractPromptNumber(prompt, [/(?:放量|量能).{0,8}?(\d+(?:\.\d+)?)倍/], 1.2);
+    addTechnicalCondition(conditions, technicalCondition('amount_ratio_5d', 'gte', ratio, `成交额较 5 日均额放大 >= ${ratio} 倍`));
+  }
+
+  const sortField = /放量|量能/.test(prompt)
+    ? 'amount_ratio_20d'
+    : /成交额|流动性/.test(prompt)
+      ? 'amount'
+      : /强势|涨幅|动量/.test(prompt)
+        ? 'strength_20d_pct'
+        : 'score';
+  const warnings = [
+    '这是受控策略草案；正式接入 LLM 时仍必须输出同一 JSON schema。',
+    '筛选结果只用于研究和复盘，不构成买卖建议。',
+  ];
+  if (/kdj|boll|布林|atr/i.test(lower)) {
+    warnings.unshift('KDJ/BOLL/ATR 暂未纳入第一批技术选股白名单，本次不会生成这些字段条件。');
+  }
+  if (/dde|大单|主力|资金流/i.test(lower)) {
+    warnings.unshift('当前本地日 K 筛选不包含真实 DDE/主力资金字段，相关描述不会被当作真实资金流条件。');
+  }
+  return {
+    prompt,
+    generatedBy: 'rule-template',
+    warnings,
+    llmSystemPrompt: TECHNICAL_SCREENER_EXTENDED_LLM_SYSTEM_PROMPT,
+    spec: {
+      name: prompt.length > 28 ? `${prompt.slice(0, 28)}...` : prompt,
+      description: `由用户描述生成的 K 线技术指标选股策略：${prompt}`,
+      timeframe: 'daily',
+      adjustment: 'qfq',
+      minSampleCount,
+      excludeSt: true,
+      excludeLimitUp: !/涨停也要|包含涨停|允许涨停/.test(prompt),
+      conditions,
+      sort: {
+        field: sortField,
+        direction: 'desc',
+      },
+    },
+  };
+}
+
+function mapTechnicalCondition(value: unknown): TechnicalScreenerCondition {
+  const record = asRecord(value);
+  const boolValue = asBoolean(record.value);
+  return {
+    field: asString(record.field),
+    operator:
+      record.operator === 'gt' ||
+      record.operator === 'gte' ||
+      record.operator === 'lt' ||
+      record.operator === 'lte' ||
+      record.operator === 'eq' ||
+      record.operator === 'between'
+        ? record.operator
+        : 'gte',
+    value: boolValue ?? asNumber(record.value) ?? (typeof record.value === 'string' ? record.value : null),
+    valueField: typeof record.value_field === 'string' ? record.value_field : null,
+    upperValue: asNumber(record.upper_value),
+    label: typeof record.label === 'string' ? record.label : null,
+  };
+}
+
+function mapTechnicalSpec(value: unknown): TechnicalScreenerSpec {
+  const record = asRecord(value);
+  const sort = asRecord(record.sort);
+  return {
+    name: asString(record.name, '技术指标选股策略'),
+    description: typeof record.description === 'string' ? record.description : null,
+    timeframe: asString(record.timeframe, 'daily'),
+    adjustment: asString(record.adjustment, 'qfq'),
+    minSampleCount: asNumber(record.min_sample_count) ?? 60,
+    excludeSt: asBoolean(record.exclude_st) ?? true,
+    excludeLimitUp: asBoolean(record.exclude_limit_up) ?? true,
+    conditions: Array.isArray(record.conditions) ? record.conditions.map(mapTechnicalCondition) : [],
+    sort: {
+      field: asString(sort.field, 'score'),
+      direction: sort.direction === 'asc' ? 'asc' : 'desc',
+    },
+  };
+}
+
+function toMarketTechnicalSpec(spec: TechnicalScreenerSpec) {
+  return {
+    name: spec.name,
+    description: spec.description,
+    timeframe: spec.timeframe,
+    adjustment: spec.adjustment,
+    min_sample_count: spec.minSampleCount,
+    exclude_st: spec.excludeSt,
+    exclude_limit_up: spec.excludeLimitUp,
+    conditions: spec.conditions.map((condition) => ({
+      field: condition.field,
+      operator: condition.operator,
+      value: condition.value ?? null,
+      value_field: condition.valueField ?? null,
+      upper_value: condition.upperValue ?? null,
+      label: condition.label ?? null,
+    })),
+    sort: {
+      field: spec.sort.field,
+      direction: spec.sort.direction,
+    },
+  };
+}
+
+function mapTechnicalScreenerResponse(value: unknown): TechnicalScreenerResponse {
+  const record = asRecord(value);
+  const candidates = Array.isArray(record.candidates)
+    ? record.candidates.map(mapScreenerCandidate)
+    : [];
+  const dataBasis = asString(record.data_basis, 'timescaledb.stock_bars');
+  return {
+    universeId: asString(record.universe_id, SAMPLE_UNIVERSE_ID),
+    tradeDate: typeof record.trade_date === 'string' ? record.trade_date : null,
+    scannedSymbols: asNumber(record.scanned_symbols) ?? 0,
+    totalCandidates: asNumber(record.total_candidates) ?? candidates.length,
+    limit: asNumber(record.limit) ?? candidates.length,
+    spec: mapTechnicalSpec(record.spec),
+    candidates,
+    dataBasis,
+    analytics: mapAnalyticsExecutionMetadata(record.analytics, dataBasis),
+    source: asString(record.source, 'quantpilot-market-api'),
+    notes: asStringArray(record.notes),
+    fetchedAt: asString(record.fetched_at, new Date().toISOString()),
+  };
+}
+
 function mapCoverageItem(value: unknown): StrategyDataCoverageItem {
   const record = asRecord(value);
   return {
@@ -1071,6 +1480,46 @@ export async function runStrategyScreener(params: {
     { timeoutMs: params.timeoutMs }
   );
   return mapScreenerResponse(payload);
+}
+
+export async function runTechnicalScreener(params: {
+  universeId?: string;
+  tradeDate?: string;
+  limit?: number;
+  spec: TechnicalScreenerSpec;
+  timeoutMs?: number;
+}): Promise<TechnicalScreenerResponse> {
+  assertMarketApiEnabled();
+  const controller = params.timeoutMs ? new AbortController() : null;
+  const timeout = controller && params.timeoutMs
+    ? setTimeout(() => controller.abort(), params.timeoutMs)
+    : null;
+  try {
+    const response = await fetch(`${MARKET_API_BASE_URL}/api/v1/research/screeners/a-share/technical`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        universe_id: params.universeId || SAMPLE_UNIVERSE_ID,
+        trade_date: params.tradeDate?.trim() || null,
+        limit: Math.max(1, Math.min(params.limit ?? 20, 100)),
+        spec: toMarketTechnicalSpec(params.spec),
+      }),
+      cache: 'no-store',
+      signal: controller?.signal,
+    });
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      throw new Error(`market API ${response.status}: ${body.slice(0, 220)}`);
+    }
+    return mapTechnicalScreenerResponse(await response.json());
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`market API timeout after ${params.timeoutMs}ms: technical screener`);
+    }
+    throw error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 export async function getStrategyIngestionJobs(params: {

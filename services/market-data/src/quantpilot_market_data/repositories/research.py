@@ -5,7 +5,10 @@ from quantpilot_market_data.repositories.coverage import (
     get_market_data_coverage_page,
     list_market_data_coverage,
 )
-from quantpilot_market_data.repositories.screener import screen_a_share_short_term_candidates
+from quantpilot_market_data.repositories.screener import (
+    screen_a_share_short_term_candidates,
+    screen_a_share_technical_strategy,
+)
 from quantpilot_market_data.repositories.sector_flow import list_sector_capital_flow
 from quantpilot_market_data.repositories.universes import (
     add_securities_to_universe,
@@ -28,4 +31,5 @@ __all__ = [
     "list_research_universes",
     "list_sector_capital_flow",
     "screen_a_share_short_term_candidates",
+    "screen_a_share_technical_strategy",
 ]

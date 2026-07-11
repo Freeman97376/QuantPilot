@@ -16,7 +16,7 @@ export default function Header() {
   const isMainPage = pathname === '/';
   const isSkillsPage = pathname === '/skills';
   const isCapabilitiesPage = pathname === '/data-platform' || pathname === '/capabilities';
-  const isStrategiesPage = pathname === '/strategy-platform' || pathname === '/strategies';
+  const isStrategiesPage = pathname === '/strategy-platform' || pathname === '/strategies' || pathname === '/smart-strategy';
   const isEvalsPage =
     pathname === '/eval-platform' ||
     pathname.startsWith('/eval-platform/') ||

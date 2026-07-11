@@ -21,6 +21,8 @@ from quantpilot_market_data.models import (
     ScreenerMode,
     SectorCapitalFlowResponse,
     SymbolResolveResult,
+    TechnicalScreenerRequest,
+    TechnicalScreenerResponse,
 )
 from quantpilot_market_data.providers.base import ResearchUniverseProvider
 from quantpilot_market_data.repositories.research import (
@@ -34,6 +36,7 @@ from quantpilot_market_data.repositories.research import (
     list_research_universes,
     list_sector_capital_flow,
     screen_a_share_short_term_candidates,
+    screen_a_share_technical_strategy,
 )
 
 
@@ -223,6 +226,12 @@ async def get_a_share_short_term_candidates(
         mode=mode,
         limit=limit,
     )
+
+
+async def get_a_share_technical_candidates(
+    request: TechnicalScreenerRequest,
+) -> TechnicalScreenerResponse:
+    return await screen_a_share_technical_strategy(request)
 
 
 async def add_research_universe_member(

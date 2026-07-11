@@ -770,6 +770,41 @@ class SectorCapitalFlowResponse(BaseModel):
 
 
 ScreenerMode = Literal["short_term", "limit_up_relay", "trend_liquidity"]
+TechnicalScreenerOperator = Literal["gt", "gte", "lt", "lte", "eq", "between"]
+TechnicalScreenerSortDirection = Literal["asc", "desc"]
+
+
+class TechnicalScreenerCondition(BaseModel):
+    field: str = Field(min_length=1)
+    operator: TechnicalScreenerOperator = "gte"
+    value: Decimal | bool | str | None = None
+    value_field: str | None = None
+    upper_value: Decimal | None = None
+    label: str | None = None
+
+
+class TechnicalScreenerSort(BaseModel):
+    field: str = "score"
+    direction: TechnicalScreenerSortDirection = "desc"
+
+
+class TechnicalScreenerSpec(BaseModel):
+    name: str = Field(default="技术指标选股策略", min_length=1, max_length=80)
+    description: str | None = Field(default=None, max_length=500)
+    timeframe: KlinePeriod | str = "daily"
+    adjustment: Adjustment | str = "qfq"
+    min_sample_count: int = Field(default=60, ge=20, le=260)
+    exclude_st: bool = True
+    exclude_limit_up: bool = True
+    conditions: list[TechnicalScreenerCondition] = Field(default_factory=list, max_length=24)
+    sort: TechnicalScreenerSort = Field(default_factory=TechnicalScreenerSort)
+
+
+class TechnicalScreenerRequest(BaseModel):
+    universe_id: str = Field(default="a-share-sample-research-pool", min_length=1)
+    trade_date: date | None = None
+    limit: int = Field(default=20, ge=1, le=100)
+    spec: TechnicalScreenerSpec
 
 
 class AShareScreenerCandidate(BaseModel):
@@ -844,6 +879,34 @@ class AShareScreenerResponse(BaseModel):
                 self.data_quality,
                 missing_fields=["candidates"],
                 warnings=["本地筛选接口未返回候选股票，可能是条件过严或最新交易日覆盖不足。"],
+                status="warning",
+            )
+        return self
+
+
+class TechnicalScreenerResponse(BaseModel):
+    universe_id: str
+    trade_date: date | None = None
+    scanned_symbols: int = 0
+    total_candidates: int = 0
+    limit: int = 20
+    spec: TechnicalScreenerSpec
+    candidates: list[AShareScreenerCandidate] = Field(default_factory=list)
+    data_basis: str = "timescaledb.stock_bars"
+    analytics: AnalyticsExecutionMetadata = Field(default_factory=AnalyticsExecutionMetadata)
+    source: str = "quantpilot-market-api"
+    notes: list[str] = Field(default_factory=list)
+    fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    data_quality: DataQuality = Field(default_factory=DataQuality)
+
+    @model_validator(mode="after")
+    def fill_contract_fields(self) -> Self:
+        self.total_candidates = len(self.candidates)
+        if not self.candidates:
+            self.data_quality = _merge_data_quality(
+                self.data_quality,
+                missing_fields=["candidates"],
+                warnings=["技术指标筛选未返回候选股票，可能是条件过严或本地 K 线覆盖不足。"],
                 status="warning",
             )
         return self
@@ -1187,6 +1250,31 @@ class TechnicalIndicatorPoint(BaseModel):
     ma5: Decimal | None = None
     ma10: Decimal | None = None
     ma20: Decimal | None = None
+    ma30: Decimal | None = None
+    ma60: Decimal | None = None
+    ma120: Decimal | None = None
+    ma250: Decimal | None = None
+    ma5_slope_5d_pct: Decimal | None = None
+    ma10_slope_5d_pct: Decimal | None = None
+    ma20_slope_5d_pct: Decimal | None = None
+    ma60_slope_20d_pct: Decimal | None = None
+    ema12: Decimal | None = None
+    ema26: Decimal | None = None
+    rsi6: Decimal | None = None
+    rsi14: Decimal | None = None
+    macd_dif: Decimal | None = None
+    macd_dea: Decimal | None = None
+    macd_hist: Decimal | None = None
+    upper_shadow_pct: Decimal | None = None
+    lower_shadow_pct: Decimal | None = None
+    body_pct: Decimal | None = None
+    amplitude: Decimal | None = None
+    close_position_pct: Decimal | None = None
+    volume_ratio_5d: Decimal | None = None
+    volume_ratio_20d: Decimal | None = None
+    amount_ratio_5d: Decimal | None = None
+    amount_ratio_20d: Decimal | None = None
+    turnover_avg_20d: Decimal | None = None
     return_pct: Decimal | None = Field(default=None, description="相对上一根 K 线收益率，单位：%")
     drawdown_pct: Decimal | None = Field(
         default=None,
@@ -1203,6 +1291,31 @@ class TechnicalIndicatorSummary(BaseModel):
     ma5: Decimal | None = None
     ma10: Decimal | None = None
     ma20: Decimal | None = None
+    ma30: Decimal | None = None
+    ma60: Decimal | None = None
+    ma120: Decimal | None = None
+    ma250: Decimal | None = None
+    ma5_slope_5d_pct: Decimal | None = None
+    ma10_slope_5d_pct: Decimal | None = None
+    ma20_slope_5d_pct: Decimal | None = None
+    ma60_slope_20d_pct: Decimal | None = None
+    ema12: Decimal | None = None
+    ema26: Decimal | None = None
+    rsi6: Decimal | None = None
+    rsi14: Decimal | None = None
+    macd_dif: Decimal | None = None
+    macd_dea: Decimal | None = None
+    macd_hist: Decimal | None = None
+    upper_shadow_pct: Decimal | None = None
+    lower_shadow_pct: Decimal | None = None
+    body_pct: Decimal | None = None
+    amplitude: Decimal | None = None
+    close_position_pct: Decimal | None = None
+    volume_ratio_5d: Decimal | None = None
+    volume_ratio_20d: Decimal | None = None
+    amount_ratio_5d: Decimal | None = None
+    amount_ratio_20d: Decimal | None = None
+    turnover_avg_20d: Decimal | None = None
 
 
 class TechnicalIndicatorsResponse(BaseModel):

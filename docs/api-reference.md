@@ -105,10 +105,13 @@
 | `/api/v1/research/universes/{universe_id}/hygiene` | `POST` | 可逆清洗股票池成员；默认 `dry_run=true`，正式执行后把无最新交易日数据的成员标记为 inactive |
 | `/api/v1/research/data-coverage` | `GET` | K 线覆盖摘要和分页明细，支持 `universe_id`、`page`、`page_size`、`include_inactive` |
 | `/api/v1/research/bars/{symbol}` | `GET` | 本地 TimescaleDB K 线，支持日/周/月 |
-| `/api/v1/research/screener/a-share-short-term` | `GET` | 本地 A 股短线候选筛选 |
+| `/api/v1/research/screeners/a-share/short-term-candidates` | `GET` | 本地 A 股短线候选筛选 |
+| `/api/v1/research/screeners/a-share/technical` | `POST` | 根据受控技术指标策略 JSON 执行 A 股股票池筛选；适合 LLM 将自然语言转为白名单条件后调用 |
 | `/api/v1/research/sector-capital-flow` | `GET` | 板块资金和市场资金概览 |
 
 股票池和覆盖明细页面应优先走服务端分页，避免一次加载 5000+ 标的。K 线详情只在点击行后按 symbol 请求。覆盖明细首屏使用 `page_size=100`，摘要来自 `quant.market_data_sync_state`，不要在线聚合全量 `stock_bars`。默认股票池、覆盖率、筛选器和 ClickHouse 同步只处理 active 成员；诊断全量历史池时显式传 `include_inactive=true`。
+
+`/api/quant/smart-strategy` 是 Next.js 端的受控编译入口，支持 `parse-intent`、`compile`、`draft`、`run` 四个 action：`parse-intent` 只返回系统理解到的 `StrategyIntent[]`，`compile` 将意图数组编译为 `TechnicalScreenerSpec`，`draft` 兼容旧流程并内部执行两阶段链路，`run` 再调用 market-data 技术筛选。资金流、主力、大单、盘口等未接入真实字段时必须返回未支持，不应映射为成交额。
 
 ### 外部行情和补数
 
@@ -138,7 +141,7 @@
 
 | 路由 | 方法 | 责任 |
 | --- | --- | --- |
-| `/api/v1/indicators/technical/{symbol}` | `GET` | MA5/10/20/30/60、收益、回撤、波动等 |
+| `/api/v1/indicators/technical/{symbol}` | `GET` | MA5/10/20/30/60/120/250、MA5/10/20 的 5 日斜率、MA60 的 20 日斜率、EMA12/26、RSI6/14、MACD、K 线形态、量比、收益、回撤、波动等 |
 | `/api/v1/backtests/ma-crossover/{symbol}` | `GET` | 均线交叉回测 |
 | `/api/v1/backtests/strategies/{strategy_id}/{symbol}` | `GET` | 策略模板回测 |
 | `/api/v1/fundamentals/financials/{symbol}` | `GET` | 财务报表摘要 |

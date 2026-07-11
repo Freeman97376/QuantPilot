@@ -252,6 +252,95 @@ export interface StrategyScreenerResponse {
   fetchedAt: string;
 }
 
+export type TechnicalScreenerOperator = 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'between';
+export type TechnicalScreenerSortDirection = 'asc' | 'desc';
+
+export interface TechnicalScreenerCondition {
+  field: string;
+  operator: TechnicalScreenerOperator;
+  value?: number | boolean | string | null;
+  valueField?: string | null;
+  upperValue?: number | null;
+  label?: string | null;
+}
+
+export interface TechnicalScreenerSort {
+  field: string;
+  direction: TechnicalScreenerSortDirection;
+}
+
+export interface TechnicalScreenerSpec {
+  name: string;
+  description?: string | null;
+  timeframe: string;
+  adjustment: string;
+  minSampleCount: number;
+  excludeSt: boolean;
+  excludeLimitUp: boolean;
+  conditions: TechnicalScreenerCondition[];
+  sort: TechnicalScreenerSort;
+}
+
+export type StrategyIntentType =
+  | 'trend_alignment'
+  | 'ma_slope'
+  | 'volume_expansion'
+  | 'candlestick_shape'
+  | 'momentum_strength'
+  | 'risk_filter'
+  | 'price_position';
+
+export type StrategyIntentSupportStatus =
+  | 'supported'
+  | 'inferred'
+  | 'unsupported'
+  | 'needs_clarification';
+
+export interface StrategyIntent {
+  id: string;
+  intentType: StrategyIntentType;
+  confidence: number;
+  rawText: string;
+  mappedFields: string[];
+  conditions: TechnicalScreenerCondition[];
+  unsupportedTerms: string[];
+  clarificationNeeded: boolean;
+  supportStatus: StrategyIntentSupportStatus;
+  explanation?: string | null;
+  defaulted?: boolean;
+  source?: 'llm' | 'rule' | 'user';
+}
+
+export interface TechnicalScreenerDraft {
+  prompt: string;
+  spec: TechnicalScreenerSpec;
+  generatedBy: 'deepseek' | 'rule-template';
+  model?: string | null;
+  usage?: Record<string, unknown> | null;
+  fetchedAt?: string | null;
+  warnings: string[];
+  llmSystemPrompt: string;
+  intents?: StrategyIntent[];
+  intentExplanations?: string[];
+  unsupportedTerms?: string[];
+  clarificationNeeded?: boolean;
+}
+
+export interface TechnicalScreenerResponse {
+  universeId: string;
+  tradeDate?: string | null;
+  scannedSymbols: number;
+  totalCandidates: number;
+  limit: number;
+  spec: TechnicalScreenerSpec;
+  candidates: StrategyScreenerCandidate[];
+  dataBasis: string;
+  analytics: StrategyAnalyticsExecutionMetadata;
+  source: string;
+  notes: string[];
+  fetchedAt: string;
+}
+
 export interface StrategyDataCoverageItem {
   symbol: string;
   name?: string | null;

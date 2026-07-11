@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { createErrorResponse, createSuccessResponse, handleApiError } from '@/lib/utils/api-response';
 import {
   addStrategyUniverseMember,
+  buildTechnicalScreenerDraft,
   buildStrategyPrompt,
   controlStrategyIngestionJob,
   enqueueStrategyParameterScan,
@@ -15,6 +16,7 @@ import {
   getStrategyUniverseMembersPage,
   ingestStrategyUniverseHistoryBatch,
   runStrategyScreener,
+  runTechnicalScreener,
   runStrategyDataQualityScan,
   runStrategyParameterScan,
   startStrategyUniverseHistoryAutoFill,
@@ -149,6 +151,27 @@ export async function POST(request: NextRequest) {
             ? mode
             : undefined,
           limit: typeof body.limit === 'number' ? body.limit : undefined,
+        })
+      );
+    }
+    if (body.action === 'draft-technical-screener') {
+      return createSuccessResponse(
+        buildTechnicalScreenerDraft({
+          prompt: String(body.prompt ?? ''),
+          universeId: typeof body.universeId === 'string' ? body.universeId : undefined,
+          limit: typeof body.limit === 'number' ? body.limit : undefined,
+        }),
+        201
+      );
+    }
+    if (body.action === 'run-technical-screener') {
+      return createSuccessResponse(
+        await runTechnicalScreener({
+          universeId: typeof body.universeId === 'string' ? body.universeId : undefined,
+          tradeDate: typeof body.tradeDate === 'string' ? body.tradeDate : undefined,
+          limit: typeof body.limit === 'number' ? body.limit : undefined,
+          spec: body.spec,
+          timeoutMs: 15_000,
         })
       );
     }
