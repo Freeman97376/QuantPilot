@@ -3,6 +3,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import type { IncomingMessage, Server as HTTPServer } from 'http';
 import type { Socket } from 'net';
 import { ensureHeartbeat, websocketManager } from '@/lib/server/websocket-manager';
+import { APP_BASE_PATH } from '@/lib/config/public-paths';
 
 type NextApiResponseWithSocket = NextApiResponse & {
   socket: Socket & {
@@ -55,8 +56,10 @@ export default function handler(req: NextApiRequest, res: NextApiResponseWithSoc
       try {
         const upgradeUrl = new URL(request.url ?? '', 'http://localhost');
 
-        // Only handle our WS endpoint: /api/ws/<projectId>
-        if (!upgradeUrl.pathname.startsWith('/api/ws/')) {
+        // Raw upgrade URLs retain Next.js basePath. Accept the root form too so
+        // local development and already-open clients keep working.
+        const websocketPrefixes = [`${APP_BASE_PATH}/api/ws/`, '/api/ws/'];
+        if (!websocketPrefixes.some((prefix) => upgradeUrl.pathname.startsWith(prefix))) {
           return; // Let Next.js handle other upgrades (HMR, etc.)
         }
 

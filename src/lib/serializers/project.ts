@@ -1,6 +1,7 @@
 import type { Project as ProjectEntity } from '@/types/backend';
 import type { Project } from '@/types';
 import { getQuantCapability } from '@/lib/quant/capabilities';
+import { getPublicPreviewUrl } from '@/lib/config/preview-paths';
 
 function readQuantCapabilityId(settings?: string | null) {
   if (!settings) return null;
@@ -18,7 +19,7 @@ export function serializeProject(project: ProjectEntity): Project {
     name: project.name,
     description: project.description ?? null,
     status: project.status,
-    previewUrl: project.previewUrl ?? null,
+    previewUrl: getPublicPreviewUrl(project.previewPort, project.previewUrl ?? null),
     previewPort: project.previewPort ?? null,
     createdAt: project.createdAt.toISOString(),
     updatedAt: project.updatedAt.toISOString(),

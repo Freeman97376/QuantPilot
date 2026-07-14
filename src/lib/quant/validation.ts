@@ -2060,7 +2060,10 @@ async function checkMarketProxy(
     };
   }
 
-  const probeUrl = new URL('/api/market/quotes/realtime/600519', preview.url).toString();
+  const probeUrl = new URL(
+    'api/market/quotes/realtime/600519',
+    `${preview.url.replace(/\/+$/, '')}/`
+  ).toString();
   const response = await fetchWithTimeout(probeUrl, { method: 'GET' }, 8_000);
   const responseText = await response.text().catch(() => '');
   if (!response.ok) {

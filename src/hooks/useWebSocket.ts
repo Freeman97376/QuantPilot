@@ -4,6 +4,7 @@
  */
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { WEBSOCKET_CONFIG } from '@/lib/config/constants';
+import { withBasePath } from '@/lib/config/public-paths';
 import type { ChatMessage, RealtimeEvent, RealtimeStatus } from '@/types';
 
 interface WebSocketOptions {
@@ -98,7 +99,7 @@ export function useWebSocket({
 
     const resolveWebSocketUrl = () => {
       const rawBase = process.env.NEXT_PUBLIC_WS_BASE?.trim() ?? '';
-      const endpoint = `/api/ws/${projectId}`;
+      const endpoint = withBasePath(`/api/ws/${projectId}`);
       if (rawBase.length > 0) {
         const normalizedBase = rawBase.replace(/\/+$/, '');
         return `${normalizedBase}${endpoint}`;
@@ -112,7 +113,7 @@ export function useWebSocket({
 
     const resolveHttpWarmupUrl = () => {
       const rawBase = process.env.NEXT_PUBLIC_WS_BASE?.trim() ?? '';
-      const endpoint = `/api/ws/${projectId}`;
+      const endpoint = withBasePath(`/api/ws/${projectId}`);
       if (rawBase.length > 0) {
         // Convert ws/wss to http/https for the warm-up fetch
         const normalizedBase = rawBase

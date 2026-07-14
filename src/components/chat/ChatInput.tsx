@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { Pause, SendHorizontal, MessageSquare, Image as ImageIcon, Wrench } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { withApiBase } from '@/lib/config/public-paths';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? '';
 
@@ -245,7 +246,7 @@ export default function ChatInput({
           filename: result.filename,
           path: result.absolute_path,
           url: imageUrl,
-          assetUrl: `/api/assets/${projectId}/${result.filename}`,
+          assetUrl: withApiBase(`/api/assets/${projectId}/${result.filename}`),
           publicUrl: typeof result.public_url === 'string' ? result.public_url : undefined
         };
 

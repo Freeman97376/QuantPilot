@@ -1,6 +1,25 @@
 const isStandaloneBuild = process.env.QUANTPILOT_STANDALONE_BUILD === '1';
 const skipRouteOutputTracing = process.env.QUANTPILOT_SKIP_ROUTE_TRACING !== '0' && !isStandaloneBuild;
 const projectRoot = __dirname;
+
+function normalizeBasePath(value) {
+  const raw = (value ?? '').trim();
+  if (!raw || raw === '/') {
+    return '';
+  }
+  if (/^[a-z][a-z\d+.-]*:\/\//i.test(raw) || raw.includes('?') || raw.includes('#')) {
+    throw new Error('NEXT_PUBLIC_BASE_PATH must be a URL path such as /smartstock, not a full URL.');
+  }
+
+  const normalized = `/${raw.replace(/^\/+|\/+$/g, '')}`;
+  if (normalized.includes('//')) {
+    throw new Error('NEXT_PUBLIC_BASE_PATH must not contain repeated slashes.');
+  }
+  return normalized;
+}
+
+const basePath = normalizeBasePath(process.env.NEXT_PUBLIC_BASE_PATH);
+const publicApiBase = process.env.NEXT_PUBLIC_API_BASE?.trim() || basePath;
 const tracingExcludes = [
   './.git/**',
   './.next/**',
@@ -32,6 +51,7 @@ const tracePluginIgnores = [
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  basePath,
   productionBrowserSourceMaps: false,
   devIndicators: false,
   allowedDevOrigins: ['127.0.0.1'],
@@ -81,6 +101,8 @@ const nextConfig = {
   async redirects() { return [{ source: '/observability', destination: '/workspaces?view=trace', permanent: true }]; },
   env: {
     NEXT_PUBLIC_PROJECT_ROOT: process.env.NEXT_PUBLIC_PROJECT_ROOT || '',
+    NEXT_PUBLIC_BASE_PATH: basePath,
+    NEXT_PUBLIC_API_BASE: publicApiBase,
   },
 };
 

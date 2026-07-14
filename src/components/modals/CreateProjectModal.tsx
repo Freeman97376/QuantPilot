@@ -11,6 +11,7 @@ import {
   QUANT_CAPABILITIES,
   type QuantCapabilityId,
 } from '@/lib/quant/capabilities';
+import { withBasePath } from '@/lib/config/public-paths';
 
 import type { CreateProjectCLIOption, GlobalSettings } from '@/types';
 
@@ -243,7 +244,7 @@ export default function CreateProjectModal({ open, onClose, onCreated, onOpenGlo
 
     const resolveWebSocketUrl = () => {
       const base = process.env.NEXT_PUBLIC_WS_BASE?.trim() ?? '';
-      const endpoint = `/api/ws/${projectId}`;
+      const endpoint = withBasePath(`/api/ws/${projectId}`);
       if (base.length > 0) {
         return `${base.replace(/\/+$/, '')}${endpoint}`;
       }

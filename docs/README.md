@@ -40,6 +40,7 @@
 | 路线图 | [持续完善路线图](ROADMAP.md) | 后续优先级、验收标准和暂不建议事项 |
 | 后端能力 | [后端能力架构与持续优化边界](backend-capability-architecture.md) | Python 后端、设计模式、模块落点、ClickHouse 和迁移路线 |
 | API | [API 总览](api-reference.md) | Next.js API、market-data API、调用方和排查路径 |
+| 服务器部署 | [子目录部署手册](server-subpath-deployment.md) | `/smartstock`、systemd、Docker 基础设施和 Nginx |
 | 数据字典 | [数据字典](data-dictionary.md) | Prisma 表、quant schema、字段来源、因子和数据质量口径 |
 | 基础设施 | [基础设施配置](infrastructure.md) | PostgreSQL、TimescaleDB、Redis、Loki/Grafana/Alloy、SQL 初始化和降级模式 |
 | 行情数据 | [行情数据源采集知识库](market-data-source-knowledge.md) | 东方财富、Baostock、AKShare、字段口径和补数规则 |

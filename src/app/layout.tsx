@@ -3,6 +3,7 @@ import GlobalSettingsProvider from '@/contexts/GlobalSettingsContext'
 import { ThemeProvider } from '@/contexts/ThemeContext'
 import { AuthProvider } from '@/contexts/AuthContext'
 import Header from '@/components/layout/Header'
+import { withBasePath } from '@/lib/config/public-paths'
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -15,7 +16,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
         {/* 加载稳定生成的 Tailwind CSS 兜底样式，避免开发时样式退化。 */}
         {/* eslint-disable-next-line @next/next/no-css-tags */}
-        <link rel="stylesheet" href="/generated/quantpilot-tailwind.css" />
+        <link rel="stylesheet" href={withBasePath('/generated/quantpilot-tailwind.css')} />
       </head>
       <body className="min-h-screen bg-background text-foreground">
         <ThemeProvider>

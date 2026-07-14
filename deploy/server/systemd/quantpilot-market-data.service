@@ -1,0 +1,22 @@
+[Unit]
+Description=QuantPilot market-data API
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/quantpilot/services/market-data
+EnvironmentFile=/opt/quantpilot/.env.production
+Environment=HOME=/home/ubuntu
+Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin
+ExecStart=/usr/bin/env uv run --frozen quantpilot-market-api
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGINT
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

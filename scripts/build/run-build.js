@@ -108,14 +108,15 @@ function parseBuildArgs(argv) {
 async function runNextBuild(args, { standalone } = {}) {
   const hasBundlerFlag = args.some((arg) => arg === '--webpack' || arg === '--turbo' || arg === '--turbopack');
   const buildArgs = ['build', ...(hasBundlerFlag ? args : ['--webpack', ...args])];
+  const nextCli = require.resolve('next/dist/bin/next', { paths: [rootDir] });
   await new Promise((resolve, reject) => {
     const child = spawn(
-      path.join(rootDir, 'node_modules', '.bin', isWindows ? 'next.cmd' : 'next'),
-      buildArgs,
+      process.execPath,
+      [nextCli, ...buildArgs],
       {
         cwd: rootDir,
         stdio: 'inherit',
-        shell: isWindows,
+        shell: false,
         env: {
           ...process.env,
           QUANTPILOT_STANDALONE_BUILD: standalone ? '1' : '0',

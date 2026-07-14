@@ -14,6 +14,7 @@ import { ChatErrorBoundary } from '@/components/ErrorBoundary';
 import { useUserRequests } from '@/hooks/useUserRequests';
 import { useGlobalSettings } from '@/contexts/GlobalSettingsContext';
 import { getDefaultModelForCli, getModelDisplayName } from '@/lib/constants/cliModels';
+import { withApiBase } from '@/lib/config/public-paths';
 import {
   ACTIVE_CLI_BRAND_COLORS,
   ACTIVE_CLI_IDS,
@@ -1914,7 +1915,7 @@ const persistProjectPreferences = useCallback(
         return {
           name: result.filename || filename,
           path: result.absolute_path,
-          url: `/api/assets/${projectId}/${result.filename}`,
+          url: withApiBase(`/api/assets/${projectId}/${result.filename}`),
           public_url: typeof result.public_url === 'string' ? result.public_url : undefined,
           publicUrl: typeof result.public_url === 'string' ? result.public_url : undefined,
         };

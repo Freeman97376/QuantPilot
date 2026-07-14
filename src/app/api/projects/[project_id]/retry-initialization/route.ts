@@ -4,6 +4,7 @@ import { serializeProject } from '@/lib/serializers/project';
 import { streamManager } from '@/lib/services/stream';
 import { getProjectById, updateProject } from '@/lib/services/project';
 import { generateProjectId } from '@/lib/utils';
+import { withApiBase } from '@/lib/config/public-paths';
 
 interface RouteContext {
   params: Promise<{ project_id: string }>;
@@ -62,7 +63,7 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
       },
     });
 
-    const actUrl = new URL(`/api/chat/${project_id}/act`, request.url);
+    const actUrl = new URL(withApiBase(`/api/chat/${project_id}/act`), request.url);
     const actResponse = await fetch(actUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

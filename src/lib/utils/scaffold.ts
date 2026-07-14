@@ -207,8 +207,10 @@ const projectRoot = __dirname;
 const workspaceRoot = process.env.QUANTPILOT_WORKSPACE_ROOT
   ? path.resolve(process.env.QUANTPILOT_WORKSPACE_ROOT)
   : path.resolve(projectRoot, '../../..');
+const previewBasePath = process.env.QUANTPILOT_PREVIEW_BASE_PATH || '';
 
 const nextConfig = {
+  basePath: previewBasePath,
   allowedDevOrigins: ['localhost', '127.0.0.1'],
   typedRoutes: true,
   outputFileTracingRoot: workspaceRoot,
@@ -264,6 +266,23 @@ module.exports = nextConfig;
 const workspaceRoot = process.env.QUANTPILOT_WORKSPACE_ROOT
   ? path.resolve(process.env.QUANTPILOT_WORKSPACE_ROOT)
   : path.resolve(projectRoot, '../../..');
+`
+    );
+  }
+  if (!nextContent.includes('const previewBasePath =')) {
+    nextContent = nextContent.replace(
+      /const nextConfig = \{\n/,
+      `const previewBasePath = process.env.QUANTPILOT_PREVIEW_BASE_PATH || '';
+
+const nextConfig = {
+`
+    );
+  }
+  if (!/\bbasePath\s*:/.test(nextContent)) {
+    nextContent = nextContent.replace(
+      /const nextConfig = \{\n/,
+      `const nextConfig = {
+  basePath: previewBasePath,
 `
     );
   }

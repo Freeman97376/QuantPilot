@@ -4,6 +4,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { withApiBase, withBasePath } from "@/lib/config/public-paths";
 import {
   getProjectById,
   updateProject,
@@ -773,7 +774,7 @@ async function mirrorAssetToPublic(
     }
     return {
       publicPath: hostPublicPath ?? destinationPath,
-      publicUrl: hostPublicPath ? `/uploads/${filename}` : null,
+      publicUrl: hostPublicPath ? withBasePath(`/uploads/${filename}`) : null,
     };
   } catch (error) {
     console.warn(
@@ -781,7 +782,7 @@ async function mirrorAssetToPublic(
       error,
     );
     if (hostPublicPath) {
-      return { publicPath: hostPublicPath, publicUrl: `/uploads/${filename}` };
+      return { publicPath: hostPublicPath, publicUrl: withBasePath(`/uploads/${filename}`) };
     }
     return { publicPath: null, publicUrl: null };
   }
@@ -894,7 +895,7 @@ async function normalizeImageAttachment(
       return {
         name,
         path: pathValue,
-        url: providedUrl ?? `/api/assets/${projectId}/${filename}`,
+        url: providedUrl ?? withApiBase(`/api/assets/${projectId}/${filename}`),
         publicUrl: effectivePublicUrl,
         originalName:
           typeof raw.original_name === "string" ? raw.original_name : undefined,
@@ -923,7 +924,7 @@ async function normalizeImageAttachment(
       return {
         name,
         path: materialized.absolutePath,
-        url: providedUrl ?? `/api/assets/${projectId}/${materialized.filename}`,
+        url: providedUrl ?? withApiBase(`/api/assets/${projectId}/${materialized.filename}`),
         publicUrl: providedPublicUrl ?? materialized.publicUrl ?? undefined,
         mimeType: mimeTypeCandidate,
       };

@@ -306,6 +306,7 @@ export function buildQuantPilotSystemPrompt(): string {
 - Prefer same-origin API routes in generated projects to proxy http://127.0.0.1:8000 instead of direct browser calls
 - Do not hard-code stock quote data; fetch it before analysis and keep refresh capability in the generated page
 - Before finishing a quantitative dashboard, ensure data_file/final/dashboard-data.json exists, app/page.tsx reads real data or same-origin APIs, and /api/market/** proxies the local market backend
+- Browser calls to generated-project APIs must prefix process.env.NEXT_PUBLIC_BASE_PATH when it is set; for example, fetch(\`\${process.env.NEXT_PUBLIC_BASE_PATH || ''}/api/market/...\`). Do not assume the generated preview is hosted at the domain root
 - Keep .quantpilot/run_plan.json symbols as an array of ticker strings. Store rich resolved symbol objects elsewhere, not in symbols
 - Keep dashboard-data.json schema-compatible with quote, kline.bars, technicalIndicators.summary/computedMetrics, and assets[]/comparison for multi-symbol dashboards
 - Generated app/page.tsx must type-check under strict TypeScript. Treat dashboard-data.json as dynamic JSON via JsonRecord/asRecord/asArray/numeric helpers; explicitly type flatMap/map results that add fields as JsonRecord[] so properties like notice_date, report_date, correlation, or symbol remain accessible.

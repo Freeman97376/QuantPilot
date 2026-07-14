@@ -18,6 +18,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { withApiBase } from '@/lib/config/public-paths';
 import type {
   NotificationDeliverySnapshot,
   ResearchAutomationDashboard,
@@ -317,7 +318,7 @@ export default function ResearchReportsClient({ initialData }: ResearchReportsCl
     setIsRefreshing(true);
     setError(null);
     try {
-      const response = await fetch('/api/research/reports', { cache: 'no-store' });
+      const response = await fetch(withApiBase('/api/research/reports'), { cache: 'no-store' });
       const payload = await response.json() as ApiResponse<ResearchAutomationDashboard>;
       if (!response.ok || !payload.success || !payload.data) {
         throw new Error(payload.message || payload.error || '刷新失败');
@@ -334,7 +335,7 @@ export default function ResearchReportsClient({ initialData }: ResearchReportsCl
     setIsRunning(true);
     setError(null);
     try {
-      const response = await fetch('/api/research/reports', {
+      const response = await fetch(withApiBase('/api/research/reports'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'run-daily-report', dryRun: true }),
@@ -355,7 +356,7 @@ export default function ResearchReportsClient({ initialData }: ResearchReportsCl
     setIsSending(true);
     setError(null);
     try {
-      const response = await fetch('/api/research/reports', {
+      const response = await fetch(withApiBase('/api/research/reports'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'send-latest-report', dryRun: false }),

@@ -1,4 +1,5 @@
 import type { SkillDiffData, SkillsPayload, SourceState } from '@/lib/quant/skills-management-types';
+import { withApiBase } from '@/lib/config/public-paths';
 
 async function parseSkillsResponse<T>(response: Response, fallbackMessage: string): Promise<T> {
   const payload = await response.json().catch(() => ({}));
@@ -9,12 +10,12 @@ async function parseSkillsResponse<T>(response: Response, fallbackMessage: strin
 }
 
 export async function fetchSkillsDashboard(): Promise<SkillsPayload> {
-  const response = await fetch('/api/skills', { cache: 'no-store' });
+  const response = await fetch(withApiBase('/api/skills'), { cache: 'no-store' });
   return parseSkillsResponse<SkillsPayload>(response, '刷新 skills 状态失败');
 }
 
 export async function postSkillsJson<T>(body: Record<string, unknown>, fallbackMessage = 'skills 操作失败'): Promise<T> {
-  const response = await fetch('/api/skills', {
+  const response = await fetch(withApiBase('/api/skills'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -120,7 +121,7 @@ export function uploadSkillPackage(params: {
   form.set('changes', params.changes);
   form.set('status', params.status);
   form.set('file', params.file);
-  return fetch('/api/skills', { method: 'POST', body: form }).then((response) =>
+  return fetch(withApiBase('/api/skills'), { method: 'POST', body: form }).then((response) =>
     parseSkillsResponse<SkillsPayload>(response, '上传失败')
   );
 }

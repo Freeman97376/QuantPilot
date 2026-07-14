@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { getProjectById } from '@/lib/services/project';
+import { withBasePath } from '@/lib/config/public-paths';
 
 interface RouteContext {
   params: Promise<{ project_id: string }>;
@@ -61,7 +62,7 @@ export async function POST(request: Request, { params }: RouteContext) {
         await fs.copyFile(resolvedAbsolutePath, hostDestination);
       }
       hostPublicPath = hostDestination;
-      publicUrl = `/uploads/${uniqueName}`;
+      publicUrl = withBasePath(`/uploads/${uniqueName}`);
     } catch (copyError) {
       console.warn('[Assets Upload] Failed to mirror asset into application public/uploads:', copyError);
     }

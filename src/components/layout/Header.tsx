@@ -1,12 +1,14 @@
 "use client";
 import { useState } from 'react';
 import ProjectSettings from '@/components/settings/ProjectSettings';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { ThemeToggle } from '@/components/ui/theme-toggle';
+import { withoutBasePath } from '@/lib/config/public-paths';
 
 export default function Header() {
   const [globalSettingsOpen, setGlobalSettingsOpen] = useState(false);
-  const pathname = usePathname() ?? '';
+  const router = useRouter();
+  const pathname = withoutBasePath(usePathname() ?? '');
 
   // 从路径中提取项目 ID
   const projectId = pathname.match(/^\/([^\/]+)\/(chat|page)?$/)?.[1];
@@ -37,7 +39,7 @@ export default function Header() {
             {projectId && (
               <button
                 onClick={() => {
-                  window.location.href = '/';
+                  router.push('/');
                 }}
                 className="flex items-center justify-center w-8 h-8 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-full transition-colors"
                 title="返回项目列表"

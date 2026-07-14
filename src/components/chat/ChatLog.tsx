@@ -6,6 +6,7 @@ import ToolResultItem from './ToolResultItem';
 import type { ChatMessage, RealtimeEvent, RealtimeStatus } from '@/types';
 import { toChatMessage, normalizeChatContent } from '@/lib/serializers/client/chat';
 import { toRelativePath } from '@/lib/utils/path';
+import { withApiBase } from '@/lib/config/public-paths';
 
 type ToolAction = 'Edited' | 'Created' | 'Read' | 'Deleted' | 'Generated' | 'Searched' | 'Executed';
 
@@ -3470,17 +3471,7 @@ const ToolResultMessage = ({
                                         if (uniqueCandidates.length === 0) {
                                           return null;
                                         }
-                                        const resolveUrl = (value: string) => {
-                                          if (/^https?:\/\//i.test(value)) {
-                                            return value;
-                                          }
-                                          // Handle correctly even when API_BASE is empty
-                                          if (value.startsWith('/')) {
-                                            return API_BASE ? `${API_BASE}${value}` : value;
-                                          }
-                                          return API_BASE ? `${API_BASE}/${value}` : `/${value}`;
-                                        };
-                                        const resolvedCandidates = uniqueCandidates.map(resolveUrl);
+                                        const resolvedCandidates = uniqueCandidates.map(withApiBase);
                                         const imageUrl =
                                           resolvedCandidates.find(url => !failedImageUrls.has(url)) ??
                                           resolvedCandidates[0];

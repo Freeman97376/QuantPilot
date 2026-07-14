@@ -16,6 +16,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { formatBytes, type SkillDiffData, type SkillsPayload } from '@/components/quant/skills-source-tree';
+import { withApiBase } from '@/lib/config/public-paths';
 
 export function SkillsVersionManagerDialog({
   open,
@@ -162,7 +163,7 @@ export function SkillsVersionManagerDialog({
                                 disabled={!current || !selectedSkill.package.exists}
                               >
                                 {current && selectedSkill.package.exists ? (
-                                  <a href={`/api/skills/${selectedSkill.id}/package`} download>
+                                  <a href={withApiBase(`/api/skills/${selectedSkill.id}/package`)} download>
                                     <Download className="h-4 w-4" />
                                     下载
                                   </a>

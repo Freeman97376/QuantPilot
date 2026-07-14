@@ -184,6 +184,11 @@ async function findAvailablePort(rangeStart, rangeEnd, preferredPort) {
 }
 
 async function ensureEnvironment(options = {}) {
+  if (process.env.QUANTPILOT_DEPLOYMENT === 'server') {
+    console.log('Server deployment detected; preserving production environment files.');
+    return { skipped: true };
+  }
+
   console.log('🔧 Setting up development environment...');
 
   const { preferredPort: preferredOverride } = options ?? {};

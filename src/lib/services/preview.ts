@@ -11,6 +11,7 @@ import { findAvailablePort } from '@/lib/utils/ports';
 import { getProjectById, updateProject, updateProjectStatus } from './project';
 import { ensureQuantDashboardTemplate, scaffoldBasicNextApp } from '@/lib/utils/scaffold';
 import { PREVIEW_CONFIG } from '@/lib/config/constants';
+import { getInternalPreviewUrl, getPreviewBasePath } from '@/lib/config/preview-paths';
 
 const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const pnpmCommand = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
@@ -1012,7 +1013,7 @@ class PreviewManager {
       const adoptedPreview: PreviewProcess = {
         process: null,
         port: adoptedPort,
-        url: `http://localhost:${adoptedPort}`,
+        url: getInternalPreviewUrl(adoptedPort),
         status: 'running',
         logs: [
           ...pendingLogs,
@@ -1037,13 +1038,15 @@ class PreviewManager {
       previewBounds.end
     );
 
-    const initialUrl = `http://localhost:${preferredPort}`;
+    const initialUrl = getInternalPreviewUrl(preferredPort);
 
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       PORT: String(preferredPort),
       WEB_PORT: String(preferredPort),
       NEXT_PUBLIC_APP_URL: initialUrl,
+      NEXT_PUBLIC_BASE_PATH: getPreviewBasePath(preferredPort),
+      QUANTPILOT_PREVIEW_BASE_PATH: getPreviewBasePath(preferredPort),
     };
 
     const previewProcess: PreviewProcess = {
@@ -1153,12 +1156,17 @@ class PreviewManager {
     }
 
     const effectivePort = previewProcess.port;
-    let resolvedUrl: string = `http://localhost:${effectivePort}`;
-    if (typeof overrides.url === 'string' && overrides.url.trim().length > 0) {
+    const previewBasePath = getPreviewBasePath(effectivePort);
+    let resolvedUrl: string = getInternalPreviewUrl(effectivePort);
+    if (!previewBasePath && typeof overrides.url === 'string' && overrides.url.trim().length > 0) {
       resolvedUrl = overrides.url.trim();
+    } else if (previewBasePath && overrides.url) {
+      log(Buffer.from('[PreviewManager] Ignoring project NEXT_PUBLIC_APP_URL because the server preview proxy is enabled.'));
     }
 
     env.NEXT_PUBLIC_APP_URL = resolvedUrl;
+    env.NEXT_PUBLIC_BASE_PATH = previewBasePath;
+    env.QUANTPILOT_PREVIEW_BASE_PATH = previewBasePath;
     previewProcess.url = resolvedUrl;
 
     const child = spawn(

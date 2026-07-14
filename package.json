@@ -14,6 +14,7 @@
     "clean:local:dry-run": "node scripts/dev/cleanup-local-artifacts.js --dry-run",
     "clean:workspaces": "node scripts/dev/cleanup-local-artifacts.js --include-workspace-builds",
     "build": "node scripts/build/run-build.js",
+    "build:server": "node scripts/build/run-server-build.js",
     "build:standalone": "node scripts/build/run-build.js --standalone",
     "build:desktop": "npm run build:standalone && electron-builder",
     "styles:build": "node scripts/build/build-stable-css.js",
