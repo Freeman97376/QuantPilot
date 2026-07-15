@@ -104,7 +104,7 @@ const CAPABILITY_ICON_COLORS: Record<string, string> = {
 
 const PLATFORM_NAV_ITEMS = [
   { href: "/strategy-platform", label: "策略", icon: BarChart3 },
-  { href: "/smart-strategy", label: "智能", icon: Sparkles },
+  { href: "/smart-strategy", label: "智能策略", icon: Sparkles },
   { href: "/research-reports", label: "日报", icon: Newspaper },
   { href: "/ops-platform", label: "运维", icon: ShieldCheck },
   { href: "/data-platform", label: "数据", icon: Boxes },

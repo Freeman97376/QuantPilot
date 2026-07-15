@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
+  ArrowRight,
   BookOpenCheck,
   Braces,
   CheckCircle2,
@@ -19,11 +21,13 @@ import {
   Sparkles,
   Timer,
   WifiOff,
+  X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -45,6 +49,8 @@ import type {
   TechnicalScreenerDraft,
   TechnicalScreenerResponse,
 } from "@/lib/quant/strategies";
+import type { SmartStrategyRuntimeStatus } from "@/lib/quant/strategy-types";
+import { SMART_STRATEGY_MAX_PROMPT_LENGTH } from "@/lib/quant/strategy-types";
 import { StockKlineDetail } from "@/components/quant/StockKlineDetail";
 import {
   API_BASE,
@@ -55,7 +61,15 @@ import {
 } from "@/app/strategy-platform/strategy-platform-helpers";
 
 type Props = {
-  data: StrategyDashboardData;
+  data: Pick<StrategyDashboardData, "generatedAt" | "research">;
+  runtimeStatus: SmartStrategyRuntimeStatus;
+};
+
+type WorkflowPhase = "idle" | "drafting" | "running";
+
+type WorkflowError = {
+  stage: "draft" | "run" | "clipboard";
+  message: string;
 };
 
 type IndicatorGroupId = "trend" | "momentum" | "candle" | "volume" | "risk";
@@ -116,6 +130,10 @@ const QUICK_TEMPLATES = [
     fields: ["ma120", "ma250", "amount", "is_st"],
   },
 ];
+
+const DEFAULT_SMART_STRATEGY_PROMPT = QUICK_TEMPLATES[0].prompt;
+const CLIENT_DRAFT_TIMEOUT_MS = 38_000;
+const CLIENT_RUN_TIMEOUT_MS = 20_000;
 
 const INDICATOR_GROUPS: IndicatorGroup[] = [
   {
@@ -292,6 +310,78 @@ function hitRate(result: TechnicalScreenerResponse | null) {
   return (result.totalCandidates / result.scannedSymbols) * 100;
 }
 
+function draftReviewMessage(value: TechnicalScreenerDraft) {
+  if (value.clarificationNeeded) {
+    return "系统发现互相冲突或需要澄清的条件。请修改策略描述后重新生成，当前草案不会自动执行。";
+  }
+  if (value.unsupportedTerms?.length) {
+    return `当前数据暂不支持“${value.unsupportedTerms.join("、")}”。请删除或替换这些条件后重新生成。`;
+  }
+  const incompleteCondition = value.spec.conditions.find((condition) => {
+    if (condition.valueField) return false;
+    if (condition.value === null || condition.value === undefined || condition.value === "") return true;
+    return condition.operator === "between" && (condition.upperValue === null || condition.upperValue === undefined);
+  });
+  if (incompleteCondition) {
+    return `“${conditionLabel(incompleteCondition)}”缺少完整阈值，请补充数值后再执行。`;
+  }
+  const meaningfulConditions = value.spec.conditions.filter(
+    (condition) => !["sample_count", "is_st", "is_limit_up"].includes(condition.field)
+  );
+  if (!meaningfulConditions.length) {
+    return "没有识别到可执行的技术条件。请补充均线、量能、动量或 K 线形态要求后重新生成。";
+  }
+  return null;
+}
+
+function workflowErrorMessage(error: unknown, stage: "draft" | "run") {
+  if (error instanceof Error && error.name === "AbortError") {
+    return stage === "draft"
+      ? "策略解析等待时间过长，请重试；DeepSeek 不可用时服务端会自动切换到本地解析。"
+      : "行情筛选等待时间过长，请确认 market-data 服务后重试。";
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  if (/failed to fetch|networkerror|network request/i.test(message)) {
+    return "无法连接 QuantPilot 服务，请确认网页服务仍在运行后重试。";
+  }
+  if (/market api|market-data|行情/i.test(message)) {
+    return `行情服务暂不可用：${message}`;
+  }
+  return message;
+}
+
+async function postSmartStrategy<T>(
+  body: Record<string, unknown>,
+  externalSignal: AbortSignal,
+  timeoutMs: number
+) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  externalSignal.addEventListener("abort", abort, { once: true });
+  const timeout = window.setTimeout(abort, timeoutMs);
+  try {
+    const response = await fetch(`${API_BASE}/api/quant/smart-strategy`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const payload = await response.json().catch(() => ({})) as {
+      success?: boolean;
+      data?: T;
+      message?: string;
+      error?: string;
+    };
+    if (!response.ok || !payload.success || payload.data === undefined) {
+      throw new Error(payload.message || payload.error || `请求失败（HTTP ${response.status}）`);
+    }
+    return payload.data;
+  } finally {
+    window.clearTimeout(timeout);
+    externalSignal.removeEventListener("abort", abort);
+  }
+}
+
 function memberFromCandidate(candidate: StrategyScreenerCandidate): StrategyUniverseMember {
   return {
     symbol: candidate.symbol,
@@ -346,29 +436,33 @@ function memberFromCandidate(candidate: StrategyScreenerCandidate): StrategyUniv
   };
 }
 
-export function SmartStrategyWorkbench({ data }: Props) {
+export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
   const defaultUniverseId = data.research.primaryUniverseId || data.research.universes[0]?.id || "";
-  const [prompt, setPrompt] = useState("");
+  const [prompt, setPrompt] = useState(DEFAULT_SMART_STRATEGY_PROMPT);
   const [universeId, setUniverseId] = useState(defaultUniverseId);
   const [limit, setLimit] = useState("20");
   const [draft, setDraft] = useState<TechnicalScreenerDraft | null>(null);
   const [result, setResult] = useState<TechnicalScreenerResponse | null>(null);
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
-  const [isDrafting, setIsDrafting] = useState(false);
-  const [isRunning, setIsRunning] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [workflowPhase, setWorkflowPhase] = useState<WorkflowPhase>("idle");
+  const [error, setError] = useState<WorkflowError | null>(null);
+  const [workflowNotice, setWorkflowNotice] = useState<string | null>(null);
   const [activeGroupId, setActiveGroupId] = useState<IndicatorGroupId>("trend");
-  const [showJson, setShowJson] = useState(true);
+  const [showJson, setShowJson] = useState(false);
   const [copied, setCopied] = useState(false);
   const [minuteProfile, setMinuteProfile] = useState<MinuteProfileId>("minute1_entry");
   const [minuteResult, setMinuteResult] = useState<StrategyRefreshResponse | null>(null);
   const [isMinuteLoading, setIsMinuteLoading] = useState(false);
   const [minuteError, setMinuteError] = useState<string | null>(null);
+  const activeRequestRef = useRef<AbortController | null>(null);
+  const requestSequenceRef = useRef(0);
+  const resultsPanelRef = useRef<HTMLDivElement | null>(null);
 
   const parsedLimit = useMemo(() => {
     const value = Number(limit);
     return Number.isFinite(value) ? Math.max(1, Math.min(Math.round(value), 100)) : 20;
   }, [limit]);
+  const requestUniverseId = universeId.trim() || undefined;
 
   const selectedUniverse =
     data.research.universes.find((universe) => universe.id === universeId) ??
@@ -378,6 +472,9 @@ export function SmartStrategyWorkbench({ data }: Props) {
   const intents = draft?.intents ?? [];
   const activeGroup = INDICATOR_GROUPS.find((group) => group.id === activeGroupId) ?? INDICATOR_GROUPS[0];
   const resultHitRate = hitRate(result);
+  const workflowBusy = workflowPhase !== "idle";
+  const reviewMessage = draft ? draftReviewMessage(draft) : null;
+  const marketDataReady = !data.research.error && Boolean(selectedUniverse?.readyCount);
   const conditions = useMemo(
     () => draft?.spec.conditions.map((condition, index) => ({
       id: `${condition.field}-${condition.operator}-${index}`,
@@ -414,64 +511,145 @@ export function SmartStrategyWorkbench({ data }: Props) {
     setMinuteError(null);
   }, [selectedSymbol]);
 
-  const applyPrompt = (value: string) => {
-    setPrompt(value);
+  useEffect(() => () => activeRequestRef.current?.abort(), []);
+
+  const cancelActiveWorkflow = () => {
+    requestSequenceRef.current += 1;
+    activeRequestRef.current?.abort();
+    activeRequestRef.current = null;
+    setWorkflowPhase("idle");
+  };
+
+  const clearWorkflowOutput = () => {
+    cancelActiveWorkflow();
     setDraft(null);
     setResult(null);
     setSelectedSymbol(null);
     setError(null);
+    setWorkflowNotice(null);
+    setMinuteResult(null);
+    setMinuteError(null);
   };
 
-  const generateDraft = async () => {
-    setIsDrafting(true);
+  const applyPrompt = (value: string) => {
+    setPrompt(value);
+    clearWorkflowOutput();
+  };
+
+  const applyUniverse = (value: string) => {
+    setUniverseId(value);
+    clearWorkflowOutput();
+  };
+
+  const applyLimit = (value: string) => {
+    setLimit(value);
+    clearWorkflowOutput();
+  };
+
+  const beginWorkflow = (phase: WorkflowPhase) => {
+    activeRequestRef.current?.abort();
+    const controller = new AbortController();
+    activeRequestRef.current = controller;
+    const requestId = requestSequenceRef.current + 1;
+    requestSequenceRef.current = requestId;
+    setWorkflowPhase(phase);
     setError(null);
+    setWorkflowNotice(null);
+    return { controller, requestId };
+  };
+
+  const revealResultsOnSmallScreens = () => {
+    if (window.matchMedia("(max-width: 1279px)").matches) {
+      window.requestAnimationFrame(() => {
+        resultsPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
+  };
+
+  const generateAndRun = async () => {
+    const { controller, requestId } = beginWorkflow("drafting");
+    let activeStage: "draft" | "run" = "draft";
     setResult(null);
     setSelectedSymbol(null);
     try {
-      const response = await fetch(`${API_BASE}/api/quant/smart-strategy`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const nextDraft = await postSmartStrategy<TechnicalScreenerDraft>(
+        {
           action: "draft",
           prompt,
-          universeId,
+          universeId: requestUniverseId,
           limit: parsedLimit,
-        }),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok || !payload.success) throw new Error(payload.message || payload.error || "DeepSeek 策略草案生成失败");
-      setDraft(payload.data as TechnicalScreenerDraft);
-      setShowJson(true);
+        },
+        controller.signal,
+        CLIENT_DRAFT_TIMEOUT_MS
+      );
+      if (requestSequenceRef.current !== requestId) return;
+      setDraft(nextDraft);
+      setShowJson(false);
+      const nextReviewMessage = draftReviewMessage(nextDraft);
+      if (nextReviewMessage) {
+        setWorkflowNotice(nextReviewMessage);
+        revealResultsOnSmallScreens();
+        return;
+      }
+      if (nextDraft.generatedBy === "rule-template") {
+        setWorkflowNotice("DeepSeek 当前不可用，已使用本地确定性解析继续执行；请在结果区复核条件。");
+      }
+      activeStage = "run";
+      setWorkflowPhase("running");
+      const nextResult = await postSmartStrategy<TechnicalScreenerResponse>(
+        {
+          action: "run",
+          universeId: requestUniverseId,
+          limit: parsedLimit,
+          spec: nextDraft.spec,
+        },
+        controller.signal,
+        CLIENT_RUN_TIMEOUT_MS
+      );
+      if (requestSequenceRef.current !== requestId) return;
+      setResult(nextResult);
+      revealResultsOnSmallScreens();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (requestSequenceRef.current !== requestId) return;
+      setError({
+        stage: activeStage,
+        message: workflowErrorMessage(err, activeStage),
+      });
     } finally {
-      setIsDrafting(false);
+      if (requestSequenceRef.current === requestId) {
+        setWorkflowPhase("idle");
+        activeRequestRef.current = null;
+      }
     }
   };
 
   const runScreener = async () => {
     const activeDraft = draft;
-    if (!activeDraft) return;
-    setIsRunning(true);
-    setError(null);
+    if (!activeDraft || draftReviewMessage(activeDraft)) return;
+    const { controller, requestId } = beginWorkflow("running");
+    setResult(null);
     try {
-      const response = await fetch(`${API_BASE}/api/quant/smart-strategy`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const nextResult = await postSmartStrategy<TechnicalScreenerResponse>(
+        {
           action: "run",
-          universeId,
+          universeId: requestUniverseId,
           limit: parsedLimit,
           spec: activeDraft.spec,
-        }),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok || !payload.success) throw new Error(payload.message || payload.error || "技术筛选失败");
-      setResult(payload.data as TechnicalScreenerResponse);
+        },
+        controller.signal,
+        CLIENT_RUN_TIMEOUT_MS
+      );
+      if (requestSequenceRef.current !== requestId) return;
+      setResult(nextResult);
+      revealResultsOnSmallScreens();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (requestSequenceRef.current !== requestId) return;
+      setError({ stage: "run", message: workflowErrorMessage(err, "run") });
     } finally {
-      setIsRunning(false);
+      if (requestSequenceRef.current === requestId) {
+        setWorkflowPhase("idle");
+        activeRequestRef.current = null;
+      }
     }
   };
 
@@ -485,7 +663,7 @@ export function SmartStrategyWorkbench({ data }: Props) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "prepare-analysis",
-          universeId,
+          universeId: requestUniverseId,
           symbols: [selectedCandidate.symbol],
           profile: minuteProfile,
           tradeDate: result.tradeDate,
@@ -507,9 +685,13 @@ export function SmartStrategyWorkbench({ data }: Props) {
 
   const copyJson = async () => {
     if (!draft) return;
-    await navigator.clipboard.writeText(copyableJson(draft));
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1200);
+    try {
+      await navigator.clipboard.writeText(copyableJson(draft));
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setError({ stage: "clipboard", message: "浏览器未允许复制，请展开 JSON 后手动选择内容。" });
+    }
   };
 
   const updateIntentConditionValue = (intentIndex: number, conditionIndex: number, rawValue: string) => {
@@ -545,107 +727,208 @@ export function SmartStrategyWorkbench({ data }: Props) {
       };
     });
     setResult(null);
+    setWorkflowNotice("条件已调整，点击“执行已调整条件”即可重新筛选。");
   };
 
   return (
     <main className="mx-auto w-full max-w-[1900px] space-y-4 px-3 py-5 lg:px-4">
-      {error ? (
-        <div className="flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-          <div className="min-w-0">
-            <p className="font-semibold">智能策略执行失败</p>
-            <p className="mt-1 break-words leading-6">{error}</p>
+      <section className="flex flex-col gap-3 rounded-md border border-slate-200 bg-white px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-sm font-semibold text-slate-950">首次使用：描述策略后，一次完成解析与筛选</p>
+            <Badge
+              variant="outline"
+              className={runtimeStatus.configured
+                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                : "border-blue-200 bg-blue-50 text-blue-700"}
+            >
+              {runtimeStatus.configured ? `${runtimeStatus.model ?? "DeepSeek"} 已就绪` : "本地解析可用"}
+            </Badge>
+            <Badge
+              variant="outline"
+              className={marketDataReady
+                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                : "border-amber-200 bg-amber-50 text-amber-700"}
+            >
+              {marketDataReady ? "本地行情已就绪" : "行情数据待检查"}
+            </Badge>
           </div>
+          <p className="mt-1 text-xs leading-5 text-slate-500">
+            1 描述条件 · 2 系统复核白名单 · 3 本地日 K 确定性筛选。AI 不会生成或执行任意 SQL。
+          </p>
         </div>
-      ) : null}
+        <div className="flex shrink-0 flex-wrap items-center gap-3 text-xs text-slate-500">
+          <span className="tabular-nums">
+            {selectedUniverse?.name ?? "未选择股票池"} · {selectedUniverse?.readyCount ?? 0}/{selectedUniverse?.memberCount ?? 0} 已就绪
+          </span>
+          {!marketDataReady ? (
+            <Link href="/data-platform" className="inline-flex items-center gap-1 font-medium text-blue-700 hover:text-blue-800">
+              检查数据平台
+              <ArrowRight className="h-3.5 w-3.5" />
+            </Link>
+          ) : null}
+        </div>
+      </section>
 
       <section className="grid gap-4 xl:grid-cols-[minmax(340px,0.9fr)_minmax(420px,1fr)_minmax(520px,1.2fr)]">
         <div className="min-w-0 rounded-md border border-slate-200 bg-white">
           <div className="border-b border-slate-100 px-4 py-3">
             <div className="flex items-center gap-2">
               <Sparkles className="h-4 w-4 text-blue-600" />
-              <h2 className="text-sm font-semibold text-slate-950">DeepSeek 策略输入</h2>
+              <h2 className="text-sm font-semibold text-slate-950">策略描述</h2>
             </div>
             <p className="mt-1 text-xs leading-5 text-slate-500">
-              DeepSeek 只生成白名单 JSON，后端用本地日 K 做确定性筛选。
+              已预填一个可运行示例；直接点击“生成并筛选”即可完成首次体验。
             </p>
           </div>
 
           <div className="space-y-4 p-4">
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <Select value={universeId} onValueChange={setUniverseId}>
-                <SelectTrigger className="h-9 bg-white sm:w-[230px]">
-                  <SelectValue placeholder="选择股票池" />
-                </SelectTrigger>
-                <SelectContent>
-                  {data.research.universes.map((universe) => (
-                    <SelectItem key={universe.id} value={universe.id}>
-                      {universe.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Select value={limit} onValueChange={setLimit}>
-                <SelectTrigger className="h-9 bg-white sm:w-[120px]">
-                  <SelectValue placeholder="数量" />
-                </SelectTrigger>
-                <SelectContent>
-                  {[10, 20, 30, 50, 100].map((value) => (
-                    <SelectItem key={value} value={String(value)}>
-                      Top {value}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_120px]">
+              <div className="space-y-1.5">
+                <Label className="text-xs text-slate-600">股票池</Label>
+                <Select value={universeId} onValueChange={applyUniverse} disabled={workflowBusy}>
+                  <SelectTrigger className="h-11 bg-white">
+                    <SelectValue placeholder="选择股票池" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {data.research.universes.map((universe) => (
+                      <SelectItem key={universe.id} value={universe.id}>
+                        {universe.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs text-slate-600">返回数量</Label>
+                <Select value={limit} onValueChange={applyLimit} disabled={workflowBusy}>
+                  <SelectTrigger className="h-11 bg-white">
+                    <SelectValue placeholder="数量" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {[10, 20, 30, 50, 100].map((value) => (
+                      <SelectItem key={value} value={String(value)}>
+                        Top {value}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
 
-            <div className="grid gap-2 sm:grid-cols-2">
+            <div>
+              <Label className="text-xs text-slate-600">快速示例</Label>
+              <div className="mt-2 flex flex-wrap gap-2">
               {QUICK_TEMPLATES.map((template) => (
                 <button
                   key={template.title}
                   type="button"
                   onClick={() => applyPrompt(template.prompt)}
-                  className="rounded-md border border-slate-200 bg-white px-3 py-2 text-left transition hover:border-blue-200 hover:bg-blue-50"
+                  disabled={workflowBusy}
+                  aria-pressed={prompt === template.prompt}
+                  className={cn(
+                    "inline-flex min-h-11 items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors disabled:cursor-wait disabled:opacity-60",
+                    prompt === template.prompt
+                      ? "border-blue-200 bg-blue-50 text-blue-700"
+                      : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50"
+                  )}
                 >
-                  <span className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-                    <Search className="h-4 w-4 text-blue-600" />
-                    {template.title}
-                  </span>
-                  <span className="mt-1 line-clamp-2 block text-xs leading-5 text-slate-500">
-                    {template.prompt}
-                  </span>
-                  <span className="mt-2 flex flex-wrap gap-1">
-                    {template.fields.map((field) => (
-                      <span key={field} className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
-                        {FIELD_LABELS[field] ?? field}
-                      </span>
-                    ))}
-                  </span>
+                  <Search className="h-3.5 w-3.5" />
+                  {template.title}
                 </button>
               ))}
+              </div>
             </div>
 
-            <Textarea
-              value={prompt}
-              onChange={(event) => applyPrompt(event.target.value)}
-              placeholder="例如：选出 MACD 金叉，成交额较 20 日均额放大 1.5 倍，RSI 不高于 70，不要长上影线，收盘靠近高点的股票"
-              className="min-h-[132px] resize-y border-slate-200 bg-white text-sm leading-6"
-            />
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-3">
+                <Label htmlFor="smart-strategy-prompt" className="text-xs text-slate-600">选股条件</Label>
+                <span className="text-[11px] tabular-nums text-slate-400">
+                  {prompt.length}/{SMART_STRATEGY_MAX_PROMPT_LENGTH}
+                </span>
+              </div>
+              <Textarea
+                id="smart-strategy-prompt"
+                value={prompt}
+                maxLength={SMART_STRATEGY_MAX_PROMPT_LENGTH}
+                disabled={workflowBusy}
+                onChange={(event) => applyPrompt(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !workflowBusy && prompt.trim()) {
+                    event.preventDefault();
+                    if (draft && !reviewMessage) void runScreener();
+                    else if (!draft) void generateAndRun();
+                  }
+                }}
+                placeholder="例如：选出 MACD 金叉，成交额较 20 日均额放大 1.5 倍，RSI 不高于 70，不要长上影线，收盘靠近高点的股票"
+                className="min-h-[132px] resize-y border-slate-200 bg-white text-sm leading-6"
+              />
+              <p className="text-[11px] text-slate-400">支持 Ctrl/⌘ + Enter 执行；资金流、主力、KDJ、BOLL、ATR 暂不支持。</p>
+            </div>
+
+            {error ? (
+              <div role="alert" className="flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <p className="font-semibold">{error.stage === "draft" ? "策略解析失败" : error.stage === "run" ? "行情筛选失败" : "复制失败"}</p>
+                  <p className="mt-1 break-words leading-5">{error.message}</p>
+                  {error.stage !== "clipboard" ? (
+                    <button
+                      type="button"
+                      onClick={() => error.stage === "run" && draft ? void runScreener() : void generateAndRun()}
+                      className="mt-1.5 font-semibold underline underline-offset-2"
+                    >
+                      重试当前步骤
+                    </button>
+                  ) : null}
+                </div>
+                <button type="button" onClick={() => setError(null)} aria-label="关闭错误提示" className="rounded p-1 hover:bg-red-100">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ) : null}
+
+            {workflowNotice || reviewMessage ? (
+              <div role="status" aria-live="polite" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-800">
+                {reviewMessage ?? workflowNotice}
+              </div>
+            ) : null}
 
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 type="button"
-                onClick={generateDraft}
-                disabled={isDrafting || !prompt.trim()}
-                className="bg-blue-600 text-white hover:bg-blue-700"
+                onClick={() => draft ? void runScreener() : void generateAndRun()}
+                disabled={workflowBusy || !prompt.trim() || Boolean(draft && reviewMessage)}
+                aria-busy={workflowBusy}
+                className="min-h-11 flex-1 bg-blue-600 text-white hover:bg-blue-700"
               >
-                {isDrafting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Braces className="h-4 w-4" />}
-                DeepSeek 生成
+                {workflowBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : draft ? <Play className="h-4 w-4" /> : <Sparkles className="h-4 w-4" />}
+                {workflowPhase === "drafting"
+                  ? "正在解析策略"
+                  : workflowPhase === "running"
+                    ? "正在筛选本地行情"
+                    : draft
+                      ? result ? "重新执行筛选" : "执行已调整条件"
+                      : "生成并筛选"}
               </Button>
-              <Button type="button" variant="outline" onClick={runScreener} disabled={isRunning || !draft}>
-                {isRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                执行筛选
-              </Button>
+              {workflowBusy ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    cancelActiveWorkflow();
+                    setWorkflowNotice(draft ? "已取消当前任务，已生成的草案仍保留。" : "已取消当前任务。");
+                  }}
+                >
+                  <X className="h-4 w-4" />
+                  取消
+                </Button>
+              ) : draft ? (
+                <Button type="button" variant="outline" onClick={() => void generateAndRun()} disabled={workflowBusy}>
+                  <Braces className="h-4 w-4" />
+                  重新解析
+                </Button>
+              ) : null}
               {draft ? (
                 <Badge variant="outline" className="border-emerald-200 bg-emerald-50 text-emerald-700">
                   {draft.spec.conditions.length} 个条件
@@ -653,18 +936,27 @@ export function SmartStrategyWorkbench({ data }: Props) {
               ) : null}
             </div>
 
-            <div className="rounded-md border border-slate-200 bg-slate-50">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-3 py-2">
+            <p className="sr-only" role="status" aria-live="polite">
+              {workflowPhase === "drafting" ? "正在解析策略" : workflowPhase === "running" ? "正在执行行情筛选" : result ? `筛选完成，命中 ${result.totalCandidates} 个候选` : ""}
+            </p>
+
+            <details className="group rounded-md border border-slate-200 bg-slate-50">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
                   <BookOpenCheck className="h-4 w-4 text-blue-600" />
-                  指标白名单
+                  查看支持的指标白名单
                 </div>
+                <span className="text-xs font-medium text-slate-500 group-open:hidden">展开</span>
+                <span className="hidden text-xs font-medium text-slate-500 group-open:inline">收起</span>
+              </summary>
+              <div className="border-t border-slate-200 px-3 pt-3">
                 <div className="flex flex-wrap gap-1">
                   {INDICATOR_GROUPS.map((group) => (
                     <button
                       key={group.id}
                       type="button"
                       onClick={() => setActiveGroupId(group.id)}
+                      aria-pressed={activeGroupId === group.id}
                       className={cn(
                         "rounded-md border px-2 py-1 text-xs font-medium transition",
                         activeGroupId === group.id
@@ -690,11 +982,11 @@ export function SmartStrategyWorkbench({ data }: Props) {
                   {activeGroup.examples.join(" / ")}
                 </div>
               </div>
-            </div>
+            </details>
           </div>
         </div>
 
-        <div className="min-w-0 rounded-md border border-slate-200 bg-white">
+        <div ref={resultsPanelRef} className="min-w-0 scroll-mt-4 rounded-md border border-slate-200 bg-white">
           <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-4 py-3">
             <div>
               <h2 className="text-sm font-semibold text-slate-950">策略草案与命中列表</h2>
@@ -718,7 +1010,7 @@ export function SmartStrategyWorkbench({ data }: Props) {
                   <div className="flex flex-wrap items-center gap-2">
                     <p className="text-sm font-semibold text-slate-950">{draft.spec.name}</p>
                     <Badge variant="outline" className="bg-white text-slate-500">
-                      {draft.generatedBy}
+                      {draft.generatedBy === "deepseek" ? "DeepSeek 解析" : "本地规则解析"}
                     </Badge>
                     {draft.model ? (
                       <Badge variant="outline" className="border-blue-200 bg-blue-50 text-blue-700">
@@ -734,6 +1026,7 @@ export function SmartStrategyWorkbench({ data }: Props) {
                     variant="ghost"
                     size="sm"
                     onClick={() => setShowJson((value) => !value)}
+                    aria-expanded={showJson}
                     className="h-7 px-2 text-xs"
                   >
                     <Code2 className="h-3.5 w-3.5" />
@@ -898,7 +1191,7 @@ export function SmartStrategyWorkbench({ data }: Props) {
 
           {result && result.candidates.length ? (
             <div className="max-h-[720px] overflow-auto p-3">
-              <div className="space-y-2">
+              <div className="space-y-2" aria-label="智能策略命中候选">
                 {result.candidates.map((candidate, index) => {
                   const selected = selectedCandidate?.symbol === candidate.symbol;
                   return (
@@ -906,6 +1199,7 @@ export function SmartStrategyWorkbench({ data }: Props) {
                       key={candidate.symbol}
                       type="button"
                       onClick={() => setSelectedSymbol(candidate.symbol)}
+                      aria-pressed={selected}
                       className={cn(
                         "w-full rounded-md border px-3 py-3 text-left transition",
                         selected
@@ -966,7 +1260,15 @@ export function SmartStrategyWorkbench({ data }: Props) {
               </div>
             </div>
           ) : result ? (
-            <EmptyState title="没有命中候选" description="当前条件可能过严，或本地 K 线覆盖不足。" className="m-4 border-0 bg-slate-50" />
+            <EmptyState
+              title="没有命中候选"
+              description="当前条件可能过严，或本地 K 线覆盖不足。可以放宽阈值后重新筛选。"
+              action={{
+                label: "调整策略描述",
+                onClick: () => document.getElementById("smart-strategy-prompt")?.focus(),
+              }}
+              className="m-4 border-0 bg-slate-50"
+            />
           ) : (
             <EmptyState title="暂无命中列表" description="先生成策略 JSON，再执行筛选。" className="m-4 border-0 bg-slate-50" />
           )}

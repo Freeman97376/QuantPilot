@@ -263,6 +263,15 @@ export type StrategyDataProfileId =
   | 'minute5_confirm'
   | 'minute_backtest';
 
+export const SMART_STRATEGY_MAX_PROMPT_LENGTH = 1_200;
+
+export type SmartStrategyRuntimeStatus = {
+  configured: boolean;
+  provider: 'deepseek' | 'rule-template';
+  model: string | null;
+  fallbackAvailable: true;
+};
+
 export interface TechnicalScreenerCondition {
   field: string;
   operator: TechnicalScreenerOperator;

@@ -1,8 +1,10 @@
 import type {
+  SmartStrategyRuntimeStatus,
   StrategyDataProfileId,
   StrategyIntent,
   TechnicalScreenerDraft,
 } from '@/lib/quant/strategy-types';
+import { SMART_STRATEGY_MAX_PROMPT_LENGTH } from '@/lib/quant/strategy-types';
 import {
   compileIntentToTechnicalSpec,
   parseStrategyIntent,
@@ -13,6 +15,7 @@ import {
 const DEEPSEEK_DEFAULT_BASE_URL = 'https://api.deepseek.com';
 const DEEPSEEK_DEFAULT_MODEL = 'deepseek-v4-flash';
 const DEEPSEEK_DEFAULT_TIMEOUT_MS = 30_000;
+const DEEPSEEK_MAX_OUTPUT_TOKENS = 2_048;
 
 const TECHNICAL_SCREENER_LLM_SYSTEM_PROMPT = `You are QuantPilot's A-share daily technical screener intent parser.
 Return only JSON. Do not return SQL, code, markdown, investment advice, or direct buy/sell instructions.
@@ -115,10 +118,26 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function normalizeEndpoint(baseUrl: string) {
   const trimmed = baseUrl.trim().replace(/\/+$/, '');
-  if (!trimmed) return `${DEEPSEEK_DEFAULT_BASE_URL}/chat/completions`;
-  return trimmed.endsWith('/v1')
-    ? `${trimmed}/chat/completions`
-    : `${trimmed}/chat/completions`;
+  const value = trimmed || DEEPSEEK_DEFAULT_BASE_URL;
+  let endpoint: URL;
+  try {
+    endpoint = new URL(value);
+  } catch {
+    throw new Error('DEEPSEEK_BASE_URL must be a valid HTTP or HTTPS URL.');
+  }
+  if (!['http:', 'https:'].includes(endpoint.protocol)) {
+    throw new Error('DEEPSEEK_BASE_URL must use HTTP or HTTPS.');
+  }
+  if (endpoint.username || endpoint.password) {
+    throw new Error('DEEPSEEK_BASE_URL must not contain embedded credentials.');
+  }
+  const pathname = endpoint.pathname.replace(/\/+$/, '');
+  if (!pathname.endsWith('/chat/completions')) {
+    endpoint.pathname = `${pathname}/chat/completions`.replace(/^\/\//, '/');
+  }
+  endpoint.search = '';
+  endpoint.hash = '';
+  return endpoint.toString();
 }
 
 function getDeepSeekConfig() {
@@ -129,7 +148,7 @@ function getDeepSeekConfig() {
   const timeoutRaw = Number(process.env.DEEPSEEK_TIMEOUT_MS?.trim());
   return {
     apiKey,
-    baseUrl: process.env.DEEPSEEK_BASE_URL?.trim() || DEEPSEEK_DEFAULT_BASE_URL,
+    endpoint: normalizeEndpoint(process.env.DEEPSEEK_BASE_URL?.trim() || DEEPSEEK_DEFAULT_BASE_URL),
     model: process.env.DEEPSEEK_MODEL?.trim() || DEEPSEEK_DEFAULT_MODEL,
     timeoutMs: Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? timeoutRaw : DEEPSEEK_DEFAULT_TIMEOUT_MS,
   };
@@ -141,6 +160,39 @@ function getOptionalDeepSeekConfig() {
   } catch {
     return null;
   }
+}
+
+export function getSmartStrategyRuntimeStatus(): SmartStrategyRuntimeStatus {
+  const config = getOptionalDeepSeekConfig();
+  return {
+    configured: Boolean(config),
+    provider: config ? 'deepseek' : 'rule-template',
+    model: config?.model ?? null,
+    fallbackAvailable: true,
+  };
+}
+
+function providerErrorSummary(error: unknown) {
+  if (error instanceof Error && error.name === 'AbortError') return 'DeepSeek 请求超时';
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/\s+/g, ' ').slice(0, 180) || 'DeepSeek 暂时不可用';
+}
+
+function buildRuleParseResult(
+  prompt: string,
+  warning: string
+): StrategyIntentParseResult {
+  return {
+    prompt,
+    intents: parseStrategyIntent({ prompt }),
+    generatedBy: 'rule-template',
+    model: null,
+    usage: null,
+    fetchedAt: new Date().toISOString(),
+    warnings: [warning],
+    llmSystemPrompt: TECHNICAL_SCREENER_LLM_SYSTEM_PROMPT,
+    recommendedDataProfile: inferStrategyDataProfile(prompt),
+  };
 }
 
 function parseJsonObject(content: string): Record<string, unknown> {
@@ -162,29 +214,23 @@ export async function buildDeepSeekStrategyIntents(
 ): Promise<StrategyIntentParseResult> {
   const prompt = params.prompt.trim().replace(/\s+/g, ' ');
   if (!prompt) throw new Error('Please enter a smart strategy description.');
+  if (prompt.length > SMART_STRATEGY_MAX_PROMPT_LENGTH) {
+    throw new Error(`Smart strategy description must be ${SMART_STRATEGY_MAX_PROMPT_LENGTH} characters or fewer.`);
+  }
 
   const config = getOptionalDeepSeekConfig();
   if (!config) {
-    return {
+    return buildRuleParseResult(
       prompt,
-      intents: parseStrategyIntent({ prompt }),
-      generatedBy: 'rule-template',
-      model: null,
-      usage: null,
-      fetchedAt: new Date().toISOString(),
-      warnings: [
-        'DEEPSEEK_API_KEY is not configured; QuantPilot used the deterministic intent parser for this draft.',
-      ],
-      llmSystemPrompt: TECHNICAL_SCREENER_LLM_SYSTEM_PROMPT,
-      recommendedDataProfile: inferStrategyDataProfile(prompt),
-    };
+      '未配置可用的 DeepSeek 连接；已自动切换为本地确定性意图解析，仍可生成并复核策略。'
+    );
   }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
 
   try {
-    const response = await fetch(normalizeEndpoint(config.baseUrl), {
+    const response = await fetch(config.endpoint, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${config.apiKey}`,
@@ -200,6 +246,7 @@ export async function buildDeepSeekStrategyIntents(
           },
         ],
         response_format: { type: 'json_object' },
+        max_tokens: DEEPSEEK_MAX_OUTPUT_TOKENS,
         stream: false,
         thinking: { type: 'disabled' },
       }),
@@ -225,16 +272,16 @@ export async function buildDeepSeekStrategyIntents(
       usage: completion.usage ?? null,
       fetchedAt: new Date().toISOString(),
       warnings: [
-        'DeepSeek only parsed intent; QuantPilot service code compiled the final whitelist strategy JSON.',
+        'DeepSeek 只负责解析意图；最终白名单策略 JSON 由 QuantPilot 服务端确定性编译。',
       ],
       llmSystemPrompt: TECHNICAL_SCREENER_LLM_SYSTEM_PROMPT,
       recommendedDataProfile: parseDataProfile(parsed.dataProfile, prompt),
     };
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(`DeepSeek API timeout after ${config.timeoutMs}ms.`);
-    }
-    throw error;
+    return buildRuleParseResult(
+      prompt,
+      `DeepSeek 暂时不可用，已自动降级为本地确定性解析。原因：${providerErrorSummary(error)}`
+    );
   } finally {
     clearTimeout(timeout);
   }
@@ -242,7 +289,7 @@ export async function buildDeepSeekStrategyIntents(
 
 export function compileStrategyIntentsDraft(params: {
   prompt: string;
-  intents: StrategyIntent[];
+  intents: unknown[];
   universeId?: string;
   limit?: number;
 }): TechnicalScreenerDraft {

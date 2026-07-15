@@ -1366,6 +1366,7 @@ export function StockKlineDetail({
                   }
                 }}
                 disabled={isLoadingDetail || isLoadingRealtime || isLoadingIntraday}
+                aria-pressed={detailTimeframe === option.id}
                 className={cn(
                   "rounded px-3 text-sm font-medium transition-colors",
                   detailTimeframe === option.id
@@ -1388,8 +1389,19 @@ export function StockKlineDetail({
         ) : isRealtimeView ? (
           <div className="space-y-4 p-5">
             {(realtimeError || intradayError) && (
-              <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
-                {intradayError ?? realtimeError}
+              <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+                <span className="min-w-0 break-words">{intradayError ?? realtimeError}</span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => refreshRealtimeView({ forceRefresh: true })}
+                  disabled={isLoadingRealtime || isLoadingIntraday}
+                  className="border-amber-300 bg-white text-amber-800 hover:bg-amber-100"
+                >
+                  <RefreshCcw className="h-3.5 w-3.5" />
+                  重试
+                </Button>
               </div>
             )}
             {intradayDetail ? (
@@ -1421,8 +1433,18 @@ export function StockKlineDetail({
             正在读取本地 TimescaleDB K 线...
           </div>
         ) : detailError ? (
-          <div className="m-5 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-            {detailError}
+          <div role="alert" className="m-5 flex flex-wrap items-center justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            <span className="min-w-0 break-words">{detailError}</span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void loadDetail(detailTimeframe)}
+              className="border-red-300 bg-white text-red-700 hover:bg-red-100"
+            >
+              <RefreshCcw className="h-3.5 w-3.5" />
+              重试读取
+            </Button>
           </div>
         ) : detail ? (
           <div className="p-5">

@@ -69,6 +69,8 @@ export const TECHNICAL_SCREENER_ALLOWED_SORT_FIELDS = [
   'strength_20d_pct',
   'amount_ratio_20d',
   'amount_ratio_5d',
+  'volume_ratio_20d',
+  'volume_ratio_5d',
   'amount',
   'turnover',
   'close_position_pct',
@@ -326,6 +328,34 @@ function parseRuleBasedStrategyIntent(prompt: string): StrategyIntent[] {
     });
   }
 
+  const priceMaConditions: TechnicalScreenerCondition[] = [];
+  const priceAboveMaMappings = [
+    { field: 'ma5', pattern: /(?:(?:收盘价?|价格).{0,8})?(?:站上|高于|突破).{0,2}(?:ma5|5日均线|五日均线)/i, label: '收盘价 >= MA5' },
+    { field: 'ma10', pattern: /(?:(?:收盘价?|价格).{0,8})?(?:站上|高于|突破).{0,2}(?:ma10|10日均线|十日均线)/i, label: '收盘价 >= MA10' },
+    { field: 'ma20', pattern: /(?:(?:收盘价?|价格).{0,8})?(?:站上|高于|突破).{0,2}(?:ma20|20日均线|二十日均线|月线)/i, label: '收盘价 >= MA20' },
+    { field: 'ma60', pattern: /(?:(?:收盘价?|价格).{0,8})?(?:站上|高于|突破).{0,2}(?:ma60|60日均线|六十日均线|季线)/i, label: '收盘价 >= MA60' },
+    { field: 'ma120', pattern: /(?:(?:收盘价?|价格).{0,8})?(?:站上|高于|突破).{0,2}(?:ma120|120日均线|半年线)/i, label: '收盘价 >= MA120' },
+    { field: 'ma250', pattern: /(?:(?:收盘价?|价格).{0,8})?(?:站上|高于|突破).{0,2}(?:ma250|250日均线|年线)/i, label: '收盘价 >= MA250' },
+  ] as const;
+  for (const mapping of priceAboveMaMappings) {
+    if (mapping.pattern.test(normalized)) {
+      priceMaConditions.push(condition('close', 'gte', null, mapping.label, mapping.field));
+    }
+  }
+  if (/(?:ma120|120日均线|半年线).{0,10}(?:在|位于|高于|站上|大于).{0,6}(?:ma250|250日均线|年线)/i.test(normalized)) {
+    priceMaConditions.push(condition('ma120', 'gte', null, 'MA120 >= MA250', 'ma250'));
+  }
+  if (priceMaConditions.length) {
+    push({
+      intentType: 'trend_alignment',
+      rawText: normalized,
+      mappedFields: Array.from(new Set(priceMaConditions.flatMap((item) => [item.field, item.valueField].filter(Boolean) as string[]))),
+      conditions: priceMaConditions,
+      supportStatus: 'supported',
+      explanation: '系统按收盘价与指定均线、长周期均线之间的相对位置编译趋势条件。',
+    });
+  }
+
   if (/斜率|变陡|均线向上|均线往上|向上发散|20日均线向上|ma20.*向上|ma60.*向上/i.test(normalized)) {
     const slope = maSlopeField(normalized);
     const threshold = extractNumber(
@@ -352,24 +382,77 @@ function parseRuleBasedStrategyIntent(prompt: string): StrategyIntent[] {
     });
   }
 
-  if (/放量|量能|成交额放大|成交量放大|量价/.test(normalized)) {
+  if (/放量|量能|成交额.{0,16}(?:放大|活跃)|成交量.{0,16}放大|量价/.test(normalized)) {
+    const ratioField = /成交量/.test(normalized) && !/成交额/.test(normalized)
+      ? 'volume_ratio_20d'
+      : 'amount_ratio_20d';
+    const ratioSubject = ratioField === 'volume_ratio_20d' ? '成交量较20日均量' : '成交额较20日均额';
     const ratio = extractNumber(
       normalized,
-      [/(?:放量|量能|成交额放大|成交量放大).{0,12}?(\d+(?:\.\d+)?)\s*倍/, /(\d+(?:\.\d+)?)\s*倍.{0,8}(?:放量|量能)/],
-      1.5
+      [
+        /(?:放量|量能|成交额.{0,12}放大|成交量.{0,12}放大).{0,12}?(\d+(?:\.\d+)?)\s*倍/,
+        /(\d+(?:\.\d+)?)\s*倍.{0,8}(?:放量|量能)/,
+      ],
+      /活跃/.test(normalized) ? 1 : 1.5
     );
     push({
       intentType: 'volume_expansion',
       rawText: normalized,
-      mappedFields: ['amount_ratio_20d'],
+      mappedFields: [ratioField],
       conditions: [
-        condition('amount_ratio_20d', 'gte', ratio, `成交额较20日均额 >= ${ratio}倍`),
+        condition(ratioField, 'gte', ratio, `${ratioSubject} >= ${ratio}倍`),
       ],
-      supportStatus: ratio === 1.5 ? 'inferred' : 'supported',
+      supportStatus: ratio === 1.5 || ratio === 1 ? 'inferred' : 'supported',
       explanation: ratio === 1.5
-        ? '系统把“放量”默认理解为成交额较20日均额至少1.5倍。'
-        : '系统按用户给定倍数映射成交额放大。',
-      defaulted: ratio === 1.5,
+        ? `系统把当前量能要求理解为${ratioSubject}至少1.5倍。`
+        : ratio === 1
+          ? `系统把“活跃”默认理解为${ratioSubject}不低于1倍。`
+          : `系统按用户给定倍数映射${ratioSubject}放大。`,
+      defaulted: ratio === 1.5 || ratio === 1,
+    });
+  }
+
+  if (/macd/i.test(normalized)) {
+    const macdConditions: TechnicalScreenerCondition[] = [];
+    if (/金叉|dif.{0,8}(?:上穿|高于|大于|>=|＞).{0,5}dea/i.test(normalized)) {
+      macdConditions.push(condition('macd_dif', 'gte', null, 'MACD DIF >= DEA', 'macd_dea'));
+    }
+    if (/macd.{0,8}(?:柱|hist).{0,8}(?:翻红|为正|大于\s*0|>\s*0)/i.test(normalized)) {
+      macdConditions.push(condition('macd_hist', 'gt', 0, 'MACD 柱 > 0'));
+    }
+    if (!macdConditions.length) {
+      macdConditions.push(condition('macd_dif', 'gte', null, 'MACD DIF >= DEA', 'macd_dea'));
+    }
+    push({
+      intentType: 'momentum_strength',
+      rawText: normalized,
+      mappedFields: Array.from(new Set(macdConditions.flatMap((item) => [item.field, item.valueField].filter(Boolean) as string[]))),
+      conditions: macdConditions,
+      supportStatus: /金叉|dif|dea|柱|hist/i.test(normalized) ? 'supported' : 'inferred',
+      explanation: /金叉/i.test(normalized)
+        ? '系统把 MACD 金叉映射为 DIF 不低于 DEA。'
+        : '系统按 MACD 动量方向生成可复核条件。',
+      defaulted: !/金叉|dif|dea|柱|hist/i.test(normalized),
+    });
+  }
+
+  if (/rsi\s*(?:6|14)?/i.test(normalized)) {
+    const rsiPeriod = /rsi\s*6/i.test(normalized) ? 6 : 14;
+    const rsiField = rsiPeriod === 6 ? 'rsi6' : 'rsi14';
+    const upperMatch = /rsi\s*(?:6|14)?.{0,8}(?:不高于|小于等于|低于|小于|<=|≤)\s*(\d+(?:\.\d+)?)/i.exec(normalized);
+    const lowerMatch = /rsi\s*(?:6|14)?.{0,8}(?:不低于|大于等于|高于|大于|>=|≥)\s*(\d+(?:\.\d+)?)/i.exec(normalized);
+    const threshold = Number(upperMatch?.[1] ?? lowerMatch?.[1] ?? 70);
+    const operator: TechnicalScreenerOperator = upperMatch ? 'lte' : lowerMatch ? 'gte' : 'lte';
+    push({
+      intentType: 'momentum_strength',
+      rawText: normalized,
+      mappedFields: [rsiField],
+      conditions: [condition(rsiField, operator, threshold, `RSI${rsiPeriod} ${operator === 'lte' ? '<=' : '>='} ${threshold}`)],
+      supportStatus: upperMatch || lowerMatch ? 'supported' : 'inferred',
+      explanation: upperMatch || lowerMatch
+        ? `系统按用户给定阈值约束 RSI${rsiPeriod}。`
+        : `用户没有给出 RSI${rsiPeriod} 阈值，系统默认用 70 作为过热上限。`,
+      defaulted: !upperMatch && !lowerMatch,
     });
   }
 
@@ -429,7 +512,9 @@ function parseRuleBasedStrategyIntent(prompt: string): StrategyIntent[] {
     });
   }
 
-  if (/还没涨太多|没涨太多|涨幅约束|不要过热|不过热|不高于|小于.*涨幅/.test(normalized)) {
+  const hasStrengthUpperBound = /还没涨太多|没涨太多|涨幅约束|(?:涨幅|强弱)[^，,。；;]{0,8}(?:不高于|小于|低于)/.test(normalized);
+  const hasGenericOverheat = /不要过热|不过热/.test(normalized) && !/rsi\s*(?:6|14)?/i.test(normalized);
+  if (hasStrengthUpperBound || hasGenericOverheat) {
     const threshold = extractNumber(normalized, [/(?:涨幅|强弱).{0,12}?(?:小于|不高于|<=|低于)\s*(\d+(?:\.\d+)?)%/], 20);
     push({
       intentType: 'momentum_strength',
@@ -543,9 +628,13 @@ export function compileIntentToTechnicalSpec(params: CompileIntentParams): Techn
         minSampleCount = Math.max(minSampleCount, 250);
       }
     }
-    if (item.intentType === 'volume_expansion') sortField = 'amount_ratio_20d';
+    if (item.intentType === 'volume_expansion') {
+      sortField = item.mappedFields.includes('volume_ratio_20d') ? 'volume_ratio_20d' : 'amount_ratio_20d';
+    }
     if (item.intentType === 'ma_slope') sortField = item.mappedFields.includes('ma60_slope_20d_pct') ? 'ma60_slope_20d_pct' : 'ma20_slope_5d_pct';
-    if (item.intentType === 'momentum_strength') sortField = 'strength_20d_pct';
+    if (item.intentType === 'momentum_strength' && item.mappedFields.includes('strength_20d_pct')) {
+      sortField = 'strength_20d_pct';
+    }
     if (item.intentType === 'price_position') sortField = 'close_position_pct';
   }
 

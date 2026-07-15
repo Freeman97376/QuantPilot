@@ -111,7 +111,7 @@
 
 股票池和覆盖明细页面应优先走服务端分页，避免一次加载 5000+ 标的。K 线详情只在点击行后按 symbol 请求。覆盖明细首屏使用 `page_size=100`，摘要来自 `quant.market_data_sync_state`，不要在线聚合全量 `stock_bars`。默认股票池、覆盖率、筛选器和 ClickHouse 同步只处理 active 成员；诊断全量历史池时显式传 `include_inactive=true`。
 
-`/api/quant/smart-strategy` 是 Next.js 端的受控编译入口，支持 `parse-intent`、`compile`、`draft`、`run` 四个 action：`parse-intent` 只返回系统理解到的 `StrategyIntent[]`，`compile` 将意图数组编译为 `TechnicalScreenerSpec`，`draft` 兼容旧流程并内部执行两阶段链路，`run` 再调用 market-data 技术筛选。资金流、主力、大单、盘口等未接入真实字段时必须返回未支持，不应映射为成交额。
+`/api/quant/smart-strategy` 是 Next.js 端的受控编译入口，支持 `parse-intent`、`compile`、`draft`、`run`、`prepare-analysis` 五个 action：`parse-intent` 只返回系统理解到的 `StrategyIntent[]`，`compile` 将意图数组编译为 `TechnicalScreenerSpec`，`draft` 兼容一键流程并内部执行两阶段链路，`run` 再调用 market-data 技术筛选，`prepare-analysis` 只允许对当前日线命中候选按需准备分钟数据。未配置 DeepSeek 或远端解析失败时，`draft` 会明确标注并降级到本地确定性解析；资金流、主力、大单、盘口等未接入真实字段时必须返回未支持，不应映射为成交额，也不得自动执行只有风控默认项的草案。
 
 ### 外部行情和补数
 

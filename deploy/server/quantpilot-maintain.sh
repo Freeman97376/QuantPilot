@@ -91,19 +91,38 @@ compose() {
     "$@"
 }
 
-wait_for_container_health() {
-  local container=$1
+wait_for_compose_service_health() {
+  local service=$1
   local state=""
   local attempt
   for attempt in {1..45}; do
-    state="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${container}" 2>/dev/null || true)"
-    if [[ ${state} == healthy || ${state} == running ]]; then
-      log "${container}: ${state}"
-      return 0
-    fi
+    case "${service}" in
+      timescaledb)
+        if compose exec -T timescaledb \
+          pg_isready \
+          -U "${POSTGRES_USER:-quantpilot}" \
+          -d "${POSTGRES_DB:-quantpilot}" >/dev/null 2>&1; then
+          log "timescaledb: accepting connections"
+          return 0
+        fi
+        state="not accepting connections"
+        ;;
+      redis)
+        state="$(compose exec -T redis redis-cli --raw ping 2>/dev/null || true)"
+        state="${state//$'\r'/}"
+        if [[ ${state} == PONG ]]; then
+          log "redis: PONG"
+          return 0
+        fi
+        ;;
+      *)
+        die "Unknown Compose health-check service: ${service}"
+        ;;
+    esac
     sleep 2
   done
-  die "${container} did not become healthy; last state: ${state:-missing}"
+  compose ps "${service}" || true
+  die "${service} did not become ready; last result: ${state:-no response}"
 }
 
 wait_for_http() {
@@ -127,6 +146,23 @@ check_worktree() {
     printf '%s\n' "${dirty}"
     die "Server worktree is not clean. Commit, move, or remove these files before updating."
   }
+}
+
+reexec_updated_library_script() {
+  local source_script="${APP_DIR}/deploy/server/quantpilot-maintain.sh"
+  local target_script="/usr/local/sbin/quantpilot-maintain"
+  local temporary_target="/usr/local/sbin/.quantpilot-maintain.new"
+  local current_script
+  current_script="$(readlink -f "$0")"
+  [[ ${current_script} == "${target_script}" ]] || return 0
+  cmp -s "${source_script}" "${target_script}" && return 0
+
+  log "A newer maintenance script was pulled; installing it before continuing..."
+  sudo install -m 0755 "${source_script}" "${temporary_target}"
+  sudo mv -f "${temporary_target}" "${target_script}"
+  flock -u 9
+  exec 9>&-
+  exec "${target_script}" update
 }
 
 install_runtime_units() {
@@ -174,17 +210,20 @@ pull_build_and_migrate() {
   git -C "${APP_DIR}" fetch --prune origin "${BRANCH}"
   git -C "${APP_DIR}" pull --ff-only origin "${BRANCH}"
   log "Checked out $(git -C "${APP_DIR}" log -1 --oneline --decorate)"
+  reexec_updated_library_script
 
   load_environment
 
   log "Starting/updating TimescaleDB and Redis..."
   compose up -d timescaledb redis
-  wait_for_container_health quantpilot-timescaledb
-  wait_for_container_health quantpilot-redis
+  wait_for_compose_service_health timescaledb
+  wait_for_compose_service_health redis
 
   log "Installing Node dependencies and generating Prisma client..."
   cd "${APP_DIR}"
-  QUANTPILOT_DEPLOYMENT=server npm ci
+  # Production builds still require the repository's build-time devDependencies
+  # (PostCSS, Tailwind, TypeScript and Prisma), even though NODE_ENV is production.
+  QUANTPILOT_DEPLOYMENT=server npm ci --include=dev
   npx --no-install prisma generate
 
   log "Installing market-data dependencies..."
@@ -227,8 +266,8 @@ run_checks() {
   log "Git revision: $(git -C "${APP_DIR}" log -1 --oneline --decorate)"
   log "Checking Docker infrastructure..."
   compose ps
-  wait_for_container_health quantpilot-timescaledb
-  wait_for_container_health quantpilot-redis
+  wait_for_compose_service_health timescaledb
+  wait_for_compose_service_health redis
 
   log "Checking systemd services..."
   systemctl is-active --quiet "${MARKET_SERVICE}" || die "${MARKET_SERVICE} is not active."

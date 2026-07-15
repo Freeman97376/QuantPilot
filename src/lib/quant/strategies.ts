@@ -1806,6 +1806,13 @@ export async function getStrategyDashboardData(): Promise<StrategyDashboardData>
   };
 }
 
+export async function getSmartStrategyPageData(): Promise<Pick<StrategyDashboardData, 'generatedAt' | 'research'>> {
+  return {
+    generatedAt: new Date().toISOString(),
+    research: await getStrategyResearchState(),
+  };
+}
+
 export function buildStrategyPrompt(templateId: string, symbol?: string) {
   const template = STRATEGY_TEMPLATES.find(item => item.id === templateId) ?? STRATEGY_TEMPLATES[0];
   const target = symbol?.trim() || template.defaultSymbols[0];
