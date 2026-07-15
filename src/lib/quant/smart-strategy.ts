@@ -1,4 +1,5 @@
 import type {
+  StrategyDataProfileId,
   StrategyIntent,
   TechnicalScreenerDraft,
 } from '@/lib/quant/strategy-types';
@@ -17,6 +18,7 @@ const TECHNICAL_SCREENER_LLM_SYSTEM_PROMPT = `You are QuantPilot's A-share daily
 Return only JSON. Do not return SQL, code, markdown, investment advice, or direct buy/sell instructions.
 The JSON must use this shape:
 {
+  "dataProfile": "daily_eod" | "daily_live_5m" | "minute1_entry" | "minute1_momentum" | "minute1_pattern" | "minute5_confirm" | "minute_backtest",
   "intents": [
     {
       "intentType": "trend_alignment" | "ma_slope" | "volume_expansion" | "candlestick_shape" | "momentum_strength" | "risk_filter" | "price_position",
@@ -73,7 +75,39 @@ type StrategyIntentParseResult = {
   fetchedAt: string;
   warnings: string[];
   llmSystemPrompt: string;
+  recommendedDataProfile: StrategyDataProfileId;
 };
+
+const STRATEGY_DATA_PROFILES = new Set<StrategyDataProfileId>([
+  'daily_eod',
+  'daily_live_5m',
+  'minute1_entry',
+  'minute1_momentum',
+  'minute1_pattern',
+  'minute5_confirm',
+  'minute_backtest',
+]);
+
+function inferStrategyDataProfile(prompt: string): StrategyDataProfileId {
+  const compact = prompt.replace(/\s+/g, '');
+  if (/分钟.{0,8}(回测|复盘)|回测.{0,8}分钟/.test(compact)) return 'minute_backtest';
+  if (/5分钟|五分钟/.test(compact)) return 'minute5_confirm';
+  if (/(1分钟|一分钟).{0,12}(形态|走势|结构)|(形态|走势|结构).{0,12}(1分钟|一分钟)/.test(compact)) {
+    return 'minute1_pattern';
+  }
+  if (/(1分钟|一分钟).{0,12}(动量|强弱)|(动量|强弱).{0,12}(1分钟|一分钟)/.test(compact)) {
+    return 'minute1_momentum';
+  }
+  if (/1分钟|一分钟|入场|买点/.test(compact)) return 'minute1_entry';
+  if (/盘中|实时|当日放量|动态日K/.test(compact)) return 'daily_live_5m';
+  return 'daily_eod';
+}
+
+function parseDataProfile(value: unknown, prompt: string): StrategyDataProfileId {
+  return typeof value === 'string' && STRATEGY_DATA_PROFILES.has(value as StrategyDataProfileId)
+    ? value as StrategyDataProfileId
+    : inferStrategyDataProfile(prompt);
+}
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -142,6 +176,7 @@ export async function buildDeepSeekStrategyIntents(
         'DEEPSEEK_API_KEY is not configured; QuantPilot used the deterministic intent parser for this draft.',
       ],
       llmSystemPrompt: TECHNICAL_SCREENER_LLM_SYSTEM_PROMPT,
+      recommendedDataProfile: inferStrategyDataProfile(prompt),
     };
   }
 
@@ -193,6 +228,7 @@ export async function buildDeepSeekStrategyIntents(
         'DeepSeek only parsed intent; QuantPilot service code compiled the final whitelist strategy JSON.',
       ],
       llmSystemPrompt: TECHNICAL_SCREENER_LLM_SYSTEM_PROMPT,
+      recommendedDataProfile: parseDataProfile(parsed.dataProfile, prompt),
     };
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
@@ -221,6 +257,7 @@ export function compileStrategyIntentsDraft(params: {
   return {
     ...draft,
     llmSystemPrompt: TECHNICAL_SCREENER_LLM_SYSTEM_PROMPT,
+    recommendedDataProfile: inferStrategyDataProfile(params.prompt),
   };
 }
 
@@ -242,5 +279,6 @@ export async function buildDeepSeekTechnicalScreenerDraft(
     fetchedAt: parsed.fetchedAt,
     warnings: [...parsed.warnings, ...draft.warnings],
     llmSystemPrompt: parsed.llmSystemPrompt,
+    recommendedDataProfile: parsed.recommendedDataProfile,
   };
 }

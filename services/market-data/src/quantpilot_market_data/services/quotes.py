@@ -94,7 +94,7 @@ async def get_history_quote(
     refresh: bool,
     ttl_seconds: int,
 ) -> KlineResponse:
-    normalized_limit = max(1, min(limit, 1000))
+    normalized_limit = max(1, min(limit, 5000 if is_intraday_period(period) else 1000))
     if is_intraday_period(period):
         return await get_intraday_history_quote(
             client,

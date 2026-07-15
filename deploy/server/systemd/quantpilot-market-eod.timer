@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh QuantPilot full-market end-of-day snapshots
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 15:20:00 Asia/Shanghai
+Persistent=true
+AccuracySec=30s
+Unit=quantpilot-market-refresh@eod.service
+
+[Install]
+WantedBy=timers.target
+

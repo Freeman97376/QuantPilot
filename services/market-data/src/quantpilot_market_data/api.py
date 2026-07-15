@@ -24,6 +24,7 @@ from quantpilot_market_data.models import (
 from quantpilot_market_data.providers.akshare import AkShareClient, AkShareError
 from quantpilot_market_data.providers.baostock import BaoStockClient, BaoStockError
 from quantpilot_market_data.providers.eastmoney import EastMoneyClient, EastMoneyError
+from quantpilot_market_data.providers.tushare import TushareClient
 from quantpilot_market_data.repositories.ingestion import (
     create_ingestion_job,
     finish_ingestion_job,
@@ -48,6 +49,7 @@ from quantpilot_market_data.routers.provider_candidates import (
 from quantpilot_market_data.routers.quotes import create_quotes_router
 from quantpilot_market_data.routers.registry import create_registry_router
 from quantpilot_market_data.routers.research import create_research_router
+from quantpilot_market_data.routers.strategy_refresh import create_strategy_refresh_router
 from quantpilot_market_data.services.ingestion_support import (
     baostock_required_fields,
     fetch_akshare_kline_for_ingestion,
@@ -86,6 +88,7 @@ def create_app() -> FastAPI:
     baostock_client = BaoStockClient()
     cache = MarketDataCache()
     intraday_redis_cache = RedisJsonCache()
+    tushare_client = TushareClient()
     auto_fill_tasks: set[asyncio.Task[None]] = set()
 
     app.include_router(analytics_router)
@@ -129,6 +132,15 @@ def create_app() -> FastAPI:
             intraday_redis_cache=intraday_redis_cache,
             symbol_cache_ttl_seconds=SYMBOL_CACHE_TTL_SECONDS,
             quote_cache_ttl_seconds=QUOTE_CACHE_TTL_SECONDS,
+            kline_cache_ttl_seconds=KLINE_CACHE_TTL_SECONDS,
+        )
+    )
+    app.include_router(
+        create_strategy_refresh_router(
+            client=client,
+            cache=cache,
+            redis_cache=intraday_redis_cache,
+            tushare_client=tushare_client,
             kline_cache_ttl_seconds=KLINE_CACHE_TTL_SECONDS,
         )
     )

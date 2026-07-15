@@ -134,9 +134,10 @@ git pull --ff-only
 QUANTPILOT_DEPLOYMENT=server npm ci
 
 cd /opt/quantpilot/services/market-data
-uv sync --frozen
+uv sync --frozen --extra baostock --extra akshare
 cd /opt/quantpilot
 
+npm run db:init
 npm run build:server
 sudo systemctl restart quantpilot-market-data quantpilot-web
 sudo systemctl --no-pager --full status quantpilot-market-data quantpilot-web
@@ -144,3 +145,7 @@ curl -I http://127.0.0.1:3000/smartstock
 ```
 
 Do not run `docker compose down -v` during updates; `-v` removes database volumes.
+
+The tiered daily/active/minute refresh timers are installed separately. After upgrading to
+the tiered strategy-data release, follow [tiered-market-data-deployment.md](./tiered-market-data-deployment.md)
+to install or refresh those systemd units.

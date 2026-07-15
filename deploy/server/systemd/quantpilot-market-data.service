@@ -11,7 +11,7 @@ WorkingDirectory=/opt/quantpilot/services/market-data
 EnvironmentFile=/opt/quantpilot/.env.production
 Environment=HOME=/home/ubuntu
 Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin
-ExecStart=/usr/bin/env uv run --frozen quantpilot-market-api
+ExecStart=/usr/bin/env uv run --frozen --no-sync quantpilot-market-api
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30

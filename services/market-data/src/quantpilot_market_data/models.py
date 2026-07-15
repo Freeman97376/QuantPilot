@@ -884,6 +884,74 @@ class AShareScreenerResponse(BaseModel):
         return self
 
 
+StrategyDataProfileId = Literal[
+    "daily_eod",
+    "daily_live_5m",
+    "minute1_entry",
+    "minute1_momentum",
+    "minute1_pattern",
+    "minute5_confirm",
+    "minute_backtest",
+]
+
+
+class StrategyDataProfileInfo(BaseModel):
+    id: StrategyDataProfileId
+    label: str
+    description: str
+    period: KlinePeriod
+    window_bars: int
+    max_staleness_seconds: int
+    max_symbols: int
+    provider_order: list[str]
+    storage: Literal["timescaledb", "timescaledb-daily", "redis", "timescaledb-minute"]
+    paid_only: bool = False
+    retention_days: int | None = None
+
+
+class StrategyRefreshRequest(BaseModel):
+    profile: StrategyDataProfileId
+    symbols: list[str] | None = Field(default=None, min_length=1, max_length=300)
+    universe_id: str | None = None
+    force: bool = False
+
+
+class StrategyRefreshItem(BaseModel):
+    symbol: str
+    name: str | None = None
+    status: Literal["ready", "refreshed", "degraded", "unavailable"]
+    period: KlinePeriod
+    requested_bars: int
+    returned_bars: int = 0
+    source: str | None = None
+    storage: str
+    as_of: datetime | str | None = None
+    fetched_at: datetime | None = None
+    cache_status: str = "disabled"
+    stale: bool = False
+    age_seconds: int | None = None
+    missing_fields: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    error: str | None = None
+    indicators: dict[str, Any] = Field(default_factory=dict)
+
+
+class StrategyRefreshResponse(BaseModel):
+    status: Literal["ready", "refreshed", "partial", "unavailable"]
+    profile: StrategyDataProfileInfo
+    job_id: str
+    universe_id: str | None = None
+    items: list[StrategyRefreshItem]
+    fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    warnings: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def fill_contract_fields(self) -> Self:
+        if not self.items:
+            self.warnings = list(dict.fromkeys([*self.warnings, "没有可处理的标的。"]))
+        return self
+
+
 class TechnicalScreenerResponse(BaseModel):
     universe_id: str
     trade_date: date | None = None

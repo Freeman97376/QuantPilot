@@ -1,0 +1,12 @@
+[Unit]
+Description=Repair missing QuantPilot daily bars after close
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 18:00:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1min
+Unit=quantpilot-market-refresh@repair.service
+
+[Install]
+WantedBy=timers.target
+

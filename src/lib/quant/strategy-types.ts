@@ -254,6 +254,14 @@ export interface StrategyScreenerResponse {
 
 export type TechnicalScreenerOperator = 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'between';
 export type TechnicalScreenerSortDirection = 'asc' | 'desc';
+export type StrategyDataProfileId =
+  | 'daily_eod'
+  | 'daily_live_5m'
+  | 'minute1_entry'
+  | 'minute1_momentum'
+  | 'minute1_pattern'
+  | 'minute5_confirm'
+  | 'minute_backtest';
 
 export interface TechnicalScreenerCondition {
   field: string;
@@ -324,6 +332,7 @@ export interface TechnicalScreenerDraft {
   intentExplanations?: string[];
   unsupportedTerms?: string[];
   clarificationNeeded?: boolean;
+  recommendedDataProfile?: StrategyDataProfileId;
 }
 
 export interface TechnicalScreenerResponse {
@@ -339,6 +348,50 @@ export interface TechnicalScreenerResponse {
   source: string;
   notes: string[];
   fetchedAt: string;
+}
+
+export interface StrategyDataProfileInfo {
+  id: StrategyDataProfileId;
+  label: string;
+  description: string;
+  period: string;
+  windowBars: number;
+  maxStalenessSeconds: number;
+  maxSymbols: number;
+  providerOrder: string[];
+  storage: 'timescaledb' | 'timescaledb-daily' | 'redis' | 'timescaledb-minute';
+  paidOnly: boolean;
+  retentionDays?: number | null;
+}
+
+export interface StrategyRefreshItem {
+  symbol: string;
+  name?: string | null;
+  status: 'ready' | 'refreshed' | 'degraded' | 'unavailable';
+  period: string;
+  requestedBars: number;
+  returnedBars: number;
+  source?: string | null;
+  storage: string;
+  asOf?: string | null;
+  fetchedAt?: string | null;
+  cacheStatus: string;
+  stale: boolean;
+  ageSeconds?: number | null;
+  missingFields: string[];
+  warnings: string[];
+  error?: string | null;
+  indicators: Record<string, number | string | boolean | null>;
+}
+
+export interface StrategyRefreshResponse {
+  status: 'ready' | 'refreshed' | 'partial' | 'unavailable';
+  profile: StrategyDataProfileInfo;
+  jobId: string;
+  universeId?: string | null;
+  items: StrategyRefreshItem[];
+  fetchedAt: string;
+  warnings: string[];
 }
 
 export interface StrategyDataCoverageItem {

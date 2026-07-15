@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh QuantPilot active-300 dynamic daily snapshots every five minutes
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* *:0/5:00
+AccuracySec=15s
+Unit=quantpilot-market-refresh@active.service
+
+[Install]
+WantedBy=timers.target
+

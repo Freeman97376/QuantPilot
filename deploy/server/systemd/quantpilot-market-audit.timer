@@ -1,0 +1,11 @@
+[Unit]
+Description=Audit QuantPilot universes, coverage, retention, and disk usage weekly
+
+[Timer]
+OnCalendar=Sun *-*-* 03:00:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=15min
+Unit=quantpilot-market-refresh@audit.service
+
+[Install]
+WantedBy=timers.target

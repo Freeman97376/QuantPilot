@@ -163,6 +163,31 @@ def test_technical_screener_rejects_unknown_fields() -> None:
         _ensure_technical_field("kdj_k")
 
 
+def test_technical_screener_does_not_treat_missing_market_fields_as_zero() -> None:
+    row = {
+        "latest_amount": None,
+        "latest_turnover": None,
+        "avg_amount_20d": Decimal("1000000"),
+    }
+
+    assert not _technical_condition_passes(
+        TechnicalScreenerCondition(field="amount", operator="gte", value=Decimal("0")),
+        row,
+    )
+    assert not _technical_condition_passes(
+        TechnicalScreenerCondition(field="turnover", operator="gte", value=Decimal("0")),
+        row,
+    )
+    assert not _technical_condition_passes(
+        TechnicalScreenerCondition(
+            field="amount_ratio_20d",
+            operator="gte",
+            value=Decimal("0"),
+        ),
+        row,
+    )
+
+
 def test_technical_screener_row_enrichment_uses_shared_calculations() -> None:
     row = {"bar_history": [bar.model_dump(mode="json") for bar in make_bars(260)]}
 

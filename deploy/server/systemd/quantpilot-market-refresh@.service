@@ -1,0 +1,16 @@
+[Unit]
+Description=QuantPilot tiered market-data job (%i)
+Requires=quantpilot-market-data.service
+After=network-online.target quantpilot-market-data.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/quantpilot/services/market-data
+EnvironmentFile=/opt/quantpilot/.env.production
+Environment=HOME=/home/ubuntu
+Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin
+ExecStart=/usr/bin/flock -n /run/lock/quantpilot-market-%i.lock /usr/bin/env uv run --frozen --no-sync quantpilot-market-scheduler %i
+TimeoutStartSec=6h
+UMask=0027

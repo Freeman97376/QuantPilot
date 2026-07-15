@@ -28,6 +28,7 @@ tushare = [
 
 [project.scripts]
 quantpilot-market-api = "quantpilot_market_data.cli:main"
+quantpilot-market-scheduler = "quantpilot_market_data.scheduler:main"
 
 [dependency-groups]
 dev = [

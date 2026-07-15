@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from quantpilot_market_data.clickhouse import is_clickhouse_enabled
@@ -74,6 +75,45 @@ def build_data_providers(ttls: ProviderRegistryTtls) -> list[DataProviderInfo]:
             limitations=[
                 "分时数据用于盘中看盘和即时分析，不参与长期历史回测入库。",
                 "Redis 不可用时会降级为直连东方财富，返回数据但不保留临时缓存。",
+            ],
+        ),
+        DataProviderInfo(
+            id="quantpilot-tiered-strategy-refresh",
+            name="QuantPilot 分层按需行情",
+            category="strategy-data",
+            status="available",
+            description=(
+                "本地日线、活跃300动态日K和候选股真实分钟K的分层刷新编排；"
+                "仅在数据缺失、过期或用户点击分钟分析时访问外部数据源。"
+            ),
+            endpoints=[
+                "/api/v1/ingestion/strategy-profiles",
+                "/api/v1/ingestion/strategy-refresh",
+                "/api/v1/ingestion/active-pool/rebuild",
+                "/api/v1/ingestion/strategy-audit",
+            ],
+            cache_ttl_seconds=90,
+            limitations=[
+                "daily_live_5m 是动态日K快照，不是5分钟K线。",
+                "分钟源失败时显式返回 degraded/unavailable，不会用日K替代。",
+                "分钟分析单次最多20只，默认只写Redis。",
+            ],
+        ),
+        DataProviderInfo(
+            id="tushare-paid-minute",
+            name="Tushare 付费分钟数据",
+            category="paid-provider",
+            status="available" if os.getenv("TUSHARE_TOKEN", "").strip() else "planned",
+            description=(
+                "可选的日线、实时分钟和历史分钟适配器；Token 只从服务器环境读取。"
+            ),
+            endpoints=["/api/v1/ingestion/strategy-refresh"],
+            cache_ttl_seconds=None,
+            limitations=[
+                "需要单独购买相应 Tushare 权限并安装 tushare extra。",
+                "实时分钟仅在免费源失败且 QUANTPILOT_TUSHARE_REALTIME_MINUTE_ENABLED=1 时兜底。",
+                "分钟回测还需要设置 QUANTPILOT_MINUTE_BACKTEST_ENABLED=1。",
+                "历史分钟默认保留90天；磁盘使用率达到80%时暂停新持久化任务。",
             ],
         ),
         DataProviderInfo(

@@ -14,8 +14,11 @@ import {
   LineChart,
   Loader2,
   Play,
+  RefreshCw,
   Search,
   Sparkles,
+  Timer,
+  WifiOff,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -32,7 +35,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import type {
   StrategyDashboardData,
+  StrategyDataProfileId,
   StrategyIntent,
+  StrategyRefreshResponse,
   StrategyScreenerCandidate,
   StrategyUniverse,
   StrategyUniverseMember,
@@ -62,6 +67,27 @@ type IndicatorGroup = {
   fields: string[];
   examples: string[];
 };
+
+type MinuteProfileId = Extract<
+  StrategyDataProfileId,
+  "minute1_entry" | "minute1_momentum" | "minute1_pattern" | "minute5_confirm" | "minute_backtest"
+>;
+
+const MINUTE_PROFILE_OPTIONS: Array<{
+  id: MinuteProfileId;
+  label: string;
+  detail: string;
+}> = [
+  { id: "minute1_entry", label: "1分钟入场", detail: "当天约241根" },
+  { id: "minute1_momentum", label: "1分钟动量", detail: "近2个交易日约480根" },
+  { id: "minute1_pattern", label: "1分钟形态", detail: "最多1000根" },
+  { id: "minute5_confirm", label: "5分钟确认", detail: "近5个交易日约240根" },
+  { id: "minute_backtest", label: "分钟回测", detail: "付费权限，最多4800根" },
+];
+
+function isMinuteProfile(value: StrategyDataProfileId | undefined): value is MinuteProfileId {
+  return MINUTE_PROFILE_OPTIONS.some((option) => option.id === value);
+}
 
 const QUICK_TEMPLATES = [
   {
@@ -334,6 +360,10 @@ export function SmartStrategyWorkbench({ data }: Props) {
   const [activeGroupId, setActiveGroupId] = useState<IndicatorGroupId>("trend");
   const [showJson, setShowJson] = useState(true);
   const [copied, setCopied] = useState(false);
+  const [minuteProfile, setMinuteProfile] = useState<MinuteProfileId>("minute1_entry");
+  const [minuteResult, setMinuteResult] = useState<StrategyRefreshResponse | null>(null);
+  const [isMinuteLoading, setIsMinuteLoading] = useState(false);
+  const [minuteError, setMinuteError] = useState<string | null>(null);
 
   const parsedLimit = useMemo(() => {
     const value = Number(limit);
@@ -361,6 +391,9 @@ export function SmartStrategyWorkbench({ data }: Props) {
     result?.candidates[0] ??
     null;
   const selectedMember = selectedCandidate ? memberFromCandidate(selectedCandidate) : null;
+  const selectedMinuteItem = minuteResult?.items.find((item) => item.symbol === selectedCandidate?.symbol)
+    ?? minuteResult?.items[0]
+    ?? null;
 
   useEffect(() => {
     if (result?.candidates.length) {
@@ -369,6 +402,17 @@ export function SmartStrategyWorkbench({ data }: Props) {
       setSelectedSymbol(null);
     }
   }, [result]);
+
+  useEffect(() => {
+    if (isMinuteProfile(draft?.recommendedDataProfile)) {
+      setMinuteProfile(draft.recommendedDataProfile);
+    }
+  }, [draft?.recommendedDataProfile]);
+
+  useEffect(() => {
+    setMinuteResult(null);
+    setMinuteError(null);
+  }, [selectedSymbol]);
 
   const applyPrompt = (value: string) => {
     setPrompt(value);
@@ -428,6 +472,36 @@ export function SmartStrategyWorkbench({ data }: Props) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsRunning(false);
+    }
+  };
+
+  const runMinuteAnalysis = async () => {
+    if (!selectedCandidate || !draft || !result) return;
+    setIsMinuteLoading(true);
+    setMinuteError(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/quant/smart-strategy`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "prepare-analysis",
+          universeId,
+          symbols: [selectedCandidate.symbol],
+          profile: minuteProfile,
+          tradeDate: result.tradeDate,
+          limit: parsedLimit,
+          spec: draft.spec,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.message || payload.error || "分钟行情准备失败");
+      }
+      setMinuteResult(payload.data as StrategyRefreshResponse);
+    } catch (err) {
+      setMinuteError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsMinuteLoading(false);
     }
   };
 
@@ -928,6 +1002,159 @@ export function SmartStrategyWorkbench({ data }: Props) {
                 <div className="rounded-md border border-slate-100 bg-slate-50 px-3 py-2">
                   <p className="text-xs text-slate-500">样本根数</p>
                   <p className="mt-1 text-lg font-semibold tabular-nums text-slate-950">{selectedCandidate.sampleCount}</p>
+                </div>
+              </div>
+              <div className="border-b border-slate-100 p-4">
+                <div className="rounded-md border border-slate-200 bg-slate-50">
+                  <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-3 py-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <Timer className="h-4 w-4 text-blue-600" />
+                        <p className="text-sm font-semibold text-slate-950">候选股分钟分析</p>
+                      </div>
+                      <p className="mt-1 text-xs leading-5 text-slate-500">
+                        日线筛选保持只读；只有点击后才按需拉取真实分钟K，单次最多20只。
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      <Badge variant="outline" className="border-emerald-200 bg-emerald-50 text-emerald-700">
+                        日线 · 本地
+                      </Badge>
+                      <Badge variant="outline" className="border-blue-200 bg-blue-50 text-blue-700">
+                        盘中5分钟更新 · 动态日K
+                      </Badge>
+                      <Badge variant="outline" className="border-indigo-200 bg-indigo-50 text-indigo-700">
+                        真实分钟K · 按需
+                      </Badge>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 p-3 lg:grid-cols-[minmax(180px,0.8fr)_minmax(190px,0.9fr)_auto] lg:items-end">
+                    <div>
+                      <p className="mb-1.5 text-[11px] font-medium text-slate-500">分析档位</p>
+                      <Select
+                        value={minuteProfile}
+                        onValueChange={(value) => {
+                          setMinuteProfile(value as MinuteProfileId);
+                          setMinuteResult(null);
+                          setMinuteError(null);
+                        }}
+                      >
+                        <SelectTrigger className="h-9 bg-white text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {MINUTE_PROFILE_OPTIONS.map((option) => (
+                            <SelectItem key={option.id} value={option.id}>
+                              {option.label} · {option.detail}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="rounded-md border border-slate-200 bg-white px-3 py-2">
+                      <p className="text-[11px] text-slate-500">DeepSeek 建议档位</p>
+                      <p className="mt-1 text-xs font-semibold text-slate-800">
+                        {MINUTE_PROFILE_OPTIONS.find((option) => option.id === draft?.recommendedDataProfile)?.label
+                          ?? (draft?.recommendedDataProfile === "daily_live_5m" ? "盘中动态日K" : "日线收盘策略")}
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      onClick={runMinuteAnalysis}
+                      disabled={isMinuteLoading}
+                      className="h-9"
+                    >
+                      {isMinuteLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                      {isMinuteLoading ? "正在准备" : "拉取并分析"}
+                    </Button>
+                  </div>
+
+                  {minuteError ? (
+                    <div className="mx-3 mb-3 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs leading-5 text-red-700">
+                      <WifiOff className="mt-0.5 h-4 w-4 shrink-0" />
+                      <div>
+                        <p className="font-semibold">分钟源不可用，已保留日线筛选结果</p>
+                        <p>{minuteError}</p>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {selectedMinuteItem ? (
+                    <div className="mx-3 mb-3 rounded-md border border-slate-200 bg-white p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              selectedMinuteItem.status === "ready" || selectedMinuteItem.status === "refreshed"
+                                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                                : selectedMinuteItem.status === "degraded"
+                                  ? "border-amber-200 bg-amber-50 text-amber-700"
+                                  : "border-red-200 bg-red-50 text-red-700"
+                            )}
+                          >
+                            {selectedMinuteItem.status === "ready"
+                              ? "缓存可用"
+                              : selectedMinuteItem.status === "refreshed"
+                                ? "已刷新"
+                                : selectedMinuteItem.status === "degraded"
+                                  ? "过期缓存"
+                                  : "不可用"}
+                          </Badge>
+                          <span className="text-xs font-semibold text-slate-800">{minuteResult?.profile.label}</span>
+                          <span className="font-mono text-[11px] text-slate-400">
+                            {selectedMinuteItem.returnedBars}/{selectedMinuteItem.requestedBars} 根
+                          </span>
+                        </div>
+                        <span className="text-[11px] text-slate-500">
+                          {selectedMinuteItem.fetchedAt
+                            ? new Date(selectedMinuteItem.fetchedAt).toLocaleString("zh-CN", { hour12: false })
+                            : "尚未取得时间"}
+                        </span>
+                      </div>
+                      <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                        <div className="rounded border border-slate-100 bg-slate-50 px-2.5 py-2">
+                          <p className="text-[11px] text-slate-500">数据源</p>
+                          <p className="mt-1 text-xs font-semibold text-slate-900">{selectedMinuteItem.source ?? "-"}</p>
+                        </div>
+                        <div className="rounded border border-slate-100 bg-slate-50 px-2.5 py-2">
+                          <p className="text-[11px] text-slate-500">缓存</p>
+                          <p className="mt-1 text-xs font-semibold text-slate-900">{selectedMinuteItem.cacheStatus}</p>
+                        </div>
+                        <div className="rounded border border-slate-100 bg-slate-50 px-2.5 py-2">
+                          <p className="text-[11px] text-slate-500">RSI14</p>
+                          <p className="mt-1 text-xs font-semibold tabular-nums text-slate-900">
+                            {formatNumberValue(
+                              typeof selectedMinuteItem.indicators.rsi14 === "number"
+                                ? selectedMinuteItem.indicators.rsi14
+                                : null,
+                              2
+                            )}
+                          </p>
+                        </div>
+                        <div className="rounded border border-slate-100 bg-slate-50 px-2.5 py-2">
+                          <p className="text-[11px] text-slate-500">MACD柱</p>
+                          <p className="mt-1 text-xs font-semibold tabular-nums text-slate-900">
+                            {formatNumberValue(
+                              typeof selectedMinuteItem.indicators.macd_hist === "number"
+                                ? selectedMinuteItem.indicators.macd_hist
+                                : null,
+                              4
+                            )}
+                          </p>
+                        </div>
+                      </div>
+                      {selectedMinuteItem.error ? (
+                        <p className="mt-2 text-xs leading-5 text-red-700">{selectedMinuteItem.error}</p>
+                      ) : null}
+                      {selectedMinuteItem.warnings.length ? (
+                        <p className="mt-2 text-xs leading-5 text-amber-700">
+                          {selectedMinuteItem.warnings.join("；")}
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               </div>
               <StockKlineDetail member={selectedMember} universe={selectedUniverse} />
