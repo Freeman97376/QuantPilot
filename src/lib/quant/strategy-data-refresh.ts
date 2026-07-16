@@ -1,4 +1,6 @@
+import crypto from 'node:crypto';
 import { getRuntimeDegradationConfig } from '@/lib/config/degradation';
+import { isDesktopRuntime } from '@/lib/runtime/mode';
 import type {
   StrategyDataProfileId,
   StrategyDataProfileInfo,
@@ -115,6 +117,7 @@ export async function refreshStrategyData(params: {
   universeId?: string;
   force?: boolean;
   timeoutMs?: number;
+  estimateId?: string;
 }): Promise<StrategyRefreshResponse> {
   if (!getRuntimeDegradationConfig().components.marketApi.enabled) {
     throw new Error('market API 已按降级配置停用');
@@ -123,12 +126,26 @@ export async function refreshStrategyData(params: {
   const timeoutMs = params.timeoutMs ?? 65_000;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
+    const symbols = params.symbols.map((symbol) => symbol.trim()).filter(Boolean).slice(0, 20);
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (isDesktopRuntime && params.profile.startsWith('minute')) {
+      const launchToken = process.env.QUANTPILOT_LAUNCH_TOKEN?.trim();
+      if (!params.estimateId || !launchToken) {
+        throw new Error('Desktop minute downloads require a confirmed estimate.');
+      }
+      const grantPayload = `${params.estimateId}\n${params.profile}\n${symbols.join(',')}`;
+      headers['X-QuantPilot-Estimate-Id'] = params.estimateId;
+      headers['X-QuantPilot-Analysis-Grant'] = crypto
+        .createHmac('sha256', launchToken)
+        .update(grantPayload)
+        .digest('hex');
+    }
     const response = await fetch(`${MARKET_API_BASE_URL}/api/v1/ingestion/strategy-refresh`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({
         profile: params.profile,
-        symbols: params.symbols.map((symbol) => symbol.trim()).filter(Boolean).slice(0, 20),
+        symbols,
         universe_id: params.universeId?.trim() || null,
         force: params.force ?? false,
       }),

@@ -1,23 +1,40 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 const http = require('http');
 const https = require('https');
 const net = require('net');
+const { autoUpdater } = require('electron-updater');
+const {
+  applyDesktopMigrations,
+  initializeDesktopDataDirectory,
+  sqliteUrl,
+} = require('./desktop-data');
+const { startSecretBroker } = require('./secret-store');
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 
 let mainWindow = null;
 let nextServerProcess = null;
+let sidecarProcess = null;
+let secretBroker = null;
 let productionUrl = null;
 let shuttingDown = false;
+let desktopData = null;
+const launchToken = crypto.randomBytes(32).toString('base64url');
 
 const rootDir = path.join(__dirname, '..');
-const standaloneDir = path.join(rootDir, '.next', 'standalone');
+const standaloneDir = app.isPackaged
+  ? path.join(process.resourcesPath, 'standalone')
+  : path.join(rootDir, '.next', 'standalone');
 const preloadPath = path.join(__dirname, 'preload.js');
 
-function waitForUrl(targetUrl, timeoutMs = 30_000, intervalMs = 200) {
+const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+app.setPath('userData', path.join(localAppData, 'QuantPilot'));
+
+function waitForUrl(targetUrl, timeoutMs = 30_000, intervalMs = 200, headers = {}) {
   const { protocol } = new URL(targetUrl);
   const requester = protocol === 'https:' ? https : http;
   const start = Date.now();
@@ -25,7 +42,7 @@ function waitForUrl(targetUrl, timeoutMs = 30_000, intervalMs = 200) {
   return new Promise((resolve, reject) => {
     const poll = () => {
       const request = requester
-        .get(targetUrl, (response) => {
+        .get(targetUrl, { headers }, (response) => {
           response.resume();
           if (response.statusCode && response.statusCode >= 200 && response.statusCode < 400) {
             resolve();
@@ -108,6 +125,24 @@ async function startProductionServer() {
     NODE_ENV: 'production',
     PORT: String(port),
     NEXT_TELEMETRY_DISABLED: '1',
+    ELECTRON_RUN_AS_NODE: '1',
+    NODE_PATH: app.isPackaged
+      ? [path.join(process.resourcesPath, 'app.asar', 'node_modules'), process.env.NODE_PATH]
+        .filter(Boolean)
+        .join(path.delimiter)
+      : process.env.NODE_PATH,
+    QUANTPILOT_RUNTIME_MODE: 'desktop',
+    QUANTPILOT_DEPLOYMENT: 'desktop',
+    DESKTOP_DATABASE_URL: sqliteUrl(desktopData.appDatabasePath),
+    QUANTPILOT_APP_DATA_DIR: desktopData.baseDir,
+    QUANTPILOT_WORKSPACES_DIR: desktopData.workspacesDir,
+    QUANTPILOT_MARKET_API_URL: process.env.QUANTPILOT_MARKET_API_URL,
+    QUANTPILOT_CLICKHOUSE_ENABLED: '0',
+    QUANTPILOT_OBSERVABILITY_ENABLED: '0',
+    QUANTPILOT_REDIS_CACHE_ENABLED: '0',
+    QUANTPILOT_SECRET_BROKER_URL: secretBroker.url,
+    QUANTPILOT_LAUNCH_TOKEN: launchToken,
+    QUANTPILOT_INSTALLATION_ID: desktopData.installationId,
   };
 
   nextServerProcess = spawn(process.execPath, [serverPath], {
@@ -133,12 +168,81 @@ async function startProductionServer() {
   return productionUrl;
 }
 
+function sidecarExecutable() {
+  if (isDev) {
+    return {
+      command: process.platform === 'win32' ? 'uv.exe' : 'uv',
+      args: ['run', '--project', path.join(rootDir, 'services', 'market-data'), 'quantpilot-market-api'],
+      cwd: rootDir,
+    };
+  }
+  const executable = process.platform === 'win32'
+    ? 'quantpilot-market-data.exe'
+    : 'quantpilot-market-data';
+  return {
+    command: path.join(process.resourcesPath, 'sidecar', executable),
+    args: [],
+    cwd: path.join(process.resourcesPath, 'sidecar'),
+  };
+}
+
+async function startMarketSidecar() {
+  const port = isDev ? 8000 : await findAvailablePort(8100);
+  if (isDev && !(await checkPortAvailability(port))) {
+    throw new Error('Desktop development requires local port 8000 for the market-data sidecar.');
+  }
+  const target = sidecarExecutable();
+  const healthUrl = `http://127.0.0.1:${port}/health`;
+  sidecarProcess = spawn(target.command, target.args, {
+    cwd: target.cwd,
+    windowsHide: true,
+    stdio: 'pipe',
+    env: {
+      ...process.env,
+      QUANTPILOT_RUNTIME_MODE: 'desktop',
+      QUANTPILOT_MARKET_HOST: '127.0.0.1',
+      QUANTPILOT_MARKET_PORT: String(port),
+      QUANTPILOT_STARTUP_TOKEN: launchToken,
+      QUANTPILOT_MARKET_DB_PATH: desktopData.marketDatabasePath,
+      QUANTPILOT_MARKET_CACHE_DIR: desktopData.cacheDir,
+      QUANTPILOT_APP_DATA_DIR: desktopData.baseDir,
+      QUANTPILOT_CLICKHOUSE_ENABLED: '0',
+      QUANTPILOT_OBSERVABILITY_ENABLED: '0',
+      QUANTPILOT_REDIS_CACHE_ENABLED: '0',
+    },
+  });
+  sidecarProcess.stdout.on('data', (chunk) => process.stdout.write(`[market-data] ${chunk}`));
+  sidecarProcess.stderr.on('data', (chunk) => process.stderr.write(`[market-data] ${chunk}`));
+  sidecarProcess.on('exit', (code, signal) => {
+    sidecarProcess = null;
+    if (!shuttingDown) {
+      const message = `The local market-data service stopped (code ${code ?? 'n/a'}, signal ${signal ?? 'n/a'}).`;
+      console.error(message);
+      dialog.showErrorBox('QuantPilot local service stopped', `${message}\n\nSee ${desktopData.logsDir} for diagnostics.`);
+    }
+  });
+  sidecarProcess.once('error', (error) => {
+    console.error('Failed to start market-data sidecar:', error);
+  });
+  await waitForUrl(healthUrl, 45_000, 250, {
+    'X-QuantPilot-Startup-Token': launchToken,
+  });
+  process.env.QUANTPILOT_MARKET_API_URL = `http://127.0.0.1:${port}`;
+}
+
 function stopProductionServer() {
   if (nextServerProcess && !nextServerProcess.killed) {
     nextServerProcess.kill('SIGTERM');
     nextServerProcess = null;
   }
   productionUrl = null;
+}
+
+function stopSidecar() {
+  if (sidecarProcess && !sidecarProcess.killed) {
+    sidecarProcess.kill('SIGTERM');
+  }
+  sidecarProcess = null;
 }
 
 async function createMainWindow() {
@@ -215,6 +319,12 @@ async function createMainWindow() {
 
 function registerIpcHandlers() {
   ipcMain.handle('ping', async () => 'pong');
+  ipcMain.handle('desktop-runtime-info', async () => ({
+    mode: 'desktop',
+    version: app.getVersion(),
+    installationId: desktopData?.installationId || null,
+    officialServerUrl: 'https://mantleofintelligence.com/smartstock',
+  }));
 }
 
 function setupSingleInstanceLock() {
@@ -247,6 +357,8 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   shuttingDown = true;
   stopProductionServer();
+  stopSidecar();
+  secretBroker?.server.close();
 });
 
 app.on('activate', () => {
@@ -261,9 +373,28 @@ app.on('activate', () => {
 if (setupSingleInstanceLock()) {
   app
     .whenReady()
-    .then(() => {
+    .then(async () => {
+      desktopData = initializeDesktopDataDirectory(app.getPath('userData'));
+      if (!isDev) {
+        applyDesktopMigrations(
+          desktopData,
+          path.join(process.resourcesPath, 'desktop-migrations')
+        );
+      }
+      secretBroker = await startSecretBroker({
+        baseDir: desktopData.baseDir,
+        launchToken,
+      });
       registerIpcHandlers();
-      return createMainWindow();
+      if (!process.env.QUANTPILOT_MARKET_API_URL) {
+        await startMarketSidecar();
+      }
+      await createMainWindow();
+      if (!isDev) {
+        autoUpdater.checkForUpdatesAndNotify().catch((error) => {
+          console.warn('Automatic update check failed:', error instanceof Error ? error.message : error);
+        });
+      }
     })
     .catch((error) => {
       console.error('❌ An error occurred while initializing the Electron app.');

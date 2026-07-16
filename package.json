@@ -1,13 +1,13 @@
 {
   "name": "quantpilot",
-  "version": "2.0.0",
+  "version": "2.1.0-alpha.1",
   "description": "Quant-focused AI workflow builder powered by Claude Code compatible runtimes",
   "private": true,
   "main": "index.js",
   "scripts": {
     "dev": "node scripts/dev/run-web.js",
     "dev:web": "node scripts/dev/run-web.js",
-    "dev:desktop": "node scripts/dev/run-desktop.js",
+    "dev:desktop": "npm run prisma:generate:desktop && node scripts/dev/run-desktop.js",
     "dev:electron": "npm run dev:desktop",
     "ensure:env": "node scripts/dev/setup-env.js",
     "clean:local": "node scripts/dev/cleanup-local-artifacts.js",
@@ -16,15 +16,17 @@
     "build": "node scripts/build/run-build.js",
     "build:server": "node scripts/build/run-server-build.js",
     "build:standalone": "node scripts/build/run-build.js --standalone",
-    "build:desktop": "npm run build:standalone && electron-builder",
+    "build:desktop": "node scripts/build/run-desktop-build.js",
     "styles:build": "node scripts/build/build-stable-css.js",
     "package:mac": "npm run build:standalone && electron-builder --mac",
-    "package:win": "npm run build:standalone && electron-builder --win",
+    "package:win": "npm run build:desktop",
     "package:linux": "npm run build:standalone && electron-builder --linux",
     "start": "next start",
     "lint": "eslint .",
     "type-check": "node scripts/checks/type-check.js",
-    "prisma:generate": "prisma generate",
+    "prisma:generate": "npm run prisma:generate:server",
+    "prisma:generate:server": "prisma generate --schema prisma/schema.prisma",
+    "prisma:generate:desktop": "prisma generate --schema prisma/schema.desktop.prisma",
     "prisma:push": "prisma db push",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
@@ -43,6 +45,9 @@
     "db:doctor": "node scripts/db/check-database.js",
     "db:sync-workspaces": "node scripts/db/sync-projects-from-workspaces.js",
     "db:migrate-platform-state": "node scripts/db/migrate-platform-state-to-postgres.js",
+    "desktop:accounts": "node scripts/admin/desktop-accounts.js",
+    "desktop:sidecar:build": "node scripts/desktop/build-sidecar.js",
+    "desktop:standalone:stage": "node scripts/desktop/stage-standalone.js",
     "setup": "npm install && prisma generate && npm run db:init",
     "check-cli": "node scripts/checks/check-claude-cli.js",
     "doctor": "node scripts/checks/doctor.js",
@@ -67,6 +72,7 @@
     "postinstall": "npm run ensure:env"
   },
   "dependencies": {
+    "@node-rs/argon2": "^2.0.2",
     "@anthropic-ai/claude-agent-sdk": "^0.3.153",
     "@prisma/client": "^6.19.3",
     "@radix-ui/react-alert-dialog": "^1.1.15",
@@ -77,6 +83,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "dotenv": "^17.4.2",
+    "electron-updater": "^6.7.3",
     "framer-motion": "^12.40.0",
     "lucide-react": "^1.16.0",
     "next": "^16.2.6",
@@ -119,11 +126,11 @@
     "no-code",
     "low-code"
   ],
-  "author": "tiammomo",
+  "author": "Freeman97376",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/tiammomo/QuantPilot.git"
+    "url": "https://github.com/Freeman97376/QuantPilot.git"
   },
   "build": {
     "appId": "com.quantpilot.desktop",
@@ -131,19 +138,20 @@
     "files": [
       "index.js",
       "electron/**/*",
-      ".next/standalone/**/*",
-      ".next/static/**/*",
-      "public/**/*",
       "package.json"
     ],
     "extraResources": [
       {
-        "from": ".next/static",
-        "to": ".next/static"
+        "from": ".desktop-build/standalone",
+        "to": "standalone"
       },
       {
-        "from": "public",
-        "to": "public"
+        "from": "services/market-data/dist/quantpilot-market-data",
+        "to": "sidecar"
+      },
+      {
+        "from": ".desktop-build/migrations",
+        "to": "desktop-migrations"
       }
     ],
     "asar": true,
@@ -159,6 +167,7 @@
       "category": "public.app-category.developer-tools"
     },
     "win": {
+      "signAndEditExecutable": false,
       "target": [
         {
           "target": "nsis",
@@ -167,6 +176,12 @@
           ]
         }
       ]
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "Freeman97376",
+      "repo": "QuantPilot",
+      "releaseType": "release"
     },
     "linux": {
       "target": [

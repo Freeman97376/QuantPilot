@@ -1,4 +1,10 @@
 import { prisma } from '@/lib/db/client';
+import { isDesktopRuntime } from '@/lib/runtime/mode';
+import {
+  deleteDesktopSecret,
+  getDesktopSecret,
+  putDesktopSecret,
+} from '@/lib/desktop/secret-broker';
 
 const SUPPORTED_PROVIDERS = ['github', 'supabase', 'vercel'] as const;
 export type ServiceProvider = (typeof SUPPORTED_PROVIDERS)[number];
@@ -30,7 +36,7 @@ function toResponse(model: {
     id: model.id,
     provider: model.provider as ServiceProvider,
     name: model.name,
-    token: model.token,
+    token: isDesktopRuntime ? null : model.token,
     created_at: model.createdAt.toISOString(),
     last_used: model.lastUsed ? model.lastUsed.toISOString() : null,
   };
@@ -47,15 +53,17 @@ export async function createServiceToken(
     throw new Error('Token cannot be empty');
   }
 
-  await prisma.serviceToken.deleteMany({
-    where: { provider },
-  });
+  const previous = await prisma.serviceToken.findFirst({ where: { provider } });
+  if (isDesktopRuntime && previous) await deleteDesktopSecret(previous.token);
+  await prisma.serviceToken.deleteMany({ where: { provider } });
+
+  const storedToken = isDesktopRuntime ? await putDesktopSecret(token.trim()) : token.trim();
 
   const stored = await prisma.serviceToken.create({
     data: {
       provider,
       name: name.trim() || `${provider.charAt(0).toUpperCase()}${provider.slice(1)} Token`,
-      token: token.trim(),
+      token: storedToken,
     },
   });
 
@@ -75,6 +83,8 @@ export async function getServiceToken(provider: string): Promise<ServiceTokenRec
 
 export async function deleteServiceToken(tokenId: string): Promise<boolean> {
   try {
+    const record = await prisma.serviceToken.findUnique({ where: { id: tokenId } });
+    if (isDesktopRuntime && record) await deleteDesktopSecret(record.token);
     await prisma.serviceToken.delete({
       where: { id: tokenId },
     });
@@ -95,7 +105,7 @@ export async function getPlainServiceToken(provider: string): Promise<string | n
     return null;
   }
 
-  return record.token;
+  return isDesktopRuntime ? getDesktopSecret(record.token) : record.token;
 }
 
 export async function touchServiceToken(provider: string): Promise<void> {

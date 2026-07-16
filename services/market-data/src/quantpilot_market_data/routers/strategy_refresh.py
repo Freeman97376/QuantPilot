@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import os
+from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from quantpilot_market_data.cache import MarketDataCache, RedisJsonCache
 from quantpilot_market_data.data_profiles import (
@@ -24,7 +28,27 @@ from quantpilot_market_data.repositories.strategy_data import (
     refresh_active_universe,
 )
 from quantpilot_market_data.repositories.universes import get_universe_fetch_targets
-from quantpilot_market_data.services.strategy_refresh import refresh_strategy_data
+from quantpilot_market_data.services.strategy_refresh import (
+    estimate_strategy_coverage,
+    refresh_strategy_data,
+)
+
+
+def valid_desktop_minute_grant(
+    *, profile: str, symbols: list[str], estimate_id: str, grant: str
+) -> bool:
+    launch_token = os.getenv("QUANTPILOT_STARTUP_TOKEN", "").strip()
+    if not launch_token or not estimate_id or not grant:
+        return False
+    try:
+        UUID(estimate_id)
+    except ValueError:
+        return False
+    payload = f"{estimate_id}\n{profile}\n{','.join(symbols)}"
+    expected = hmac.new(
+        launch_token.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, grant)
 
 
 def create_strategy_refresh_router(
@@ -48,6 +72,7 @@ def create_strategy_refresh_router(
     @router.post("/strategy-refresh", response_model=StrategyRefreshResponse)
     async def post_strategy_refresh(
         request: StrategyRefreshRequest,
+        http_request: Request,
     ) -> StrategyRefreshResponse:
         try:
             profile = get_strategy_data_profile(request.profile)
@@ -64,6 +89,20 @@ def create_strategy_refresh_router(
                 raise HTTPException(
                     status_code=400,
                     detail="分钟分析必须显式传入日线筛选结果中的候选 symbols，单次最多20只。",
+                )
+            if (
+                os.getenv("QUANTPILOT_RUNTIME_MODE", "server").strip().lower() == "desktop"
+                and request.profile.startswith("minute")
+                and not valid_desktop_minute_grant(
+                    profile=request.profile,
+                    symbols=symbols,
+                    estimate_id=http_request.headers.get("x-quantpilot-estimate-id", ""),
+                    grant=http_request.headers.get("x-quantpilot-analysis-grant", ""),
+                )
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Desktop minute downloads require a valid confirmed estimate.",
                 )
             profile_lock = profile_refresh_locks.setdefault(profile.id, asyncio.Lock())
             async with profile_lock:
@@ -84,6 +123,26 @@ def create_strategy_refresh_router(
             raise HTTPException(status_code=400, detail=str(error)) from error
         except DatabaseError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @router.post("/strategy-estimate")
+    async def post_strategy_estimate(request: StrategyRefreshRequest) -> dict[str, object]:
+        try:
+            profile = get_strategy_data_profile(request.profile)
+            symbols = list(request.symbols or [])
+            if not symbols or not request.profile.startswith("minute"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Minute estimates require explicit daily-screened symbols.",
+                )
+            return await estimate_strategy_coverage(
+                profile=profile,
+                symbols=symbols,
+                redis_cache=redis_cache,
+            )
+        except HTTPException:
+            raise
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @router.post("/active-pool/rebuild")
     async def rebuild_active_pool(

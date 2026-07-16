@@ -37,6 +37,49 @@ from quantpilot_market_data.services.quotes import (
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
 
+async def estimate_strategy_coverage(
+    *,
+    profile: StrategyDataProfile,
+    symbols: list[str],
+    redis_cache: RedisJsonCache,
+) -> dict[str, object]:
+    """Inspect local coverage without fetching or writing market data."""
+    normalized_symbols = list(
+        dict.fromkeys(symbol.strip().upper() for symbol in symbols if symbol.strip())
+    )
+    if len(normalized_symbols) > profile.max_symbols:
+        raise ValueError(
+            f"{profile.id} supports at most {profile.max_symbols} symbols per request."
+        )
+    items: list[dict[str, object]] = []
+    for symbol in normalized_symbols:
+        covered_bars = 0
+        if profile.id != "minute_backtest":
+            cache_key = intraday_redis_cache_key(
+                symbol=symbol,
+                period=profile.period,
+                cache_date=intraday_cache_date(),
+                limit=profile.window_bars,
+            )
+            payload = await redis_cache.read(cache_key)
+            if payload:
+                bars = payload.get("bars")
+                covered_bars = len(bars) if isinstance(bars, list) else 0
+        items.append(
+            {
+                "symbol": symbol,
+                "covered_bars": covered_bars,
+                "required_bars": profile.window_bars,
+                "ready": covered_bars >= profile.window_bars,
+            }
+        )
+    return {
+        "profile": profile.to_dict(),
+        "items": items,
+        "all_ready": bool(items) and all(bool(item["ready"]) for item in items),
+    }
+
+
 async def refresh_strategy_data(
     *,
     profile: StrategyDataProfile,

@@ -1,9 +1,9 @@
 import fs from 'fs/promises';
 import path from 'path';
-import { Prisma } from '@prisma/client';
+import { Prisma } from '@/lib/db/types';
 import { prisma } from '@/lib/db/client';
 import { encrypt, decrypt } from '@/lib/crypto';
-import type { EnvVar } from '@prisma/client';
+import type { EnvVar } from '@/lib/db/types';
 import type { Project } from '@/types/backend';
 import { getProjectById } from '@/lib/services/project';
 

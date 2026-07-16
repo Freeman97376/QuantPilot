@@ -21,6 +21,10 @@ from quantpilot_market_data.database_core import (
     trade_date_datetime,
 )
 from quantpilot_market_data.models import KlineResponse, RealtimeQuote
+from quantpilot_market_data.repositories.factory import (
+    get_duckdb_repository,
+    is_desktop_repository,
+)
 
 __all__ = ["upsert_kline_response", "upsert_realtime_quote_snapshot"]
 
@@ -32,6 +36,14 @@ async def upsert_kline_response(
     start: str | None = None,
     end: str | None = None,
 ) -> tuple[str, int, str | None, str | None]:
+    if is_desktop_repository():
+        return await get_duckdb_repository().upsert_kline(
+            kline,
+            universe_id=universe_id,
+            lookback_years=lookback_years,
+            start=start,
+            end=end,
+        )
     symbol = canonical_symbol(kline.symbol, kline.market)
     cutoff = date_cutoff_datetime(start) or lookback_cutoff_datetime(lookback_years)
     end_cutoff = date_cutoff_datetime(end)

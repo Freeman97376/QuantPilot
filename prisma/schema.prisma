@@ -563,3 +563,84 @@ model EvalSchedule {
 
   @@map("eval_schedules")
 }
+
+// ============================================================
+// Optional official-server connection for desktop diagnostics
+// ============================================================
+
+model DesktopAccount {
+  id                 String    @id @default(cuid())
+  usernameNormalized String    @unique @map("username_normalized")
+  passwordHash       String    @map("password_hash")
+  status             String    @default("active")
+  failedLoginCount   Int       @default(0) @map("failed_login_count")
+  lockedUntil        DateTime? @map("locked_until")
+  tokenVersion       Int       @default(1) @map("token_version")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  lastLoginAt        DateTime? @map("last_login_at")
+  passwordChangedAt  DateTime  @default(now()) @map("password_changed_at")
+
+  sessions   DesktopSession[]
+  diagnostics DesktopDiagnosticEvent[]
+
+  @@index([status])
+  @@map("desktop_accounts")
+}
+
+model DesktopSession {
+  id               String    @id @default(cuid())
+  accountId        String    @map("account_id")
+  accessTokenHash  String    @unique @map("access_token_hash")
+  refreshTokenHash String    @unique @map("refresh_token_hash")
+  accessExpiresAt  DateTime  @map("access_expires_at")
+  refreshExpiresAt DateTime  @map("refresh_expires_at")
+  installationId   String    @map("installation_id")
+  tokenVersion     Int       @map("token_version")
+  revokedAt        DateTime? @map("revoked_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  account DesktopAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId])
+  @@index([installationId])
+  @@index([refreshExpiresAt])
+  @@map("desktop_sessions")
+}
+
+model DesktopDiagnosticEvent {
+  id               String   @id @default(cuid())
+  accountId        String   @map("account_id")
+  installationId   String   @map("installation_id")
+  appVersion       String   @map("app_version")
+  windowsVersion   String   @map("windows_version")
+  architecture     String
+  appSchemaVersion Int      @map("app_schema_version")
+  marketSchemaVersion Int   @map("market_schema_version")
+  feature          String
+  errorCode        String   @map("error_code")
+  severity         String
+  sanitizedStack   String?  @map("sanitized_stack")
+  occurredAt       DateTime @map("occurred_at")
+  durationMs       Int?     @map("duration_ms")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  account DesktopAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId])
+  @@index([installationId])
+  @@index([createdAt])
+  @@map("desktop_diagnostic_events")
+}
+
+model AnalysisEstimate {
+  id          String    @id
+  kind        String
+  fingerprint String
+  payload     Json
+  expiresAt   DateTime  @map("expires_at")
+  consumedAt  DateTime? @map("consumed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([expiresAt])
+  @@map("analysis_estimates")
+}

@@ -47,3 +47,4 @@ __pycache__/
 
 # electron packaging
 release/
+.desktop-build/

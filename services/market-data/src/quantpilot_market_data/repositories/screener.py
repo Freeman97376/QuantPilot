@@ -33,6 +33,10 @@ from quantpilot_market_data.models import (
     TechnicalScreenerResponse,
 )
 from quantpilot_market_data.repositories.analytics import sync_clickhouse_daily_bars
+from quantpilot_market_data.repositories.factory import (
+    get_duckdb_repository,
+    is_desktop_repository,
+)
 
 DEFAULT_UNIVERSE_ID = "a-share-sample-research-pool"
 SCREENER_CACHE_TTL_SECONDS = ttl_from_env("QUANTPILOT_SCREENER_CACHE_TTL_SECONDS", 60)
@@ -1345,6 +1349,59 @@ async def screen_a_share_technical_strategy(
         if condition.value_field:
             _ensure_technical_field(condition.value_field)
     _ensure_technical_field(spec.sort.field)
+
+    if is_desktop_repository():
+        trade_date, rows = await get_duckdb_repository().technical_screener_rows(
+            universe_id=request.universe_id,
+            trade_date=request.trade_date,
+            timeframe=timeframe,
+            adjustment=adjustment,
+            min_sample_count=spec.min_sample_count,
+            exclude_st=spec.exclude_st,
+            exclude_limit_up=spec.exclude_limit_up,
+        )
+        if trade_date is None:
+            return TechnicalScreenerResponse(
+                universe_id=request.universe_id,
+                trade_date=None,
+                scanned_symbols=0,
+                limit=request.limit,
+                spec=spec,
+                candidates=[],
+                notes=["Local DuckDB does not have daily bars for this universe yet."],
+            )
+        filtered_rows = [
+            row for row in rows
+            if all(_technical_condition_passes(condition, row) for condition in spec.conditions)
+        ]
+        filtered_rows.sort(
+            key=lambda row: _technical_screener_sort_key(row, spec.sort.field),
+            reverse=spec.sort.direction == "desc",
+        )
+        safe_limit = max(1, min(request.limit, 100))
+        candidates = [
+            _technical_candidate_from_row(row, spec.conditions)
+            for row in filtered_rows[:safe_limit]
+        ]
+        return TechnicalScreenerResponse(
+            universe_id=request.universe_id,
+            trade_date=trade_date,
+            scanned_symbols=len(rows),
+            limit=safe_limit,
+            spec=spec,
+            candidates=candidates,
+            analytics=AnalyticsExecutionMetadata(
+                engine="duckdb",
+                status="disabled",
+                basis="duckdb.quant.stock_bars",
+                target_trade_date=trade_date,
+                message="Desktop technical screening reads only local DuckDB bars.",
+            ),
+            notes=[
+                "Technical features are computed deterministically from local DuckDB daily bars.",
+                "Minute data is never fetched by the daily screener.",
+            ],
+        )
 
     async with await connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
         trade_date = await _resolve_technical_screener_trade_date(

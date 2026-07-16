@@ -4,6 +4,7 @@ import { ThemeProvider } from '@/contexts/ThemeContext'
 import { AuthProvider } from '@/contexts/AuthContext'
 import Header from '@/components/layout/Header'
 import { withBasePath } from '@/lib/config/public-paths'
+import FirstRunMinuteData from '@/components/desktop/FirstRunMinuteData'
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -24,6 +25,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <GlobalSettingsProvider>
               <Header />
               <main>{children}</main>
+              <FirstRunMinuteData />
             </GlobalSettingsProvider>
           </AuthProvider>
         </ThemeProvider>

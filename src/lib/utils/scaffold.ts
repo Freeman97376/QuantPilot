@@ -375,7 +375,13 @@ async function ensureSharedNodeModules(projectPath: string) {
   }
 
   const relativeTarget = path.relative(projectPath, sharedNodeModules);
-  await fs.symlink(relativeTarget || sharedNodeModules, projectNodeModules, 'dir');
+  if (process.platform === 'win32') {
+    // Directory junctions work without Windows Developer Mode or an elevated
+    // token. Node requires an absolute target for junctions.
+    await fs.symlink(path.resolve(sharedNodeModules), projectNodeModules, 'junction');
+  } else {
+    await fs.symlink(relativeTarget || sharedNodeModules, projectNodeModules, 'dir');
+  }
 }
 
 async function readJsonRecord(filePath: string): Promise<Record<string, unknown> | null> {

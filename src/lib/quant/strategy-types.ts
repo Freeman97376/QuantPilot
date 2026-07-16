@@ -223,7 +223,7 @@ export interface StrategyScreenerCandidate {
 }
 
 export interface StrategyAnalyticsExecutionMetadata {
-  engine: 'clickhouse' | 'timescaledb';
+  engine: 'clickhouse' | 'timescaledb' | 'duckdb';
   status: 'hit' | 'fallback' | 'disabled' | 'error';
   basis: string;
   targetTradeDate?: string | null;

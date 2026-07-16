@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from quantpilot_market_data.cache import MarketDataCache, RedisJsonCache, ttl_from_env
 from quantpilot_market_data.database_core import (
@@ -25,6 +27,11 @@ from quantpilot_market_data.providers.akshare import AkShareClient, AkShareError
 from quantpilot_market_data.providers.baostock import BaoStockClient, BaoStockError
 from quantpilot_market_data.providers.eastmoney import EastMoneyClient, EastMoneyError
 from quantpilot_market_data.providers.tushare import TushareClient
+from quantpilot_market_data.repositories.factory import (
+    get_duckdb_repository,
+    initialize_runtime_repository,
+    is_desktop_repository,
+)
 from quantpilot_market_data.repositories.ingestion import (
     create_ingestion_job,
     finish_ingestion_job,
@@ -83,6 +90,18 @@ def create_app() -> FastAPI:
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def verify_desktop_startup_token(request: Request, call_next):
+        expected = os.getenv("QUANTPILOT_STARTUP_TOKEN", "").strip()
+        if (
+            os.getenv("QUANTPILOT_RUNTIME_MODE", "server").strip().lower() == "desktop"
+            and expected
+            and request.url.path == "/health"
+            and request.headers.get("x-quantpilot-startup-token") != expected
+        ):
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+        return await call_next(request)
     client = EastMoneyClient()
     akshare_client = AkShareClient()
     baostock_client = BaoStockClient()
@@ -90,6 +109,10 @@ def create_app() -> FastAPI:
     intraday_redis_cache = RedisJsonCache()
     tushare_client = TushareClient()
     auto_fill_tasks: set[asyncio.Task[None]] = set()
+
+    @app.on_event("startup")
+    async def initialize_storage() -> None:
+        await initialize_runtime_repository()
 
     app.include_router(analytics_router)
     app.include_router(foundation_router)
@@ -159,8 +182,10 @@ def create_app() -> FastAPI:
     )
 
     @app.get("/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
+    async def health() -> dict[str, object]:
+        if is_desktop_repository():
+            return await get_duckdb_repository().health()
+        return {"status": "ok", "engine": "timescaledb"}
 
     @app.post("/api/v1/ingestion/eastmoney/history", response_model=HistoryIngestionResponse)
     async def ingest_eastmoney_history(

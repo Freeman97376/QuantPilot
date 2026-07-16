@@ -10,6 +10,7 @@ BRANCH="${QUANTPILOT_DEPLOY_BRANCH:-main}"
 MODE="${1:-update}"
 ENV_FILE="${QUANTPILOT_ENV_FILE:-${APP_DIR}/.env.production}"
 LOCK_FILE="${QUANTPILOT_DEPLOY_LOCK_FILE:-/tmp/quantpilot-maintain.lock}"
+MIN_FREE_DISK_MB="${QUANTPILOT_MIN_FREE_DISK_MB:-4096}"
 
 WEB_SERVICE="quantpilot-web"
 MARKET_SERVICE="quantpilot-market-data"
@@ -18,6 +19,7 @@ TIMER_UNITS=(
   quantpilot-market-eod.timer
   quantpilot-market-repair.timer
   quantpilot-market-audit.timer
+  quantpilot-diagnostics-cleanup.timer
 )
 
 log() {
@@ -89,6 +91,22 @@ compose() {
     -f "${APP_DIR}/docker-compose.yml" \
     -f "${APP_DIR}/deploy/server/docker-compose.server.yml" \
     "$@"
+}
+
+require_free_disk_space() {
+  local stage=$1
+  local available_kb
+  local available_mb
+  local required_kb
+  available_kb="$(df -Pk "${APP_DIR}" | awk 'NR == 2 { print $4 }')"
+  [[ ${available_kb} =~ ^[0-9]+$ ]] || die "Unable to determine free disk space before ${stage}."
+  [[ ${MIN_FREE_DISK_MB} =~ ^[0-9]+$ ]] || die "QUANTPILOT_MIN_FREE_DISK_MB must be a positive integer."
+  (( MIN_FREE_DISK_MB > 0 )) || die "QUANTPILOT_MIN_FREE_DISK_MB must be greater than zero."
+  required_kb=$((MIN_FREE_DISK_MB * 1024))
+  available_mb=$((available_kb / 1024))
+  (( available_kb >= required_kb )) || die \
+    "Only ${available_mb} MiB is free before ${stage}; at least ${MIN_FREE_DISK_MB} MiB is required. Free cache/log/build artifacts without deleting Docker volumes, then retry."
+  log "Disk preflight before ${stage}: ${available_mb} MiB free."
 }
 
 wait_for_compose_service_health() {
@@ -176,6 +194,9 @@ install_runtime_units() {
   sudo install -m 0644 \
     "${APP_DIR}/deploy/server/systemd/quantpilot-market-refresh@.service" \
     /etc/systemd/system/quantpilot-market-refresh@.service
+  sudo install -m 0644 \
+    "${APP_DIR}/deploy/server/systemd/quantpilot-diagnostics-cleanup.service" \
+    /etc/systemd/system/quantpilot-diagnostics-cleanup.service
 
   local timer
   for timer in "${TIMER_UNITS[@]}"; do
@@ -201,6 +222,9 @@ install_nginx_snippets() {
   sudo install -m 0644 \
     "${APP_DIR}/deploy/server/nginx/smartstock-location.conf" \
     /etc/nginx/snippets/quantpilot-smartstock.conf
+  sudo install -m 0644 \
+    "${APP_DIR}/deploy/server/nginx/smartstock-desktop-connection-proxy.conf" \
+    /etc/nginx/snippets/quantpilot-smartstock-desktop-connection-proxy.conf
   sudo nginx -t
 }
 
@@ -219,6 +243,7 @@ pull_build_and_migrate() {
   wait_for_compose_service_health timescaledb
   wait_for_compose_service_health redis
 
+  require_free_disk_space "dependency installation"
   log "Installing Node dependencies and generating Prisma client..."
   cd "${APP_DIR}"
   # Production builds still require the repository's build-time devDependencies
@@ -238,8 +263,14 @@ pull_build_and_migrate() {
   cd "${APP_DIR}"
   npm run db:init
 
+  require_free_disk_space "production build"
+  if systemctl cat "${WEB_SERVICE}" >/dev/null 2>&1; then
+    log "Stopping ${WEB_SERVICE} before replacing .next build artifacts..."
+    sudo systemctl stop "${WEB_SERVICE}"
+  fi
   log "Building the production /smartstock application..."
   npm run build:server
+  [[ -s "${APP_DIR}/.next/BUILD_ID" ]] || die "Production build completed without .next/BUILD_ID."
 
   install_runtime_units
   install_nginx_snippets

@@ -4,7 +4,7 @@
 
 import { prisma } from '@/lib/db/client';
 import type { Message, CreateMessageInput } from '@/types/backend';
-import type { Message as PrismaMessage } from '@prisma/client';
+import type { Message as PrismaMessage } from '@/lib/db/types';
 
 function mapPrismaMessage(message: PrismaMessage): Message {
   const updatedAt =

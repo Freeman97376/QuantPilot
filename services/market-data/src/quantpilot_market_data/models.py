@@ -842,7 +842,7 @@ class AShareScreenerCandidate(BaseModel):
 
 
 class AnalyticsExecutionMetadata(BaseModel):
-    engine: Literal["clickhouse", "timescaledb"] = "timescaledb"
+    engine: Literal["clickhouse", "timescaledb", "duckdb"] = "timescaledb"
     status: Literal["hit", "fallback", "disabled", "error"] = "disabled"
     basis: str = "timescaledb.stock_bars"
     target_trade_date: date | None = None

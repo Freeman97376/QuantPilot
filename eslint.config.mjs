@@ -28,6 +28,8 @@ const config = [
     ignores: [
       '.next/**',
       '**/.venv/**',
+      '**/.pytest_cache/**',
+      '**/.pytest-tmp/**',
       'build/**',
       'coverage/**',
       'data/**',

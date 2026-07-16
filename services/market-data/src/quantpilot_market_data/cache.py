@@ -116,6 +116,9 @@ class MarketDataCache:
             path=path,
         )
 
+    def delete(self, cache_key: str) -> None:
+        self._delete_silent(self._path_for_key(cache_key))
+
     def disabled_metadata(self, cache_key: str, ttl_seconds: int) -> FetchMetadata:
         return FetchMetadata(
             cache_status="disabled",
@@ -191,6 +194,10 @@ class RedisJsonCache:
         self.enabled = redis_enabled_from_env() if enabled is None else enabled
         self._client: redis.Redis | None = None
         self._available = True
+        self._desktop_fallback = (
+            os.getenv("QUANTPILOT_RUNTIME_MODE", "server").strip().lower() == "desktop"
+        )
+        self._local_cache = MarketDataCache(root=default_cache_root() / "runtime-cache")
 
     @property
     def configured(self) -> bool:
@@ -198,7 +205,10 @@ class RedisJsonCache:
 
     @property
     def available(self) -> bool:
-        return self.enabled and self.configured and self._available
+        return self.enabled and (self._desktop_fallback or (self.configured and self._available))
+
+    def _local_key(self, cache_key: str) -> str:
+        return self._local_cache.build_key("redis-fallback", {"key": cache_key})
 
     def key(self, cache_key: str) -> str:
         if cache_key.startswith(f"{self.namespace}:"):
@@ -208,6 +218,9 @@ class RedisJsonCache:
     async def read(self, cache_key: str) -> dict[str, Any] | None:
         if not self.available:
             return None
+        if self._desktop_fallback and not self.configured:
+            entry = self._local_cache.read(self._local_key(cache_key))
+            return entry.payload if entry else None
         client = self._get_client()
         try:
             raw = await client.get(self.key(cache_key))
@@ -225,6 +238,10 @@ class RedisJsonCache:
     async def write(self, cache_key: str, *, ttl_seconds: int, payload: dict[str, Any]) -> bool:
         if not self.available or ttl_seconds <= 0:
             return False
+        if self._desktop_fallback and not self.configured:
+            return self._local_cache.write(
+                self._local_key(cache_key), ttl_seconds=ttl_seconds, payload=payload
+            ) is not None
         client = self._get_client()
         try:
             await client.set(
@@ -238,6 +255,9 @@ class RedisJsonCache:
             return False
 
     async def delete(self, cache_key: str) -> None:
+        if self._desktop_fallback and not self.configured:
+            self._local_cache.delete(self._local_key(cache_key))
+            return
         if not self.available:
             return
         try:

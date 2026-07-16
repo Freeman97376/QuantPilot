@@ -12,7 +12,13 @@ const fs = require('fs/promises');
 const net = require('net');
 const dotenv = require('dotenv');
 const { ensureEnvironment } = require('./setup-env');
-const { PrismaClient } = require('@prisma/client');
+const isDesktopRuntime =
+  (process.env.QUANTPILOT_RUNTIME_MODE || process.env.QUANTPILOT_DEPLOYMENT || '')
+    .trim()
+    .toLowerCase() === 'desktop';
+const { PrismaClient } = isDesktopRuntime
+  ? require('@quantpilot/prisma-desktop-client')
+  : require('@prisma/client');
 const { buildStableCss } = require('../build/build-stable-css');
 
 const rootDir = path.join(__dirname, '..', '..');
@@ -75,7 +81,8 @@ function parseCliArgs(argv) {
 function runPrismaDbPush() {
   return new Promise((resolve, reject) => {
     console.log('🗃️  Synchronizing Prisma schema (prisma db push)...');
-    const child = spawn('npx', ['prisma', 'db', 'push'], {
+    const schema = isDesktopRuntime ? 'prisma/schema.desktop.prisma' : 'prisma/schema.prisma';
+    const child = spawn('npx', ['prisma', 'db', 'push', '--schema', schema], {
       cwd: rootDir,
       stdio: 'inherit',
       shell: isWindows,

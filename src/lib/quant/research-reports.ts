@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { Prisma } from '@/lib/db/types';
 import { prisma } from '@/lib/db/client';
 import { getRuntimeDegradationConfig } from '@/lib/config/degradation';
 import {

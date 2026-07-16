@@ -1,6 +1,7 @@
 "use client";
 
 import type { CLIStatus } from "@/types/cli";
+import DesktopDataSettings from "@/components/desktop/DesktopDataSettings";
 
 interface GeneralTabProps {
   defaultCliName: string;
@@ -43,6 +44,7 @@ function GeneralTab({
 }: GeneralTabProps) {
   return (
     <div className="space-y-6">
+      <DesktopDataSettings />
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
           <p className="text-xs font-medium text-slate-500">默认智能体</p>

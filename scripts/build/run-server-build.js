@@ -23,10 +23,20 @@ for (const [key, value] of Object.entries(parsed)) {
 }
 process.env.NODE_ENV = 'production';
 process.env.QUANTPILOT_DEPLOYMENT = 'server';
+process.env.QUANTPILOT_RUNTIME_MODE = 'server';
 
 console.log(
   `[server-build] Building for basePath ${process.env.NEXT_PUBLIC_BASE_PATH || '(root)'} using ${path.relative(rootDir, envFile)}`
 );
+
+const prismaResult = spawnSync(
+  process.execPath,
+  [require.resolve('prisma/build/index.js'), 'generate', '--schema', 'prisma/schema.prisma'],
+  { cwd: rootDir, env: process.env, stdio: 'inherit' }
+);
+if (prismaResult.status !== 0) {
+  process.exit(prismaResult.status ?? 1);
+}
 
 const result = spawnSync(process.execPath, [path.join(__dirname, 'run-build.js')], {
   cwd: rootDir,

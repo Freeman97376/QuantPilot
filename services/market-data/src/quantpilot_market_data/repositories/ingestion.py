@@ -18,6 +18,10 @@ from quantpilot_market_data.models import (
     IngestionJobSummary,
     IngestionPreflightCoverage,
 )
+from quantpilot_market_data.repositories.factory import (
+    get_duckdb_repository,
+    is_desktop_repository,
+)
 
 INGESTION_JOB_STALE_SECONDS = 15 * 60
 INGESTION_JOB_STOP_GRACE_SECONDS = 60
@@ -44,6 +48,17 @@ async def create_ingestion_job(
     total_symbols: int,
     metadata: dict[str, Any],
 ) -> None:
+    if is_desktop_repository():
+        await get_duckdb_repository().create_ingestion_job(
+            job_id=job_id,
+            universe_id=universe_id,
+            provider=provider,
+            timeframe=timeframe,
+            adjustment=adjustment,
+            total_symbols=total_symbols,
+            metadata=metadata,
+        )
+        return
     async with await connect() as connection, connection.cursor() as cursor:
         await cursor.execute(
             """
@@ -70,6 +85,25 @@ async def finish_ingestion_job(response: HistoryIngestionResponse) -> None:
         for item in response.symbols
         if item.status == "failed" and item.error
     ]
+    if is_desktop_repository():
+        await get_duckdb_repository().update_ingestion_job(
+            response.job_id,
+            status=response.status,
+            completed_symbols=response.completed_symbols,
+            failed_symbols=response.failed_symbols,
+            rows_received=response.rows_received,
+            rows_upserted=response.rows_upserted,
+            error="; ".join(f"{item['symbol']}: {item['error']}" for item in errors)[:2000] or None,
+            metadata={
+                "symbol_results": [item.model_dump(mode="json") for item in response.symbols],
+                "batch_offset": response.batch_offset,
+                "batch_size": response.batch_size,
+                "next_offset": response.next_offset,
+                "universe_total_symbols": response.universe_total_symbols,
+            },
+            completed_at=response.completed_at,
+        )
+        return
     async with await connect() as connection, connection.cursor() as cursor:
         await cursor.execute(
             """
@@ -123,6 +157,19 @@ async def update_ingestion_job_progress(
     metadata: dict[str, Any] | None = None,
     completed_at: datetime | None = None,
 ) -> None:
+    if is_desktop_repository():
+        await get_duckdb_repository().update_ingestion_job(
+            job_id,
+            status=status,
+            completed_symbols=completed_symbols,
+            failed_symbols=failed_symbols,
+            rows_received=rows_received,
+            rows_upserted=rows_upserted,
+            error=error,
+            metadata=metadata,
+            completed_at=completed_at,
+        )
+        return
     updates = ["updated_at = now()"]
     params: list[Any] = []
     if status is not None:
@@ -354,6 +401,8 @@ def ingestion_job_summary_from_row(row: dict[str, Any]) -> IngestionJobSummary:
 
 
 async def get_ingestion_job_control(job_id: str) -> str | None:
+    if is_desktop_repository():
+        return await get_duckdb_repository().ingestion_control(job_id)
     async with await connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
         await cursor.execute(
             """

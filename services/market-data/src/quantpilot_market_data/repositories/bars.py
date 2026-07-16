@@ -17,6 +17,10 @@ from quantpilot_market_data.models import (
     LocalKlineResponse,
     LocalKlineSummary,
 )
+from quantpilot_market_data.repositories.factory import (
+    get_duckdb_repository,
+    is_desktop_repository,
+)
 
 __all__ = ["get_local_kline"]
 
@@ -120,6 +124,14 @@ async def get_local_kline(
     include_metadata: bool = False,
 ) -> LocalKlineResponse:
     normalized_limit = max(1, min(limit, 2000))
+    if is_desktop_repository() and timeframe not in {"weekly", "monthly"}:
+        return await get_duckdb_repository().local_kline_response(
+            symbol=symbol,
+            timeframe=timeframe,
+            adjustment=adjustment,
+            provider=provider,
+            limit=normalized_limit,
+        )
     query_timeframe = "daily" if timeframe in {"weekly", "monthly"} else timeframe
     source_limit = 8000 if timeframe in {"weekly", "monthly"} else normalized_limit
 

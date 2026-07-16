@@ -28,6 +28,10 @@ from quantpilot_market_data.models import (
     ResearchUniverseSummary,
     SymbolResolveResult,
 )
+from quantpilot_market_data.repositories.factory import (
+    get_duckdb_repository,
+    is_desktop_repository,
+)
 
 __all__ = [
     "add_securities_to_universe",
@@ -106,6 +110,8 @@ def research_member_from_row(row: dict[str, Any]) -> ResearchUniverseMember:
 
 
 async def get_universe_fetch_targets(universe_id: str) -> list[dict[str, str]]:
+    if is_desktop_repository():
+        return await get_duckdb_repository().universe_fetch_targets(universe_id)
     async with await connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
         await cursor.execute(
             """
@@ -1070,6 +1076,15 @@ async def add_securities_to_universe(
 ) -> list[ResearchUniverseMember]:
     if not securities:
         return []
+
+    if is_desktop_repository():
+        members = await get_duckdb_repository().add_securities_to_universe(
+            universe_id=universe_id,
+            securities=securities,
+            role=role,
+            added_source=added_source,
+        )
+        return [ResearchUniverseMember(**member) for member in members]
 
     async with await connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
         await cursor.execute(

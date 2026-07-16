@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { Prisma } from '@/lib/db/types';
 
 type JsonRecord = Record<string, unknown>;
 

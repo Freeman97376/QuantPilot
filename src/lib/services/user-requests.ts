@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/db/client';
-import { Prisma } from '@prisma/client';
+import { Prisma } from '@/lib/db/types';
 
 export interface ActiveRequestSummary {
   hasActiveRequests: boolean;

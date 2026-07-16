@@ -1,0 +1,14 @@
+[Unit]
+Description=Delete expired QuantPilot desktop diagnostic events
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/quantpilot
+EnvironmentFile=/opt/quantpilot/.env.production
+Environment=NODE_ENV=production
+Environment=QUANTPILOT_RUNTIME_MODE=server
+ExecStart=/usr/bin/env npm run desktop:accounts -- cleanup-diagnostics
+UMask=0027

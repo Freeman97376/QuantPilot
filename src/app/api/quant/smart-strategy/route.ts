@@ -14,6 +14,10 @@ import {
 import { runTechnicalScreener } from '@/lib/quant/strategies';
 import type { StrategyDataProfileId } from '@/lib/quant/strategies';
 import { refreshStrategyData } from '@/lib/quant/strategy-data-refresh';
+import {
+  consumeMinuteAnalysisEstimate,
+  createMinuteAnalysisEstimate,
+} from '@/lib/quant/analysis-estimates';
 
 const promptSchema = z.string()
   .trim()
@@ -108,6 +112,26 @@ const technicalSpecSchema = z.object({
   }).strict(),
 }).strict();
 
+function minuteFingerprintInput(input: {
+  symbols: string[];
+  profile: string;
+  universeId?: string;
+  tradeDate?: string;
+  limit?: number;
+  spec: unknown;
+  force?: boolean;
+}) {
+  return {
+    symbols: input.symbols.map((symbol) => symbol.toUpperCase()),
+    profile: input.profile,
+    universeId: input.universeId ?? null,
+    tradeDate: input.tradeDate ?? null,
+    limit: input.limit ?? null,
+    spec: input.spec,
+    force: input.force === true,
+  };
+}
+
 function invalidRequest(message: string) {
   return createErrorResponse('智能策略请求参数无效', message, 400);
 }
@@ -193,10 +217,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (action === 'prepare-analysis') {
+    if (action === 'estimate-analysis') {
       const input = z.object({
         symbols: z.array(
-          z.string().trim().min(1).max(48).regex(/^[A-Za-z0-9._:-]+$/, '标的代码格式不正确')
+          z.string().trim().min(1).max(48).regex(/^[A-Za-z0-9._:-]+$/, 'Invalid symbol')
         ).min(1).max(20),
         profile: minuteProfileSchema,
         universeId: universeIdSchema,
@@ -206,7 +230,7 @@ export async function POST(request: NextRequest) {
         force: z.boolean().optional(),
       }).safeParse(body);
       if (!input.success) return invalidRequest(firstIssue(input.error));
-      const { symbols, profile, universeId, tradeDate, limit, spec, force } = input.data;
+      const { symbols, profile, universeId, tradeDate, limit, spec } = input.data;
       const dailyResult = await runTechnicalScreener({
         universeId,
         tradeDate,
@@ -223,12 +247,57 @@ export async function POST(request: NextRequest) {
           409
         );
       }
+      return createSuccessResponse(await createMinuteAnalysisEstimate({
+        fingerprintInput: minuteFingerprintInput(input.data),
+        profile: profile as StrategyDataProfileId,
+        symbols,
+      }));
+    }
+
+    if (action === 'prepare-analysis') {
+      const input = z.object({
+        symbols: z.array(
+          z.string().trim().min(1).max(48).regex(/^[A-Za-z0-9._:-]+$/, '标的代码格式不正确')
+        ).min(1).max(20),
+        profile: minuteProfileSchema,
+        universeId: universeIdSchema,
+        tradeDate: tradeDateSchema,
+        limit: limitSchema,
+        spec: technicalSpecSchema,
+        force: z.boolean().optional(),
+        estimateId: z.string().uuid(),
+        confirmed: z.literal(true),
+      }).safeParse(body);
+      if (!input.success) return invalidRequest(firstIssue(input.error));
+      const { symbols, profile, universeId, tradeDate, limit, spec, force, estimateId, confirmed } = input.data;
+      const dailyResult = await runTechnicalScreener({
+        universeId,
+        tradeDate,
+        limit: limit ?? 20,
+        spec,
+        timeoutMs: 15_000,
+      });
+      const dailyCandidates = new Set(dailyResult.candidates.map((candidate) => candidate.symbol));
+      const rejectedSymbols = symbols.filter((symbol: string) => !dailyCandidates.has(symbol));
+      if (rejectedSymbols.length) {
+        return createErrorResponse(
+          `minute analysis only accepts current daily screener candidates: ${rejectedSymbols.join(', ')}`,
+          undefined,
+          409
+        );
+      }
+      await consumeMinuteAnalysisEstimate({
+        estimateId,
+        confirmed,
+        fingerprintInput: minuteFingerprintInput(input.data),
+      });
       return createSuccessResponse(
         await refreshStrategyData({
           profile: profile as StrategyDataProfileId,
           symbols,
           universeId,
           force: force === true,
+          estimateId,
         })
       );
     }

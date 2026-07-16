@@ -8,8 +8,17 @@
 const { spawn } = require('child_process');
 const os = require('os');
 const path = require('path');
+const fs = require('fs');
 const http = require('http');
 const https = require('https');
+
+const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+const desktopDataDir = path.join(localAppData, 'QuantPilot');
+fs.mkdirSync(desktopDataDir, { recursive: true });
+process.env.QUANTPILOT_RUNTIME_MODE = 'desktop';
+process.env.QUANTPILOT_DEPLOYMENT = 'desktop';
+process.env.NEXT_PUBLIC_RUNTIME_MODE = 'desktop';
+process.env.DESKTOP_DATABASE_URL = `file:${path.join(desktopDataDir, 'app.db').replace(/\\/g, '/')}`;
 
 const { parseCliArgs, startWebDevServer } = require('./run-web');
 
@@ -81,6 +90,9 @@ async function start() {
     WEB_PORT: String(port),
     PORT: String(port),
     NEXT_TELEMETRY_DISABLED: '1',
+    QUANTPILOT_RUNTIME_MODE: 'desktop',
+    QUANTPILOT_DEPLOYMENT: 'desktop',
+    DESKTOP_DATABASE_URL: process.env.DESKTOP_DATABASE_URL,
   };
 
   console.log('🪟 Launching Electron renderer…');

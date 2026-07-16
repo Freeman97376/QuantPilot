@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import { Prisma } from '@prisma/client';
+import { Prisma } from '@/lib/db/types';
 
 export type JsonRecord = Record<string, unknown>;
 

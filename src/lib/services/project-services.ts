@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/db/client';
-import type { ProjectServiceConnection } from '@prisma/client';
+import type { ProjectServiceConnection } from '@/lib/db/types';
 
 function serializeServiceData(data: Record<string, unknown>): string {
   return JSON.stringify(data ?? {});

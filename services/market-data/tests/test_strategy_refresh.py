@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -11,10 +13,36 @@ from quantpilot_market_data.api import create_app
 from quantpilot_market_data.data_profiles import get_strategy_data_profile
 from quantpilot_market_data.models import FetchMetadata, KlineBar, KlineResponse
 from quantpilot_market_data.providers.tushare import TushareClient
+from quantpilot_market_data.routers.strategy_refresh import valid_desktop_minute_grant
 from quantpilot_market_data.scheduler import calendar_says_closed, is_cn_market_session
 from quantpilot_market_data.services import strategy_refresh
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def test_desktop_minute_grant_requires_matching_confirmed_estimate(monkeypatch) -> None:
+    estimate_id = "12345678-1234-4234-8234-123456789abc"
+    profile = "minute1_entry"
+    symbols = ["600519.SH"]
+    launch_token = "test-launch-token"
+    payload = f"{estimate_id}\n{profile}\n{','.join(symbols)}"
+    grant = hmac.new(
+        launch_token.encode(), payload.encode(), hashlib.sha256
+    ).hexdigest()
+    monkeypatch.setenv("QUANTPILOT_STARTUP_TOKEN", launch_token)
+
+    assert valid_desktop_minute_grant(
+        profile=profile,
+        symbols=symbols,
+        estimate_id=estimate_id,
+        grant=grant,
+    )
+    assert not valid_desktop_minute_grant(
+        profile=profile,
+        symbols=["000001.SZ"],
+        estimate_id=estimate_id,
+        grant=grant,
+    )
 
 
 def _minute_response(*, cache_status: str = "redis-hit") -> KlineResponse:

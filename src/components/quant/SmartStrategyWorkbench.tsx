@@ -87,6 +87,28 @@ type MinuteProfileId = Extract<
   "minute1_entry" | "minute1_momentum" | "minute1_pattern" | "minute5_confirm" | "minute_backtest"
 >;
 
+type MinuteAnalysisEstimate = {
+  estimateId: string;
+  symbolCount: number;
+  period: string;
+  historicalRange: string;
+  provider: string[];
+  paidPermissionRequired: boolean;
+  requiresDownload: boolean;
+  requiresConfirmation: boolean;
+  estimatedTimeSeconds: number;
+  estimatedDownloadBytes: number;
+  estimatedDiskBytes: number;
+  estimatedPeakMemoryBytes: number;
+};
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
 const MINUTE_PROFILE_OPTIONS: Array<{
   id: MinuteProfileId;
   label: string;
@@ -452,6 +474,7 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
   const [copied, setCopied] = useState(false);
   const [minuteProfile, setMinuteProfile] = useState<MinuteProfileId>("minute1_entry");
   const [minuteResult, setMinuteResult] = useState<StrategyRefreshResponse | null>(null);
+  const [minuteEstimate, setMinuteEstimate] = useState<MinuteAnalysisEstimate | null>(null);
   const [isMinuteLoading, setIsMinuteLoading] = useState(false);
   const [minuteError, setMinuteError] = useState<string | null>(null);
   const activeRequestRef = useRef<AbortController | null>(null);
@@ -653,16 +676,41 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
     }
   };
 
+  const prepareMinuteAnalysis = async (estimateId: string) => {
+    if (!selectedCandidate || !draft || !result) return null;
+    const response = await fetch(`${API_BASE}/api/quant/smart-strategy`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "prepare-analysis",
+        estimateId,
+        confirmed: true,
+        universeId: requestUniverseId,
+        symbols: [selectedCandidate.symbol],
+        profile: minuteProfile,
+        tradeDate: result.tradeDate,
+        limit: parsedLimit,
+        spec: draft.spec,
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload.success) {
+      throw new Error(payload.message || payload.error || "分钟行情准备失败");
+    }
+    return payload.data as StrategyRefreshResponse;
+  };
+
   const runMinuteAnalysis = async () => {
     if (!selectedCandidate || !draft || !result) return;
     setIsMinuteLoading(true);
     setMinuteError(null);
+    setMinuteEstimate(null);
     try {
       const response = await fetch(`${API_BASE}/api/quant/smart-strategy`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          action: "prepare-analysis",
+          action: "estimate-analysis",
           universeId: requestUniverseId,
           symbols: [selectedCandidate.symbol],
           profile: minuteProfile,
@@ -675,7 +723,12 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
       if (!response.ok || !payload.success) {
         throw new Error(payload.message || payload.error || "分钟行情准备失败");
       }
-      setMinuteResult(payload.data as StrategyRefreshResponse);
+      const estimate = payload.data as MinuteAnalysisEstimate;
+      if (estimate.requiresConfirmation) {
+        setMinuteEstimate(estimate);
+      } else {
+        setMinuteResult(await prepareMinuteAnalysis(estimate.estimateId));
+      }
     } catch (err) {
       setMinuteError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1339,6 +1392,7 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
                         onValueChange={(value) => {
                           setMinuteProfile(value as MinuteProfileId);
                           setMinuteResult(null);
+                          setMinuteEstimate(null);
                           setMinuteError(null);
                         }}
                       >
@@ -1371,6 +1425,51 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
                       {isMinuteLoading ? "正在准备" : "拉取并分析"}
                     </Button>
                   </div>
+
+                  {minuteEstimate ? (
+                    <div className="mx-3 mb-3 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-slate-700">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="font-semibold text-slate-950">确认下载分钟级行情</p>
+                          <p className="mt-1 text-xs leading-5 text-slate-600">
+                            本次确认仅用于下列范围；取消不会下载，也不会创建补数任务。
+                          </p>
+                        </div>
+                        {minuteEstimate.paidPermissionRequired ? (
+                          <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-800">需要付费历史分钟权限</Badge>
+                        ) : null}
+                      </div>
+                      <dl className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                        <div><dt className="text-xs text-slate-500">标的与周期</dt><dd className="font-medium">{minuteEstimate.symbolCount} 只 · {minuteEstimate.period}</dd></div>
+                        <div><dt className="text-xs text-slate-500">历史范围</dt><dd className="font-medium">{minuteEstimate.historicalRange}</dd></div>
+                        <div><dt className="text-xs text-slate-500">数据源</dt><dd className="font-medium">{minuteEstimate.provider.join(" → ")}</dd></div>
+                        <div><dt className="text-xs text-slate-500">预计耗时</dt><dd className="font-medium">约 {minuteEstimate.estimatedTimeSeconds} 秒</dd></div>
+                        <div><dt className="text-xs text-slate-500">下载量</dt><dd className="font-medium">{formatBytes(minuteEstimate.estimatedDownloadBytes)}</dd></div>
+                        <div><dt className="text-xs text-slate-500">新增磁盘</dt><dd className="font-medium">{formatBytes(minuteEstimate.estimatedDiskBytes)}</dd></div>
+                        <div><dt className="text-xs text-slate-500">峰值内存</dt><dd className="font-medium">{formatBytes(minuteEstimate.estimatedPeakMemoryBytes)}</dd></div>
+                        <div><dt className="text-xs text-slate-500">本地覆盖</dt><dd className="font-medium">不足，需要下载</dd></div>
+                      </dl>
+                      <div className="mt-4 flex justify-end gap-2">
+                        <Button type="button" variant="outline" disabled={isMinuteLoading} onClick={() => setMinuteEstimate(null)}>取消</Button>
+                        <Button
+                          type="button"
+                          disabled={isMinuteLoading}
+                          onClick={async () => {
+                            setIsMinuteLoading(true);
+                            setMinuteError(null);
+                            try {
+                              setMinuteResult(await prepareMinuteAnalysis(minuteEstimate.estimateId));
+                              setMinuteEstimate(null);
+                            } catch (err) {
+                              setMinuteError(err instanceof Error ? err.message : String(err));
+                            } finally {
+                              setIsMinuteLoading(false);
+                            }
+                          }}
+                        >确认并下载</Button>
+                      </div>
+                    </div>
+                  ) : null}
 
                   {minuteError ? (
                     <div className="mx-3 mb-3 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs leading-5 text-red-700">

@@ -579,7 +579,11 @@ function mapScreenerCandidate(value: unknown): StrategyScreenerCandidate {
 
 function mapAnalyticsExecutionMetadata(value: unknown, fallbackBasis: string): StrategyAnalyticsExecutionMetadata {
   const record = asRecord(value);
-  const engine = record.engine === 'clickhouse' ? 'clickhouse' : 'timescaledb';
+  const engine = record.engine === 'clickhouse'
+    ? 'clickhouse'
+    : record.engine === 'duckdb'
+      ? 'duckdb'
+      : 'timescaledb';
   const status =
     record.status === 'hit' ||
     record.status === 'fallback' ||

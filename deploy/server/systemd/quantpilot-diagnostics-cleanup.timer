@@ -1,0 +1,11 @@
+[Unit]
+Description=Clean QuantPilot desktop diagnostics daily
+
+[Timer]
+OnCalendar=*-*-* 04:20:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=10min
+Unit=quantpilot-diagnostics-cleanup.service
+
+[Install]
+WantedBy=timers.target
