@@ -56,6 +56,10 @@ async function isPidWithinRoot(pid) {
 }
 
 async function stopRootDevServer() {
+  if (process.env.QUANTPILOT_PRESERVE_RUNNING_WEB === '1') {
+    console.log('[build] Preserving the running web service while building a candidate artifact.');
+    return;
+  }
   const pids = await findListeningPids(rootPort);
   if (pids.length === 0) {
     return;

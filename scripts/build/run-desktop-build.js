@@ -62,7 +62,13 @@ function main() {
   run(process.execPath, [path.join(rootDir, 'scripts', 'desktop', 'build-sidecar.js')], { env });
 
   const electronBuilder = require.resolve('electron-builder/out/cli/cli.js');
-  const builderArgs = [electronBuilder, '--win', '--x64'];
+  const builderArgs = [
+    electronBuilder,
+    '--config',
+    path.join(rootDir, 'electron-builder.config.js'),
+    '--win',
+    '--x64',
+  ];
   if (process.argv.includes('--publish')) {
     builderArgs.push('--publish', 'always');
   }

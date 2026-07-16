@@ -8,9 +8,17 @@ IFS=$'\n\t'
 APP_DIR="${QUANTPILOT_APP_DIR:-/opt/quantpilot}"
 BRANCH="${QUANTPILOT_DEPLOY_BRANCH:-main}"
 MODE="${1:-update}"
+TARGET_REVISION="${2:-}"
 ENV_FILE="${QUANTPILOT_ENV_FILE:-${APP_DIR}/.env.production}"
 LOCK_FILE="${QUANTPILOT_DEPLOY_LOCK_FILE:-/tmp/quantpilot-maintain.lock}"
 MIN_FREE_DISK_MB="${QUANTPILOT_MIN_FREE_DISK_MB:-4096}"
+BACKUP_DIR="${QUANTPILOT_BACKUP_DIR:-/var/backups/quantpilot}"
+BACKUP_KEEP="${QUANTPILOT_BACKUP_KEEP:-7}"
+CANDIDATE_BUILD_DIR="${APP_DIR}/.next-candidate"
+ROLLBACK_BUILD_DIR="${APP_DIR}/.next-rollback"
+PREVIOUS_REVISION="${QUANTPILOT_PREVIOUS_REVISION:-}"
+ACTIVE_BACKUP_DIR=""
+WEB_BUILD_SWAPPED=0
 
 WEB_SERVICE="quantpilot-web"
 MARKET_SERVICE="quantpilot-market-data"
@@ -33,17 +41,22 @@ die() {
 
 usage() {
   cat <<'EOF'
-Usage: quantpilot-maintain [update|check|restart]
+Usage: quantpilot-maintain [update|check|restart|backup|rollback [revision]]
 
   update   Pull main, install dependencies, migrate/build, install units,
            restart services, reload Nginx, and run health checks (default).
   check    Read-only status and health checks.
   restart  Restart QuantPilot services, reload Nginx, then run checks.
+  backup   Create and verify a PostgreSQL backup without deploying.
+  rollback Restore the supplied revision (or the newest backup revision),
+           dependencies, previous web build, and services.
 
 Optional environment variables:
   QUANTPILOT_APP_DIR=/opt/quantpilot
   QUANTPILOT_DEPLOY_BRANCH=main
   QUANTPILOT_ENV_FILE=/opt/quantpilot/.env.production
+  QUANTPILOT_BACKUP_DIR=/var/backups/quantpilot
+  QUANTPILOT_BACKUP_KEEP=7
 EOF
 }
 
@@ -52,6 +65,9 @@ on_error() {
   local line_number=${1:-unknown}
   trap - ERR
   log "FAILED at line ${line_number}, exit code ${exit_code}."
+  if [[ -n ${PREVIOUS_REVISION} ]]; then
+    rollback_failed_deployment || true
+  fi
   systemctl --no-pager --full status "${MARKET_SERVICE}" "${WEB_SERVICE}" 2>/dev/null || true
   journalctl -u "${MARKET_SERVICE}" -u "${WEB_SERVICE}" -n 40 --no-pager 2>/dev/null || true
   exit "${exit_code}"
@@ -70,10 +86,12 @@ require_layout() {
   [[ -f "${APP_DIR}/deploy/server/docker-compose.server.yml" ]] || die "server Compose override is missing."
 
   local command
-  for command in git docker node npm npx uv curl systemctl sudo flock; do
+  for command in git docker node npm npx uv curl systemctl sudo flock df awk find sort sha256sum; do
     require_command "${command}"
   done
   docker compose version >/dev/null
+  [[ ${BACKUP_DIR} == /* && ${BACKUP_DIR} != / ]] || die "QUANTPILOT_BACKUP_DIR must be an absolute non-root path."
+  [[ ${BACKUP_KEEP} =~ ^[1-9][0-9]*$ ]] || die "QUANTPILOT_BACKUP_KEEP must be a positive integer."
 }
 
 load_environment() {
@@ -91,6 +109,154 @@ compose() {
     -f "${APP_DIR}/docker-compose.yml" \
     -f "${APP_DIR}/deploy/server/docker-compose.server.yml" \
     "$@"
+}
+
+safe_remove_build_dir() {
+  local target=$1
+  case "${target}" in
+    "${CANDIDATE_BUILD_DIR}"|"${ROLLBACK_BUILD_DIR}")
+      rm -rf -- "${target}"
+      ;;
+    *)
+      die "Refusing to remove unexpected build directory: ${target}"
+      ;;
+  esac
+}
+
+sync_market_dependencies() {
+  local uv_args=(sync --frozen --extra baostock --extra akshare)
+  if [[ -n ${TUSHARE_TOKEN:-} ]]; then
+    uv_args+=(--extra tushare)
+  fi
+  cd "${APP_DIR}/services/market-data"
+  uv "${uv_args[@]}"
+}
+
+prune_server_backups() {
+  local -a backups=()
+  local old_backup
+  local index
+  mapfile -t backups < <(
+    find "${BACKUP_DIR}" -mindepth 1 -maxdepth 1 -type d -name 'quantpilot-*' -printf '%p\n' |
+      sort -r
+  )
+  for ((index = BACKUP_KEEP; index < ${#backups[@]}; index += 1)); do
+    old_backup="${backups[${index}]}"
+    case "${old_backup}" in
+      "${BACKUP_DIR}"/quantpilot-*) rm -rf -- "${old_backup}" ;;
+      *) die "Refusing to prune unexpected backup path: ${old_backup}" ;;
+    esac
+  done
+}
+
+create_server_backup() {
+  local timestamp
+  local revision
+  local dump_file
+  timestamp="$(date -u '+%Y%m%dT%H%M%SZ')"
+  revision="${PREVIOUS_REVISION:-$(git -C "${APP_DIR}" rev-parse HEAD)}"
+  ACTIVE_BACKUP_DIR="${BACKUP_DIR}/quantpilot-${timestamp}-${revision:0:12}"
+  sudo install -d -m 0750 -o "$(id -un)" -g "$(id -gn)" "${BACKUP_DIR}"
+  install -d -m 0750 "${ACTIVE_BACKUP_DIR}"
+  dump_file="${ACTIVE_BACKUP_DIR}/postgres.dump"
+
+  log "Creating PostgreSQL backup: ${dump_file}"
+  compose exec -T timescaledb pg_dump \
+    -U "${POSTGRES_USER:-quantpilot}" \
+    -d "${POSTGRES_DB:-quantpilot}" \
+    --format=custom >"${dump_file}"
+  [[ -s ${dump_file} ]] || die "PostgreSQL backup is empty: ${dump_file}"
+  compose exec -T timescaledb pg_restore --list <"${dump_file}" >/dev/null
+
+  printf '%s\n' "${revision}" >"${ACTIVE_BACKUP_DIR}/revision.txt"
+  sha256sum "${ENV_FILE}" >"${ACTIVE_BACKUP_DIR}/environment.sha256"
+  compose images >"${ACTIVE_BACKUP_DIR}/compose-images.txt"
+  systemctl cat "${MARKET_SERVICE}" "${WEB_SERVICE}" \
+    >"${ACTIVE_BACKUP_DIR}/systemd-units.txt" 2>&1 || true
+  if [[ -d /etc/nginx ]]; then
+    sudo nginx -T >"${ACTIVE_BACKUP_DIR}/nginx-config.txt" 2>&1 || true
+  fi
+  {
+    printf 'created_at=%s\n' "${timestamp}"
+    printf 'revision=%s\n' "${revision}"
+    printf 'database=%s\n' "${POSTGRES_DB:-quantpilot}"
+    printf 'compose_project=quantpilot\n'
+  } >"${ACTIVE_BACKUP_DIR}/manifest.txt"
+  prune_server_backups
+  log "Backup verified and retained: ${ACTIVE_BACKUP_DIR}"
+}
+
+build_server_candidate() {
+  safe_remove_build_dir "${CANDIDATE_BUILD_DIR}"
+  cd "${APP_DIR}"
+  log "Building candidate web artifact while the current service remains online..."
+  QUANTPILOT_NEXT_DIST_DIR=.next-candidate \
+    QUANTPILOT_PRESERVE_RUNNING_WEB=1 \
+    npm run build:server
+  [[ -s "${CANDIDATE_BUILD_DIR}/BUILD_ID" ]] || \
+    die "Candidate build completed without ${CANDIDATE_BUILD_DIR}/BUILD_ID."
+}
+
+activate_candidate_build() {
+  [[ -s "${CANDIDATE_BUILD_DIR}/BUILD_ID" ]] || return 0
+  log "Activating candidate web build..."
+  sudo systemctl stop "${WEB_SERVICE}"
+  safe_remove_build_dir "${ROLLBACK_BUILD_DIR}"
+  if [[ -d "${APP_DIR}/.next" ]]; then
+    mv "${APP_DIR}/.next" "${ROLLBACK_BUILD_DIR}"
+  fi
+  mv "${CANDIDATE_BUILD_DIR}" "${APP_DIR}/.next"
+  WEB_BUILD_SWAPPED=1
+}
+
+rollback_web_build() {
+  (( WEB_BUILD_SWAPPED == 1 )) || return 0
+  [[ -s "${ROLLBACK_BUILD_DIR}/BUILD_ID" ]] || return 0
+  log "Restoring the previous web build..."
+  set +e
+  sudo systemctl stop "${WEB_SERVICE}"
+  safe_remove_build_dir "${CANDIDATE_BUILD_DIR}"
+  if [[ -d "${APP_DIR}/.next" ]]; then
+    mv "${APP_DIR}/.next" "${CANDIDATE_BUILD_DIR}"
+  fi
+  mv "${ROLLBACK_BUILD_DIR}" "${APP_DIR}/.next"
+  sudo systemctl restart "${WEB_SERVICE}"
+  WEB_BUILD_SWAPPED=0
+  set -e
+  return 0
+}
+
+restore_revision_dependencies() {
+  local revision=$1
+  log "Restoring source and dependencies for revision ${revision}..."
+  git -C "${APP_DIR}" switch --detach "${revision}"
+  cd "${APP_DIR}"
+  QUANTPILOT_DEPLOYMENT=server npm ci --include=dev
+  sync_market_dependencies
+}
+
+rollback_failed_deployment() {
+  local revision=${PREVIOUS_REVISION}
+  trap - ERR
+  set +e
+  rollback_web_build
+  safe_remove_build_dir "${CANDIDATE_BUILD_DIR}"
+  restore_revision_dependencies "${revision}"
+  sudo systemctl restart "${MARKET_SERVICE}" "${WEB_SERVICE}"
+  log "Automatic application rollback restored revision ${revision}. Database changes were additive and were not removed."
+  set -e
+  return 0
+}
+
+latest_backup_revision() {
+  local latest
+  latest="$(
+    find "${BACKUP_DIR}" -mindepth 2 -maxdepth 2 -type f -name revision.txt -printf '%T@ %p\n' |
+      sort -nr |
+      awk 'NR == 1 { sub(/^[^ ]+ /, ""); print; exit }'
+  )"
+  [[ -n ${latest} && -s ${latest} ]] || die "No verified backup revision was found in ${BACKUP_DIR}."
+  tr -d '[:space:]' <"${latest}"
 }
 
 require_free_disk_space() {
@@ -180,7 +346,7 @@ reexec_updated_library_script() {
   sudo mv -f "${temporary_target}" "${target_script}"
   flock -u 9
   exec 9>&-
-  exec "${target_script}" update
+  exec env QUANTPILOT_PREVIOUS_REVISION="${PREVIOUS_REVISION}" "${target_script}" update
 }
 
 install_runtime_units() {
@@ -230,8 +396,12 @@ install_nginx_snippets() {
 
 pull_build_and_migrate() {
   check_worktree
+  if [[ -z ${PREVIOUS_REVISION} ]]; then
+    PREVIOUS_REVISION="$(git -C "${APP_DIR}" rev-parse HEAD)"
+  fi
   log "Fetching origin/${BRANCH} through the configured SSH remote..."
   git -C "${APP_DIR}" fetch --prune origin "${BRANCH}"
+  git -C "${APP_DIR}" switch "${BRANCH}"
   git -C "${APP_DIR}" pull --ff-only origin "${BRANCH}"
   log "Checked out $(git -C "${APP_DIR}" log -1 --oneline --decorate)"
   reexec_updated_library_script
@@ -252,25 +422,14 @@ pull_build_and_migrate() {
   npx --no-install prisma generate
 
   log "Installing market-data dependencies..."
-  local uv_args=(sync --frozen --extra baostock --extra akshare)
-  if [[ -n ${TUSHARE_TOKEN:-} ]]; then
-    uv_args+=(--extra tushare)
-  fi
-  cd "${APP_DIR}/services/market-data"
-  uv "${uv_args[@]}"
+  sync_market_dependencies
+  require_free_disk_space "production build"
+  build_server_candidate
 
-  log "Applying database initialization/migrations..."
+  create_server_backup
+  log "Applying additive database initialization/migrations after backup verification..."
   cd "${APP_DIR}"
   npm run db:init
-
-  require_free_disk_space "production build"
-  if systemctl cat "${WEB_SERVICE}" >/dev/null 2>&1; then
-    log "Stopping ${WEB_SERVICE} before replacing .next build artifacts..."
-    sudo systemctl stop "${WEB_SERVICE}"
-  fi
-  log "Building the production /smartstock application..."
-  npm run build:server
-  [[ -s "${APP_DIR}/.next/BUILD_ID" ]] || die "Production build completed without .next/BUILD_ID."
 
   install_runtime_units
   install_nginx_snippets
@@ -282,9 +441,17 @@ restart_services() {
   sudo systemctl restart "${MARKET_SERVICE}"
   wait_for_http "market-data" "http://127.0.0.1:${QUANTPILOT_MARKET_PORT:-8000}/health"
 
+  activate_candidate_build
   log "Restarting ${WEB_SERVICE}..."
   sudo systemctl restart "${WEB_SERVICE}"
   wait_for_http "web" "http://127.0.0.1:${WEB_PORT:-3000}${NEXT_PUBLIC_BASE_PATH:-/smartstock}"
+  wait_for_http \
+    "desktop connection capabilities" \
+    "http://127.0.0.1:${WEB_PORT:-3000}${NEXT_PUBLIC_BASE_PATH:-/smartstock}/api/desktop-connection/capabilities"
+  if [[ ${QUANTPILOT_RUN_CONNECTION_SMOKE:-1} == 1 ]]; then
+    cd "${APP_DIR}"
+    node scripts/admin/desktop-connection-smoke.js
+  fi
 
   if [[ -d /etc/nginx ]]; then
     sudo nginx -t
@@ -303,14 +470,20 @@ run_checks() {
   log "Checking systemd services..."
   systemctl is-active --quiet "${MARKET_SERVICE}" || die "${MARKET_SERVICE} is not active."
   systemctl is-active --quiet "${WEB_SERVICE}" || die "${WEB_SERVICE} is not active."
+  systemctl is-active --quiet quantpilot-diagnostics-cleanup.timer || \
+    die "quantpilot-diagnostics-cleanup.timer is not active."
   systemctl --no-pager --full status "${MARKET_SERVICE}" "${WEB_SERVICE}" | sed -n '1,28p'
 
   wait_for_http "market-data" "http://127.0.0.1:${QUANTPILOT_MARKET_PORT:-8000}/health"
   wait_for_http "strategy profiles" "http://127.0.0.1:${QUANTPILOT_MARKET_PORT:-8000}/api/v1/ingestion/strategy-profiles"
   wait_for_http "web" "http://127.0.0.1:${WEB_PORT:-3000}${NEXT_PUBLIC_BASE_PATH:-/smartstock}"
+  wait_for_http \
+    "desktop connection capabilities" \
+    "http://127.0.0.1:${WEB_PORT:-3000}${NEXT_PUBLIC_BASE_PATH:-/smartstock}/api/desktop-connection/capabilities"
 
   log "Enabled market-data timers:"
   systemctl list-timers 'quantpilot-market-*' --all --no-pager
+  systemctl list-timers 'quantpilot-diagnostics-cleanup.timer' --all --no-pager
   log "Disk and memory summary:"
   df -h "${APP_DIR}"
   free -h
@@ -325,6 +498,25 @@ sync_script_library() {
   sudo install -m 0755 "${source_script}" "${temporary_target}"
   sudo mv -f "${temporary_target}" "${target_script}"
   log "Script library updated: ${target_script}"
+}
+
+rollback_to_revision() {
+  local revision=${1:-}
+  check_worktree
+  PREVIOUS_REVISION="$(git -C "${APP_DIR}" rev-parse HEAD)"
+  load_environment
+  if [[ -z ${revision} ]]; then
+    revision="$(latest_backup_revision)"
+  fi
+  git -C "${APP_DIR}" cat-file -e "${revision}^{commit}" || \
+    die "Rollback revision is not available locally: ${revision}"
+  log "Rolling back application runtime from ${PREVIOUS_REVISION} to ${revision}..."
+  restore_revision_dependencies "${revision}"
+  build_server_candidate
+  restart_services
+  run_checks
+  PREVIOUS_REVISION=""
+  log "Application rollback completed at revision ${revision}. Additive database objects were preserved."
 }
 
 case "${MODE}" in
@@ -349,6 +541,23 @@ case "${MODE}" in
     sudo -v
     restart_services
     run_checks
+    ;;
+  backup)
+    require_layout
+    exec 9>"${LOCK_FILE}"
+    flock -n 9 || die "Another QuantPilot maintenance run is active: ${LOCK_FILE}"
+    sudo -v
+    load_environment
+    wait_for_compose_service_health timescaledb
+    create_server_backup
+    ;;
+  rollback)
+    require_layout
+    exec 9>"${LOCK_FILE}"
+    flock -n 9 || die "Another QuantPilot maintenance run is active: ${LOCK_FILE}"
+    sudo -v
+    rollback_to_revision "${TARGET_REVISION}"
+    sync_script_library
     ;;
   -h|--help|help)
     usage

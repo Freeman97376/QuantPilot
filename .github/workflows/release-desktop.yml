@@ -11,7 +11,19 @@ permissions:
 jobs:
   windows-x64:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
+    environment: desktop-release
+    env:
+      QUANTPILOT_SIGN_RELEASE: '1'
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      AZURE_CODE_SIGNING_ACCOUNT_NAME: ${{ vars.AZURE_CODE_SIGNING_ACCOUNT_NAME }}
+      AZURE_CERTIFICATE_PROFILE_NAME: ${{ vars.AZURE_CERTIFICATE_PROFILE_NAME }}
+      AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+      AZURE_SIGNING_PUBLISHER_NAME: ${{ vars.AZURE_SIGNING_PUBLISHER_NAME }}
+      WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+      WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,6 +45,9 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
+      - name: Generate server Prisma client
+        run: npm run prisma:generate:server
+
       - name: Install market-data dependencies
         working-directory: services/market-data
         run: uv sync --frozen --extra desktop-build
@@ -45,7 +60,58 @@ jobs:
             throw "Tag ${{ github.ref_name }} does not match package version v$version"
           }
 
-      - name: Build and publish Windows x64 release
+      - name: Run release gates
+        run: npm run release:check
+
+      - name: Build server web candidate
+        run: npm run build:server
+
+      - name: Build signed Windows x64 artifacts
+        run: npm run build:desktop
+
+      - name: Verify signatures, timestamps, hashes, and packaged secrets
+        shell: pwsh
+        run: ./scripts/release/verify-windows-artifacts.ps1
+
+      - name: Run packaged desktop smoke test
+        shell: pwsh
+        run: ./scripts/release/smoke-windows-desktop.ps1
+
+      - name: Run silent installer smoke test
+        shell: pwsh
+        run: |
+          $installer = (Get-ChildItem dist -File -Filter 'QuantPilot Setup *.exe' | Select-Object -First 1).FullName
+          ./scripts/release/test-windows-installer.ps1 -CurrentInstaller $installer
+
+      - name: Preserve verified artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantpilot-${{ github.ref_name }}-windows-x64
+          if-no-files-found: error
+          path: |
+            dist/QuantPilot Setup *.exe
+            dist/QuantPilot Setup *.exe.blockmap
+            dist/latest.yml
+            dist/SHA256SUMS.txt
+
+      - name: Publish verified GitHub Release
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run build:desktop -- --publish
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $assets = @(
+            (Get-ChildItem dist -File -Filter 'QuantPilot Setup *.exe' | Select-Object -First 1).FullName,
+            (Get-ChildItem dist -File -Filter 'QuantPilot Setup *.exe.blockmap' | Select-Object -First 1).FullName,
+            (Resolve-Path dist/latest.yml).Path,
+            (Resolve-Path dist/SHA256SUMS.txt).Path
+          )
+          if ($assets -contains $null) { throw 'Release assets are incomplete.' }
+          $releaseArgs = @('release', 'create', $tag) + $assets + @(
+            '--repo', '${{ github.repository }}',
+            '--title', "QuantPilot $tag",
+            '--generate-notes'
+          )
+          if ($tag.Contains('-')) { $releaseArgs += '--prerelease' }
+          & gh @releaseArgs
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed with $LASTEXITCODE" }

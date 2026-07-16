@@ -1,6 +1,6 @@
 {
   "name": "quantpilot",
-  "version": "2.1.0-alpha.1",
+  "version": "2.1.0-alpha.2",
   "description": "Quant-focused AI workflow builder powered by Claude Code compatible runtimes",
   "private": true,
   "main": "index.js",
@@ -24,6 +24,7 @@
     "start": "next start",
     "lint": "eslint .",
     "type-check": "node scripts/checks/type-check.js",
+    "audit:release": "npm audit --audit-level=high && npm audit --omit=dev --audit-level=moderate",
     "prisma:generate": "npm run prisma:generate:server",
     "prisma:generate:server": "prisma generate --schema prisma/schema.prisma",
     "prisma:generate:desktop": "prisma generate --schema prisma/schema.desktop.prisma",
@@ -69,6 +70,7 @@
     "check:homepage": "node scripts/checks/check-homepage-visual.js",
     "check:project-visual": "node scripts/checks/check-project-visual.js",
     "benchmark:quant": "node scripts/evals/run-quant-benchmarks.js",
+    "release:check": "node scripts/checks/check-release-readiness.js",
     "postinstall": "npm run ensure:env"
   },
   "dependencies": {
@@ -111,6 +113,11 @@
     "prisma": "^6.19.3",
     "tailwindcss": "^3.4.19",
     "typescript": "^6.0.3"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "8.5.19"
+    }
   },
   "engines": {
     "node": ">=20.19.0",
@@ -167,7 +174,10 @@
       "category": "public.app-category.developer-tools"
     },
     "win": {
-      "signAndEditExecutable": false,
+      "signAndEditExecutable": true,
+      "signExts": [
+        ".exe"
+      ],
       "target": [
         {
           "target": "nsis",

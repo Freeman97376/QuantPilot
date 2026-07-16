@@ -390,7 +390,7 @@ if (setupSingleInstanceLock()) {
         await startMarketSidecar();
       }
       await createMainWindow();
-      if (!isDev) {
+      if (!isDev && process.env.QUANTPILOT_DISABLE_AUTO_UPDATE !== '1') {
         autoUpdater.checkForUpdatesAndNotify().catch((error) => {
           console.warn('Automatic update check failed:', error instanceof Error ? error.message : error);
         });

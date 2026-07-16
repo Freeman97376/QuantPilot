@@ -1,6 +1,17 @@
+const path = require('path');
+
 const isStandaloneBuild = process.env.QUANTPILOT_STANDALONE_BUILD === '1';
 const skipRouteOutputTracing = process.env.QUANTPILOT_SKIP_ROUTE_TRACING !== '0' && !isStandaloneBuild;
 const projectRoot = __dirname;
+
+function normalizeDistDir(value) {
+  const raw = (value ?? '').trim();
+  if (!raw) return '';
+  if (path.isAbsolute(raw) || raw.split(/[\\/]+/).includes('..')) {
+    throw new Error('QUANTPILOT_NEXT_DIST_DIR must be a relative directory inside the repository.');
+  }
+  return raw.replace(/[\\/]+$/, '');
+}
 
 function normalizeBasePath(value) {
   const raw = (value ?? '').trim();
@@ -20,9 +31,12 @@ function normalizeBasePath(value) {
 
 const basePath = normalizeBasePath(process.env.NEXT_PUBLIC_BASE_PATH);
 const publicApiBase = process.env.NEXT_PUBLIC_API_BASE?.trim() || basePath;
+const distDir = normalizeDistDir(process.env.QUANTPILOT_NEXT_DIST_DIR);
 const tracingExcludes = [
   './.git/**',
   './.next/**',
+  './.next-candidate/**',
+  './.next-rollback/**',
   './.turbo/**',
   './.ruff_cache/**',
   './.pytest_cache/**',
@@ -43,6 +57,8 @@ const tracingExcludes = [
 const tracePluginIgnores = [
   '**/.git/**',
   '**/.next/**',
+  '**/.next-candidate/**',
+  '**/.next-rollback/**',
   '**/.turbo/**',
   '**/.ruff_cache/**',
   '**/.pytest_cache/**',
@@ -62,6 +78,7 @@ const nextConfig = {
   devIndicators: false,
   allowedDevOrigins: ['127.0.0.1'],
   ...(isStandaloneBuild ? { output: 'standalone' } : {}),
+  ...(distDir ? { distDir } : {}),
   // Agent、数据库和本地进程管理只在 Node.js API Route 中运行，构建时保持外部依赖。
   serverExternalPackages: [
     '@anthropic-ai/claude-agent-sdk',

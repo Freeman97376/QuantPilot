@@ -65,8 +65,14 @@ The desktop updater reads that public release without distributing a GitHub
 access token. Application databases and user-data directories are outside the
 installation directory and are not overwritten by upgrades.
 
-Before a stable release, sign the Windows artifacts and run install, upgrade,
-backup/restore, offline, revoked-account, and insufficient-disk tests on a clean
-Windows x64 machine. Alpha builds intentionally set `signAndEditExecutable` to
-`false`; enable signing only after the release workflow has a protected signing
-certificate and timestamp configuration.
+The `v2.1.0-alpha.2` public workflow requires Azure Artifact Signing or an OV
+certificate, verifies the publisher and timestamp, and refuses unsigned release
+artifacts. Local development builds may remain unsigned. Before a stable
+release, run install, upgrade, backup/restore, offline, revoked-account, and
+insufficient-disk tests on two clean Windows x64 machines.
+
+Server maintenance creates and verifies a PostgreSQL backup before additive
+migrations, builds into `.next-candidate` while the current web process remains
+online, and retains `.next-rollback`. `quantpilot-maintain rollback [revision]`
+restores the selected Git revision, dependencies, web build, and services while
+leaving additive database objects intact.
