@@ -234,7 +234,9 @@ class EastMoneyClient:
             "np": "1",
             "fltt": "2",
             "invt": "2",
-            "fid": "f12",
+            # First import defines the desktop autofill order. Sort by current
+            # turnover amount so the first 300 symbols are the most liquid.
+            "fid": "f6",
             "fs": EASTMONEY_A_SHARE_LIST_FS,
             "fields": EASTMONEY_A_SHARE_LIST_FIELDS,
         }

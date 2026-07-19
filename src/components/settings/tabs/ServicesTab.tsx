@@ -1,11 +1,12 @@
 "use client";
 
 import type { ReactNode } from "react";
+import type { ServiceProvider } from "@/types/shared/service";
 
 interface ServiceToken {
   id: string;
   provider: string;
-  token: string;
+  token: string | null;
   name?: string;
   created_at: string;
   last_used?: string;
@@ -15,12 +16,13 @@ const SERVICE_LABELS: Record<string, string> = {
   github: "GitHub",
   supabase: "Supabase",
   vercel: "Vercel",
+  deepseek: "DeepSeek 智能策略",
 };
 
 interface ServicesTabProps {
   tokens: { [key: string]: ServiceToken | null };
   getProviderIcon: (provider: string) => ReactNode;
-  onServiceClick: (provider: "github" | "supabase" | "vercel") => void;
+  onServiceClick: (provider: ServiceProvider) => void;
 }
 
 function ServicesTab({ tokens, getProviderIcon, onServiceClick }: ServicesTabProps) {
@@ -29,7 +31,7 @@ function ServicesTab({ tokens, getProviderIcon, onServiceClick }: ServicesTabPro
       <div>
         <h3 className="mb-4 text-lg font-medium text-slate-900">服务令牌</h3>
         <p className="mb-6 text-sm text-slate-600">
-          配置 GitHub、Supabase 与 Vercel 令牌。令牌会被所有工作空间复用，用于仓库创建、数据库接入和部署发布。
+          配置 DeepSeek、GitHub、Supabase 与 Vercel 密钥。DeepSeek Key 用于智能策略意图解析，其他令牌用于仓库、数据库和部署服务。
         </p>
 
         <div className="space-y-4">
@@ -55,7 +57,7 @@ function ServicesTab({ tokens, getProviderIcon, onServiceClick }: ServicesTabPro
               <div className="flex items-center gap-2">
                 {token && <div className="h-2 w-2 animate-pulse rounded-full bg-green-400" />}
                 <button
-                  onClick={() => onServiceClick(provider as "github" | "supabase" | "vercel")}
+                  onClick={() => onServiceClick(provider as ServiceProvider)}
                   className="rounded-lg bg-slate-200 px-3 py-1.5 text-sm text-slate-700 transition-all hover:bg-slate-300"
                 >
                   {token ? "更新令牌" : "添加令牌"}
@@ -80,8 +82,7 @@ function ServicesTab({ tokens, getProviderIcon, onServiceClick }: ServicesTabPro
               <h3 className="text-sm font-medium text-slate-900">令牌使用范围</h3>
               <div className="mt-2 text-sm text-slate-700">
                 <p>
-                  这里保存的是平台级凭据。具体项目绑定到哪个 GitHub 仓库、Supabase 项目或 Vercel 项目，
-                  仍在对应工作空间的项目设置中完成。
+                  桌面版凭据通过 Windows 安全存储加密。DeepSeek 只参与自然语言意图解析，不接触本地行情数据库，也不执行筛选 SQL。
                 </p>
               </div>
             </div>

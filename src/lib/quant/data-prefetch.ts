@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { ensureBaselineEvidenceFiles } from '@/lib/quant/evidence';
 import { appendQuantWorkspaceEvent, ensureQuantWorkspace, QuantRunPlan } from '@/lib/quant/workspace';
+import { marketApiFetch } from '@/lib/quant/market-api-client';
 import { serializeQuantVisualizationTemplate } from '@/lib/quant/visualization-templates';
 
 type JsonRecord = Record<string, unknown>;
@@ -16,7 +17,6 @@ interface PrefetchResult {
   summary: string;
 }
 
-const MARKET_API_BASE_URL = process.env.QUANTPILOT_MARKET_API_URL ?? 'http://127.0.0.1:8000';
 const FETCH_TIMEOUT_MS = Number.parseInt(process.env.QUANTPILOT_MARKET_PREFETCH_TIMEOUT_MS ?? '', 10) || 12_000;
 const SCREENER_FETCH_TIMEOUT_MS =
   Number.parseInt(process.env.QUANTPILOT_SCREENER_PREFETCH_TIMEOUT_MS ?? '', 10) || Math.max(FETCH_TIMEOUT_MS, 45_000);
@@ -814,7 +814,7 @@ async function fetchJson(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? FETCH_TIMEOUT_MS);
   try {
-    const response = await fetch(`${MARKET_API_BASE_URL}${endpoint}`, {
+    const response = await marketApiFetch(endpoint, {
       ...init,
       signal: controller.signal,
       cache: 'no-store',

@@ -1,5 +1,6 @@
 import { prisma } from '@/lib/db/client';
-import { Prisma } from '@/lib/db/types';
+import type { Prisma } from '@/lib/db/types';
+import { isPrismaKnownRequestError } from '@/lib/db/errors';
 
 export interface ActiveRequestSummary {
   hasActiveRequests: boolean;
@@ -163,8 +164,7 @@ interface UpsertUserRequestOptions {
 
 async function handleNotFound(error: unknown, context: string): Promise<void> {
   if (
-    error instanceof Prisma.PrismaClientKnownRequestError &&
-    error.code === 'P2025'
+    isPrismaKnownRequestError(error, 'P2025')
   ) {
     if (process.env.NODE_ENV !== 'production') {
       console.warn(`[UserRequests] ${context}: record not found`);

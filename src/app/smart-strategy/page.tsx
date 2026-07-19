@@ -12,7 +12,7 @@ export const metadata: Metadata = {
 
 export default async function SmartStrategyPage() {
   const data = await getSmartStrategyPageData();
-  const runtimeStatus = getSmartStrategyRuntimeStatus();
+  const runtimeStatus = await getSmartStrategyRuntimeStatus();
   return (
     <div className="min-h-screen bg-surface text-slate-900">
       <PageHeader

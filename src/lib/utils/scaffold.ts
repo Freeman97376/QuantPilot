@@ -55,8 +55,14 @@ function shouldRefreshScaffoldFile(filePath: string, existing: string): boolean 
       existing.includes('127.0.0.1:8000/api/v1') ||
       existing.includes('QUANTPILOT_MARKET_API') ||
       existing.includes('/api/v1/');
+    const forwardsDesktopToken =
+      existing.includes('X-QuantPilot-Startup-Token') &&
+      existing.includes('QUANTPILOT_LAUNCH_TOKEN');
 
-    return !targetsQuantBackend && trimmed.length < 1_200;
+    return (
+      (!targetsQuantBackend && trimmed.length < 1_200) ||
+      (targetsQuantBackend && !forwardsDesktopToken && trimmed.length < 1_600)
+    );
   }
 
   if (normalizedPath.endsWith('/scripts/run-dev.js')) {
@@ -3166,6 +3172,9 @@ export async function GET(
     cache: 'no-store',
     headers: {
       Accept: 'application/json',
+      ...(process.env.QUANTPILOT_LAUNCH_TOKEN
+        ? { 'X-QuantPilot-Startup-Token': process.env.QUANTPILOT_LAUNCH_TOKEN }
+        : {}),
     },
   });
   const body = await response.text();

@@ -1,16 +1,12 @@
-import { Prisma } from '@/lib/db/types';
+import type { Prisma } from '@/lib/db/types';
 import { prisma } from '@/lib/db/client';
 import { getRuntimeDegradationConfig } from '@/lib/config/degradation';
+import { MARKET_API_BASE_URL, marketApiFetch } from '@/lib/quant/market-api-client';
 import {
   deliverResearchReportNotification,
   type ResearchNotificationChannelInput,
   type ResearchNotificationReportInput,
 } from './notification-adapters';
-
-const MARKET_API_BASE_URL =
-  process.env.QUANTPILOT_MARKET_API_URL ||
-  process.env.QUANTPILOT_MARKET_API_BASE_URL ||
-  'http://127.0.0.1:8000';
 
 const DEFAULT_WATCHLIST_ID = 'daily-quantpilot-core';
 const DEFAULT_CHANNEL_ID = 'dry-run-wxwork-research';
@@ -278,7 +274,7 @@ async function fetchMarketProbe<T>(pathName: string, source: string, timeoutMs =
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(`${MARKET_API_BASE_URL}${pathName}`, {
+    const response = await marketApiFetch(pathName, {
       cache: 'no-store',
       signal: controller.signal,
     });

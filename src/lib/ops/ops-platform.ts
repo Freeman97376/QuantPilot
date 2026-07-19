@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { promisify } from 'util';
 import { getCapabilityCenterData } from '@/lib/quant/capability-center';
+import { marketApiHeaders } from '@/lib/quant/market-api-client';
 import { getStrategyDashboardData } from '@/lib/quant/strategies';
 import { getWorkspaceHealthDashboard, type WorkspaceHealthDashboard } from '@/lib/quant/workspace-health';
 import { getInfrastructureHealth, type InfrastructureHealth } from '@/lib/ops/infrastructure-health';
@@ -156,7 +157,11 @@ async function probeUrl(url: string, timeout = 2500): Promise<{ ok: boolean; sta
   const timer = setTimeout(() => controller.abort(), timeout);
   const started = Date.now();
   try {
-    const response = await fetch(url, { cache: 'no-store', signal: controller.signal });
+    const response = await fetch(url, {
+      cache: 'no-store',
+      signal: controller.signal,
+      headers: url.startsWith(MARKET_API_BASE_URL) ? marketApiHeaders() : undefined,
+    });
     return {
       ok: response.ok,
       status: response.status,

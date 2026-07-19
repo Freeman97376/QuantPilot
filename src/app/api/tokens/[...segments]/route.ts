@@ -11,7 +11,7 @@ interface RouteContext {
 }
 
 function isProvider(value: string): boolean {
-  return value === 'github' || value === 'supabase' || value === 'vercel';
+  return value === 'github' || value === 'supabase' || value === 'vercel' || value === 'deepseek';
 }
 
 export async function GET(request: NextRequest, { params }: RouteContext) {
@@ -36,7 +36,7 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
 
   if (segments.length === 3 && segments[0] === 'internal' && segments[2] === 'token') {
     const provider = segments[1];
-    if (!isProvider(provider)) {
+    if (!isProvider(provider) || provider === 'deepseek') {
       return NextResponse.json(
         { success: false, error: 'Invalid provider' },
         { status: 400 },

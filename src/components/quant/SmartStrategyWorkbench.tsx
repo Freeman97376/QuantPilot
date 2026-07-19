@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
@@ -12,13 +13,16 @@ import {
   Code2,
   Database,
   Gauge,
+  KeyRound,
   Layers3,
   LineChart,
   Loader2,
+  Pause,
   Play,
   RefreshCw,
   Search,
   Sparkles,
+  Square,
   Timer,
   WifiOff,
   X,
@@ -38,13 +42,13 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import type {
-  StrategyDashboardData,
   StrategyDataProfileId,
   StrategyIntent,
   StrategyRefreshResponse,
   StrategyScreenerCandidate,
   StrategyUniverse,
   StrategyUniverseMember,
+  SmartStrategyPageData,
   TechnicalScreenerCondition,
   TechnicalScreenerDraft,
   TechnicalScreenerResponse,
@@ -52,6 +56,7 @@ import type {
 import type { SmartStrategyRuntimeStatus } from "@/lib/quant/strategy-types";
 import { SMART_STRATEGY_MAX_PROMPT_LENGTH } from "@/lib/quant/strategy-types";
 import { StockKlineDetail } from "@/components/quant/StockKlineDetail";
+import GlobalSettings from "@/components/settings/GlobalSettings";
 import {
   API_BASE,
   formatLargeValue,
@@ -61,11 +66,12 @@ import {
 } from "@/app/strategy-platform/strategy-platform-helpers";
 
 type Props = {
-  data: Pick<StrategyDashboardData, "generatedAt" | "research">;
+  data: SmartStrategyPageData;
   runtimeStatus: SmartStrategyRuntimeStatus;
 };
 
 type WorkflowPhase = "idle" | "drafting" | "running";
+type DataActionPhase = "idle" | "initializing" | "controlling";
 
 type WorkflowError = {
   stage: "draft" | "run" | "clipboard";
@@ -459,7 +465,12 @@ function memberFromCandidate(candidate: StrategyScreenerCandidate): StrategyUniv
 }
 
 export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
+  const router = useRouter();
   const defaultUniverseId = data.research.primaryUniverseId || data.research.universes[0]?.id || "";
+  const [marketState, setMarketState] = useState(data);
+  const [dataActionPhase, setDataActionPhase] = useState<DataActionPhase>("idle");
+  const [dataError, setDataError] = useState<string | null>(null);
+  const [allowReadySubset, setAllowReadySubset] = useState(false);
   const [prompt, setPrompt] = useState(DEFAULT_SMART_STRATEGY_PROMPT);
   const [universeId, setUniverseId] = useState(defaultUniverseId);
   const [limit, setLimit] = useState("20");
@@ -477,6 +488,7 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
   const [minuteEstimate, setMinuteEstimate] = useState<MinuteAnalysisEstimate | null>(null);
   const [isMinuteLoading, setIsMinuteLoading] = useState(false);
   const [minuteError, setMinuteError] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const activeRequestRef = useRef<AbortController | null>(null);
   const requestSequenceRef = useRef(0);
   const resultsPanelRef = useRef<HTMLDivElement | null>(null);
@@ -488,16 +500,41 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
   const requestUniverseId = universeId.trim() || undefined;
 
   const selectedUniverse =
-    data.research.universes.find((universe) => universe.id === universeId) ??
-    data.research.universes.find((universe) => universe.id === data.research.primaryUniverseId) ??
-    data.research.universes[0] ??
+    marketState.research.universes.find((universe) => universe.id === universeId) ??
+    marketState.research.universes.find((universe) => universe.id === marketState.research.primaryUniverseId) ??
+    marketState.research.universes[0] ??
     null;
   const intents = draft?.intents ?? [];
   const activeGroup = INDICATOR_GROUPS.find((group) => group.id === activeGroupId) ?? INDICATOR_GROUPS[0];
   const resultHitRate = hitRate(result);
   const workflowBusy = workflowPhase !== "idle";
   const reviewMessage = draft ? draftReviewMessage(draft) : null;
-  const marketDataReady = !data.research.error && Boolean(selectedUniverse?.readyCount);
+  const memberCount = selectedUniverse?.memberCount ?? 0;
+  const readyCount = selectedUniverse?.readyCount ?? 0;
+  const priorityTarget = Math.min(300, memberCount);
+  const priorityReady = Math.min(priorityTarget, readyCount);
+  const fullMarketReady = memberCount > 0 && readyCount >= memberCount;
+  const marketDataReady = !marketState.research.error
+    && (fullMarketReady || (allowReadySubset && readyCount > 0));
+  const activeIngestionJob = marketState.ingestionJobs.jobs.find((job) => (
+    job.provider === "baostock-autofill" && job.status === "running"
+  )) ?? null;
+  const latestIngestionJob = activeIngestionJob ?? marketState.ingestionJobs.jobs.find((job) => (
+    job.provider === "baostock-autofill"
+  )) ?? null;
+  const activeIngestionJobId = activeIngestionJob?.id ?? null;
+  const ingestionControl = typeof activeIngestionJob?.metadata.control === "string"
+    ? activeIngestionJob.metadata.control
+    : "run";
+  const ingestionProcessed = latestIngestionJob
+    ? latestIngestionJob.completedSymbols + latestIngestionJob.failedSymbols
+    : readyCount;
+  const ingestionTotal = latestIngestionJob?.universeTotalSymbols
+    ?? latestIngestionJob?.totalSymbols
+    ?? memberCount;
+  const ingestionProgress = ingestionTotal > 0
+    ? Math.min(100, (ingestionProcessed / ingestionTotal) * 100)
+    : 0;
   const conditions = useMemo(
     () => draft?.spec.conditions.map((condition, index) => ({
       id: `${condition.field}-${condition.operator}-${index}`,
@@ -535,6 +572,30 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
   }, [selectedSymbol]);
 
   useEffect(() => () => activeRequestRef.current?.abort(), []);
+
+  useEffect(() => {
+    if (!activeIngestionJobId) return;
+    const controller = new AbortController();
+    const refresh = async () => {
+      try {
+        const nextState = await postSmartStrategy<SmartStrategyPageData>(
+          { action: "data-status" },
+          controller.signal,
+          10_000
+        );
+        setMarketState(nextState);
+      } catch (refreshError) {
+        if (!controller.signal.aborted) {
+          setDataError(refreshError instanceof Error ? refreshError.message : String(refreshError));
+        }
+      }
+    };
+    const interval = window.setInterval(() => void refresh(), 2_500);
+    return () => {
+      controller.abort();
+      window.clearInterval(interval);
+    };
+  }, [activeIngestionJobId]);
 
   const cancelActiveWorkflow = () => {
     requestSequenceRef.current += 1;
@@ -624,6 +685,7 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
           action: "run",
           universeId: requestUniverseId,
           limit: parsedLimit,
+          allowReadySubset,
           spec: nextDraft.spec,
         },
         controller.signal,
@@ -657,6 +719,7 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
           action: "run",
           universeId: requestUniverseId,
           limit: parsedLimit,
+          allowReadySubset,
           spec: activeDraft.spec,
         },
         controller.signal,
@@ -673,6 +736,48 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
         setWorkflowPhase("idle");
         activeRequestRef.current = null;
       }
+    }
+  };
+
+  const initializeMarketData = async () => {
+    const controller = new AbortController();
+    setDataActionPhase("initializing");
+    setDataError(null);
+    try {
+      const response = await postSmartStrategy<{ state: SmartStrategyPageData }>(
+        { action: "initialize-market-data", universeId: requestUniverseId },
+        controller.signal,
+        240_000
+      );
+      setMarketState(response.state);
+      router.refresh();
+    } catch (initializationError) {
+      setDataError(initializationError instanceof Error ? initializationError.message : String(initializationError));
+    } finally {
+      setDataActionPhase("idle");
+    }
+  };
+
+  const controlDataTask = async (taskAction: "pause" | "resume" | "stop") => {
+    if (!activeIngestionJob) return;
+    const controller = new AbortController();
+    setDataActionPhase("controlling");
+    setDataError(null);
+    try {
+      const nextState = await postSmartStrategy<SmartStrategyPageData>(
+        {
+          action: "control-data-task",
+          jobId: activeIngestionJob.id,
+          taskAction,
+        },
+        controller.signal,
+        15_000
+      );
+      setMarketState(nextState);
+    } catch (controlError) {
+      setDataError(controlError instanceof Error ? controlError.message : String(controlError));
+    } finally {
+      setDataActionPhase("idle");
     }
   };
 
@@ -785,41 +890,136 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
 
   return (
     <main className="mx-auto w-full max-w-[1900px] space-y-4 px-3 py-5 lg:px-4">
-      <section className="flex flex-col gap-3 rounded-md border border-slate-200 bg-white px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="text-sm font-semibold text-slate-950">首次使用：描述策略后，一次完成解析与筛选</p>
-            <Badge
-              variant="outline"
-              className={runtimeStatus.configured
-                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                : "border-blue-200 bg-blue-50 text-blue-700"}
-            >
-              {runtimeStatus.configured ? `${runtimeStatus.model ?? "DeepSeek"} 已就绪` : "本地解析可用"}
-            </Badge>
-            <Badge
-              variant="outline"
-              className={marketDataReady
-                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                : "border-amber-200 bg-amber-50 text-amber-700"}
-            >
-              {marketDataReady ? "本地行情已就绪" : "行情数据待检查"}
-            </Badge>
+      <section className="rounded-md border border-slate-200 bg-white">
+        <div className="flex flex-col gap-3 border-b border-slate-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <Database className="h-4 w-4 text-blue-600" />
+              <h2 className="text-sm font-semibold text-slate-950">数据准备</h2>
+              <Badge variant="outline" className="border-blue-200 bg-blue-50 text-blue-700">
+                桌面本地 DuckDB · 不需要 Docker
+              </Badge>
+              <Badge
+                variant="outline"
+                className={marketDataReady
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                  : "border-amber-200 bg-amber-50 text-amber-700"}
+              >
+                {fullMarketReady ? "全市场日线已就绪" : allowReadySubset && readyCount > 0 ? "仅筛选已就绪标的" : "等待数据完成"}
+              </Badge>
+            </div>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              在本页完成全 A 股目录导入、近 5 年前复权日线补齐和智能策略筛选；前 300 支高流动性标的优先。
+            </p>
           </div>
-          <p className="mt-1 text-xs leading-5 text-slate-500">
-            1 描述条件 · 2 系统复核白名单 · 3 本地日 K 确定性筛选。AI 不会生成或执行任意 SQL。
-          </p>
-        </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-3 text-xs text-slate-500">
-          <span className="tabular-nums">
-            {selectedUniverse?.name ?? "未选择股票池"} · {selectedUniverse?.readyCount ?? 0}/{selectedUniverse?.memberCount ?? 0} 已就绪
-          </span>
-          {!marketDataReady ? (
-            <Link href="/data-platform" className="inline-flex items-center gap-1 font-medium text-blue-700 hover:text-blue-800">
-              检查数据平台
+          <div className="flex shrink-0 flex-wrap gap-2">
+            <Button type="button" variant="outline" size="sm" className="h-9" onClick={() => setSettingsOpen(true)}>
+              <KeyRound className="h-3.5 w-3.5" />
+              {runtimeStatus.configured ? "管理 DeepSeek" : "配置 DeepSeek"}
+            </Button>
+            <Link href="/data-platform" className="inline-flex h-9 items-center gap-1 rounded-md border border-slate-200 px-3 text-xs font-medium text-slate-600 hover:bg-slate-50">
+              高级数据管理
               <ArrowRight className="h-3.5 w-3.5" />
             </Link>
+          </div>
+        </div>
+
+        <div className="space-y-4 p-4">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+              <p className="text-[11px] font-medium uppercase tracking-wide text-slate-400">1 · 证券目录</p>
+              <p className="mt-1 text-lg font-semibold tabular-nums text-slate-950">{memberCount.toLocaleString("zh-CN")} 支</p>
+              <p className="mt-1 text-xs text-slate-500">东方财富全 A 股元数据</p>
+            </div>
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+              <p className="text-[11px] font-medium uppercase tracking-wide text-slate-400">2 · 优先可用</p>
+              <p className="mt-1 text-lg font-semibold tabular-nums text-slate-950">{priorityReady}/{priorityTarget || 300}</p>
+              <p className="mt-1 text-xs text-slate-500">高流动性标的 5 年日线</p>
+            </div>
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+              <p className="text-[11px] font-medium uppercase tracking-wide text-slate-400">3 · 全市场覆盖</p>
+              <p className="mt-1 text-lg font-semibold tabular-nums text-slate-950">{readyCount.toLocaleString("zh-CN")}/{memberCount.toLocaleString("zh-CN")}</p>
+              <p className="mt-1 text-xs text-slate-500">Baostock 日线 · AKShare 失败兜底</p>
+            </div>
+          </div>
+
+          <div>
+            <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className="font-medium text-slate-700">
+                {activeIngestionJob
+                  ? ingestionControl === "pause" ? "补数已暂停，重启应用后会自动续跑" : "补数正在后台运行"
+                  : fullMarketReady ? "股票池已完成" : memberCount ? "可继续补齐缺失日线" : "尚未导入真实证券目录"}
+              </span>
+              <span className="tabular-nums text-slate-500">{ingestionProgress.toFixed(1)}%</span>
+            </div>
+            <div className="h-2 overflow-hidden rounded-full bg-slate-100" aria-label={`补数进度 ${ingestionProgress.toFixed(1)}%`}>
+              <div className="h-full rounded-full bg-blue-600 transition-[width]" style={{ width: `${ingestionProgress}%` }} />
+            </div>
+            {latestIngestionJob?.error ? (
+              <p className="mt-2 text-xs leading-5 text-red-600">最近任务：{latestIngestionJob.error}</p>
+            ) : null}
+          </div>
+
+          {dataError || marketState.research.error ? (
+            <div role="alert" className="flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <p className="min-w-0 break-words leading-5">{dataError ?? marketState.research.error}</p>
+            </div>
           ) : null}
+
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                onClick={() => void initializeMarketData()}
+                disabled={dataActionPhase !== "idle" || Boolean(activeIngestionJob)}
+                className="min-h-11 bg-blue-600 text-white hover:bg-blue-700"
+              >
+                {dataActionPhase === "initializing" ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                {dataActionPhase === "initializing"
+                  ? "正在导入全 A 股目录"
+                  : memberCount === 0
+                    ? "导入全 A 股并开始补数"
+                    : fullMarketReady
+                      ? "刷新目录并增量补数"
+                      : "继续补数"}
+              </Button>
+              {activeIngestionJob ? (
+                <>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={dataActionPhase !== "idle"}
+                    onClick={() => void controlDataTask(ingestionControl === "pause" ? "resume" : "pause")}
+                  >
+                    {ingestionControl === "pause" ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
+                    {ingestionControl === "pause" ? "继续" : "暂停"}
+                  </Button>
+                  <Button type="button" variant="outline" disabled={dataActionPhase !== "idle"} onClick={() => void controlDataTask("stop")}>
+                    <Square className="h-3.5 w-3.5" />
+                    停止任务
+                  </Button>
+                </>
+              ) : null}
+            </div>
+
+            <button
+              type="button"
+              role="switch"
+              aria-checked={allowReadySubset}
+              disabled={readyCount <= 0 || fullMarketReady}
+              onClick={() => setAllowReadySubset((value) => !value)}
+              className="flex min-h-11 items-center gap-3 rounded-md border border-slate-200 bg-white px-3 text-left disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <span className={cn("relative h-5 w-9 rounded-full transition-colors", allowReadySubset ? "bg-blue-600" : "bg-slate-200")}>
+                <span className={cn("absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform", allowReadySubset ? "translate-x-[18px]" : "translate-x-0.5")} />
+              </span>
+              <span>
+                <span className="block text-xs font-semibold text-slate-700">仅筛选已就绪标的</span>
+                <span className="block text-[11px] text-slate-400">显式开启后可在全市场补完前先用当前 {readyCount} 支</span>
+              </span>
+            </button>
+          </div>
         </div>
       </section>
 
@@ -844,7 +1044,7 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
                     <SelectValue placeholder="选择股票池" />
                   </SelectTrigger>
                   <SelectContent>
-                    {data.research.universes.map((universe) => (
+                    {marketState.research.universes.map((universe) => (
                       <SelectItem key={universe.id} value={universe.id}>
                         {universe.name}
                       </SelectItem>
@@ -907,7 +1107,7 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
                 disabled={workflowBusy}
                 onChange={(event) => applyPrompt(event.target.value)}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !workflowBusy && prompt.trim()) {
+                  if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !workflowBusy && marketDataReady && prompt.trim()) {
                     event.preventDefault();
                     if (draft && !reviewMessage) void runScreener();
                     else if (!draft) void generateAndRun();
@@ -951,7 +1151,7 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
               <Button
                 type="button"
                 onClick={() => draft ? void runScreener() : void generateAndRun()}
-                disabled={workflowBusy || !prompt.trim() || Boolean(draft && reviewMessage)}
+                disabled={workflowBusy || !prompt.trim() || !marketDataReady || Boolean(draft && reviewMessage)}
                 aria-busy={workflowBusy}
                 className="min-h-11 flex-1 bg-blue-600 text-white hover:bg-blue-700"
               >
@@ -1578,6 +1778,14 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
           ) : null}
         </div>
       </section>
+      <GlobalSettings
+        isOpen={settingsOpen}
+        initialTab="services"
+        onClose={() => {
+          setSettingsOpen(false);
+          router.refresh();
+        }}
+      />
     </main>
   );
 }

@@ -73,6 +73,35 @@ function main() {
     builderArgs.push('--publish', 'always');
   }
   run(process.execPath, builderArgs, { env });
+
+  const packagedDesktopQueryEngine = path.join(
+    rootDir,
+    'dist',
+    'win-unpacked',
+    'resources',
+    'standalone',
+    'node_modules',
+    '@quantpilot',
+    'prisma-desktop-client',
+    'query_engine-windows.dll.node'
+  );
+  if (!fs.existsSync(packagedDesktopQueryEngine)) {
+    throw new Error(`Packaged desktop Prisma query engine is missing: ${packagedDesktopQueryEngine}`);
+  }
+
+  const packagedPytz = path.join(
+    rootDir,
+    'dist',
+    'win-unpacked',
+    'resources',
+    'sidecar',
+    '_internal',
+    'pytz',
+    '__init__.py'
+  );
+  if (!fs.existsSync(packagedPytz)) {
+    throw new Error(`Packaged desktop pytz runtime is missing: ${packagedPytz}`);
+  }
 }
 
 try {

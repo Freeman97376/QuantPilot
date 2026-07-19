@@ -1,14 +1,10 @@
 import crypto from 'node:crypto';
 import { prisma } from '@/lib/db/client';
-import { Prisma } from '@/lib/db/types';
+import type { Prisma } from '@/lib/db/types';
 import { loadDesktopPreferences } from '@/lib/desktop/preferences';
 import { isDesktopRuntime } from '@/lib/runtime/mode';
+import { marketApiFetch } from '@/lib/quant/market-api-client';
 import type { StrategyDataProfileId } from '@/lib/quant/strategy-types';
-
-const MARKET_API_BASE_URL =
-  process.env.QUANTPILOT_MARKET_API_URL ||
-  process.env.QUANTPILOT_MARKET_API_BASE_URL ||
-  'http://127.0.0.1:8000';
 
 type CoverageItem = {
   symbol: string;
@@ -63,7 +59,7 @@ async function assertMinutePolicy(): Promise<void> {
 }
 
 async function inspectCoverage(profile: StrategyDataProfileId, symbols: string[]) {
-  const response = await fetch(`${MARKET_API_BASE_URL}/api/v1/ingestion/strategy-estimate`, {
+  const response = await marketApiFetch('/api/v1/ingestion/strategy-estimate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ profile, symbols }),

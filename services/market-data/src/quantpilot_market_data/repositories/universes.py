@@ -143,6 +143,24 @@ async def get_universe_fetch_targets(universe_id: str) -> list[dict[str, str]]:
 
 
 async def list_research_universes() -> list[ResearchUniverse]:
+    if is_desktop_repository():
+        summaries = await list_research_universe_summaries()
+        universes: list[ResearchUniverse] = []
+        for summary in summaries:
+            rows, _, _, _ = await get_duckdb_repository().universe_member_rows(
+                universe_id=summary.id,
+                page=1,
+                page_size=max(1, summary.member_count),
+                keyword=None,
+                include_inactive=False,
+            )
+            universes.append(
+                ResearchUniverse(
+                    **summary.model_dump(),
+                    members=[research_member_from_row(row) for row in rows],
+                )
+            )
+        return universes
     async with await connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
         await cursor.execute(
             """
@@ -345,6 +363,32 @@ async def list_research_universes() -> list[ResearchUniverse]:
 
 
 async def list_research_universe_summaries() -> list[ResearchUniverseSummary]:
+    if is_desktop_repository():
+        rows = await get_duckdb_repository().universe_summaries()
+        return [
+            ResearchUniverseSummary(
+                id=str(row["id"]),
+                name=str(row["name"]),
+                description=row.get("description"),
+                status=str(row.get("status") or "active"),
+                source=str(row.get("source") or "local-market-data"),
+                tags=[str(item) for item in row.get("tags", [])],
+                default_timeframe=str(row.get("default_timeframe") or "daily"),
+                default_adjustment=str(row.get("default_adjustment") or "qfq"),
+                provider=str(row.get("provider") or "baostock"),
+                member_count=int(row.get("member_count") or 0),
+                stock_count=int(row.get("stock_count") or 0),
+                etf_count=int(row.get("etf_count") or 0),
+                index_count=int(row.get("index_count") or 0),
+                fund_count=int(row.get("fund_count") or 0),
+                ready_count=int(row.get("ready_count") or 0),
+                bar_count=int(row.get("bar_count") or 0),
+                latest_ts=row.get("latest_ts"),
+                created_at=row.get("created_at"),
+                updated_at=row.get("updated_at"),
+            )
+            for row in rows
+        ]
     async with await connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
         await cursor.execute(
             """
@@ -450,6 +494,22 @@ async def list_research_universe_members_page(
     keyword: str | None = None,
     include_inactive: bool = False,
 ) -> tuple[list[ResearchUniverseMember], int, int, int]:
+    if is_desktop_repository():
+        rows, total, total_pages, current_page = (
+            await get_duckdb_repository().universe_member_rows(
+                universe_id=universe_id,
+                page=page,
+                page_size=max(1, min(page_size, 100)),
+                keyword=keyword,
+                include_inactive=include_inactive,
+            )
+        )
+        return (
+            [research_member_from_row(row) for row in rows],
+            total,
+            total_pages,
+            current_page,
+        )
     clean_keyword = (keyword or "").strip()
     keyword_pattern = f"%{clean_keyword}%"
     page_size = max(1, min(page_size, 100))
@@ -971,6 +1031,24 @@ async def add_security_to_universe(
     weight: Decimal | None = None,
 ) -> ResearchUniverseMember:
     symbol = canonical_symbol(security.symbol, security.market)
+    if is_desktop_repository():
+        await get_duckdb_repository().add_securities_to_universe(
+            universe_id=universe_id,
+            securities=[security],
+            role=role,
+            added_source="strategy-platform",
+        )
+        rows, _, _, _ = await get_duckdb_repository().universe_member_rows(
+            universe_id=universe_id,
+            page=1,
+            page_size=10,
+            keyword=symbol,
+            include_inactive=True,
+        )
+        for row in rows:
+            if str(row["symbol"]) == symbol:
+                return research_member_from_row(row)
+        raise DatabaseError(f"股票已写入但无法读取股票池成员：{symbol}")
     metadata = {
         "query": security.query,
         "raw": security.raw,

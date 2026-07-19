@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from contextlib import suppress
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -36,6 +37,7 @@ from quantpilot_market_data.repositories.ingestion import (
     create_ingestion_job,
     finish_ingestion_job,
     get_history_ingestion_preflight,
+    list_ingestion_jobs,
     update_ingestion_job_progress,
 )
 from quantpilot_market_data.repositories.universes import get_universe_fetch_targets
@@ -70,6 +72,7 @@ from quantpilot_market_data.services.ingestion_support import (
     wait_for_autofill_control,
 )
 from quantpilot_market_data.services.registry import ProviderRegistryTtls
+from quantpilot_market_data.services.strategy_refresh import expected_latest_daily_date
 
 QUOTE_CACHE_TTL_SECONDS = ttl_from_env("QUANTPILOT_QUOTE_CACHE_TTL_SECONDS", 5)
 SYMBOL_CACHE_TTL_SECONDS = ttl_from_env("QUANTPILOT_SYMBOL_CACHE_TTL_SECONDS", 86400)
@@ -78,26 +81,33 @@ FINANCIAL_CACHE_TTL_SECONDS = ttl_from_env("QUANTPILOT_FINANCIAL_CACHE_TTL_SECON
 ANNOUNCEMENT_CACHE_TTL_SECONDS = ttl_from_env("QUANTPILOT_ANNOUNCEMENT_CACHE_TTL_SECONDS", 600)
 SCREENER_CACHE_TTL_SECONDS = ttl_from_env("QUANTPILOT_SCREENER_CACHE_TTL_SECONDS", 60)
 def create_app() -> FastAPI:
+    desktop_runtime = (
+        os.getenv("QUANTPILOT_RUNTIME_MODE", "server").strip().lower() == "desktop"
+    )
     app = FastAPI(
         title="QuantPilot Market Data API",
         description="QuantPilot 量化分析 Agent 的市场数据后端",
         version="0.1.0",
     )
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1):\d+$",
-        allow_credentials=False,
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["*"],
-    )
+    if not desktop_runtime:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1):\d+$",
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["*"],
+        )
 
     @app.middleware("http")
     async def verify_desktop_startup_token(request: Request, call_next):
         expected = os.getenv("QUANTPILOT_STARTUP_TOKEN", "").strip()
         if (
-            os.getenv("QUANTPILOT_RUNTIME_MODE", "server").strip().lower() == "desktop"
+            desktop_runtime
             and expected
-            and request.url.path == "/health"
+            and (
+                request.url.path == "/health"
+                or request.url.path.startswith("/api/v1/")
+            )
             and request.headers.get("x-quantpilot-startup-token") != expected
         ):
             return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
@@ -110,9 +120,44 @@ def create_app() -> FastAPI:
     tushare_client = TushareClient()
     auto_fill_tasks: set[asyncio.Task[None]] = set()
 
+    async def fetch_history_with_desktop_fallback(
+        symbol_or_secid: str,
+        request: HistoryIngestionRequest,
+    ):
+        try:
+            return await fetch_baostock_kline_for_ingestion(
+                baostock_client,
+                symbol_or_secid,
+                request,
+            )
+        except (BaoStockError, ValueError) as primary_error:
+            try:
+                return await fetch_akshare_kline_for_ingestion(
+                    akshare_client,
+                    symbol_or_secid,
+                    request,
+                )
+            except (AkShareError, ValueError) as fallback_error:
+                raise BaoStockError(
+                    f"Baostock 失败：{primary_error}；AKShare 兜底失败：{fallback_error}"
+                ) from fallback_error
+
     @app.on_event("startup")
     async def initialize_storage() -> None:
         await initialize_runtime_repository()
+        if is_desktop_repository():
+            await resume_desktop_autofill_jobs()
+            scheduler_task = asyncio.create_task(run_desktop_incremental_scheduler())
+            auto_fill_tasks.add(scheduler_task)
+            scheduler_task.add_done_callback(auto_fill_tasks.discard)
+
+    @app.on_event("shutdown")
+    async def stop_desktop_background_tasks() -> None:
+        tasks = list(auto_fill_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     app.include_router(analytics_router)
     app.include_router(foundation_router)
@@ -486,10 +531,8 @@ def create_app() -> FastAPI:
                     )
                     continue
                 try:
-                    kline = await fetch_baostock_kline_for_ingestion(
-                        baostock_client,
-                        target["query"],
-                        request,
+                    kline = await fetch_history_with_desktop_fallback(
+                        target["query"], request
                     )
                     symbol, rows_upserted, first_date, last_date = await upsert_kline_response(
                         kline,
@@ -639,10 +682,8 @@ def create_app() -> FastAPI:
                     )
                     continue
                 try:
-                    kline = await fetch_baostock_kline_for_ingestion(
-                        baostock_client,
-                        target["query"],
-                        request,
+                    kline = await fetch_history_with_desktop_fallback(
+                        target["query"], request
                     )
                     symbol, rows_upserted, first_date, last_date = await upsert_kline_response(
                         kline,
@@ -719,18 +760,24 @@ def create_app() -> FastAPI:
         start_offset: int,
         max_batches: int,
         started_at: datetime,
+        resume_job: object | None = None,
     ) -> None:
         current_offset = start_offset
-        completed_batches = 0
-        completed_total = 0
-        failed_total = 0
-        rows_received_total = 0
-        rows_upserted_total = 0
-        child_job_ids: list[str] = []
+        resume_metadata = (
+            getattr(resume_job, "metadata", {}) if resume_job is not None else {}
+        )
+        completed_batches = int(resume_metadata.get("completed_batches") or 0)
+        completed_total = int(getattr(resume_job, "completed_symbols", 0) or 0)
+        failed_total = int(getattr(resume_job, "failed_symbols", 0) or 0)
+        rows_received_total = int(getattr(resume_job, "rows_received", 0) or 0)
+        rows_upserted_total = int(getattr(resume_job, "rows_upserted", 0) or 0)
+        child_job_ids: list[str] = [
+            str(value) for value in (resume_metadata.get("child_job_ids") or [])
+        ]
         final_next_offset = current_offset
         stop_reason = "completed"
         autofill_required_fields = baostock_required_fields(request)
-        total_batches = max(
+        total_batches = completed_batches + max(
             1,
             ((len(all_targets) - start_offset) + request.batch_size - 1)
             // request.batch_size,
@@ -966,10 +1013,8 @@ def create_app() -> FastAPI:
                         )
                     else:
                         try:
-                            kline = await fetch_baostock_kline_for_ingestion(
-                                baostock_client,
-                                target["query"],
-                                request,
+                            kline = await fetch_history_with_desktop_fallback(
+                                target["query"], request
                             )
                             (
                                 symbol,
@@ -1310,6 +1355,9 @@ def create_app() -> FastAPI:
                     "field_contract": required_fields,
                     "preflight_enabled": True,
                     "control": "run",
+                    "auto_resume": True,
+                    "request": request.model_dump(mode="json"),
+                    "last_heartbeat_at": started_at.isoformat(),
                 },
             )
 
@@ -1345,6 +1393,126 @@ def create_app() -> FastAPI:
             )
         except DatabaseError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
+
+    async def resume_desktop_autofill_jobs() -> bool:
+        resumed = False
+        resumed_scopes: set[str] = set()
+        jobs = await list_ingestion_jobs(limit=100)
+        for job in jobs:
+            metadata = job.metadata
+            next_offset = int(metadata.get("next_offset") or 0)
+            resume_scope = job.universe_id or job.id
+            if (
+                job.provider != "baostock-autofill"
+                or job.status not in {"running", "partial"}
+                or not metadata.get("auto_resume")
+                or next_offset <= 0
+                or metadata.get("stop_reason") == "stopped"
+                or resume_scope in resumed_scopes
+            ):
+                continue
+            request_payload = metadata.get("request")
+            if not isinstance(request_payload, dict):
+                continue
+            try:
+                request = HistoryAutoFillIngestionRequest.model_validate(request_payload)
+                all_targets = [
+                    {
+                        "symbol": symbol,
+                        "query": normalize_fetch_symbol(symbol),
+                        "asset_type": "stock",
+                    }
+                    for symbol in (request.symbols or [])
+                ]
+                if not all_targets and request.universe_id:
+                    all_targets = await get_universe_fetch_targets(request.universe_id)
+                if not all_targets:
+                    continue
+                effective_offset = next_offset if next_offset < len(all_targets) else 0
+                if effective_offset == 0:
+                    continue
+                calculated_batches = max(
+                    1,
+                    ((len(all_targets) - effective_offset) + request.batch_size - 1)
+                    // request.batch_size,
+                )
+                completed_batches = int(metadata.get("completed_batches") or 0)
+                max_batches = completed_batches + calculated_batches
+                resumed_at = datetime.now(UTC)
+                await update_ingestion_job_progress(
+                    job_id=job.id,
+                    status="running",
+                    completed_symbols=job.completed_symbols,
+                    failed_symbols=job.failed_symbols,
+                    rows_received=job.rows_received,
+                    rows_upserted=job.rows_upserted,
+                    error=None,
+                    metadata={
+                        "control": "run",
+                        "stop_reason": None,
+                        "active_child_job_id": None,
+                        "resumed_at": resumed_at.isoformat(),
+                        "last_heartbeat_at": resumed_at.isoformat(),
+                        "max_batches": max_batches,
+                    },
+                )
+                task = asyncio.create_task(
+                    run_baostock_history_autofill(
+                        parent_job_id=job.id,
+                        request=request,
+                        all_targets=all_targets,
+                        start_offset=effective_offset,
+                        max_batches=max_batches,
+                        started_at=job.started_at or resumed_at,
+                        resume_job=job,
+                    )
+                )
+                auto_fill_tasks.add(task)
+                task.add_done_callback(auto_fill_tasks.discard)
+                resumed_scopes.add(resume_scope)
+                resumed = True
+            except (ValueError, DatabaseError):
+                continue
+        return resumed
+
+    async def ensure_desktop_daily_incremental() -> None:
+        universe_id = "a-share-sample-research-pool"
+        targets = await get_universe_fetch_targets(universe_id)
+        if not targets:
+            return
+        target_end = expected_latest_daily_date().isoformat()
+        jobs = await list_ingestion_jobs(universe_id=universe_id, limit=100)
+        for job in jobs:
+            if job.provider != "baostock-autofill":
+                continue
+            request_payload = job.metadata.get("request")
+            request_end = (
+                request_payload.get("end")
+                if isinstance(request_payload, dict)
+                else None
+            )
+            if job.status == "running" or (
+                job.status == "completed" and request_end == target_end
+            ):
+                return
+        await start_baostock_history_autofill(
+            HistoryAutoFillIngestionRequest(
+                universe_id=universe_id,
+                period="daily",
+                adjustment="qfq",
+                batch_size=25,
+                lookback_years=5,
+                end=target_end,
+                request_delay_seconds=0.2,
+                batch_delay_seconds=0.2,
+            )
+        )
+
+    async def run_desktop_incremental_scheduler() -> None:
+        while True:
+            with suppress(DatabaseError, HTTPException, ValueError):
+                await ensure_desktop_daily_incremental()
+            await asyncio.sleep(15 * 60)
 
     @app.post(
         "/api/v1/ingestion/eastmoney/realtime-snapshot",

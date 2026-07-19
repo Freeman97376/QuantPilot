@@ -172,7 +172,7 @@ async function main() {
     assert.equal(timeout.generatedBy, 'rule-template', 'provider timeouts must use the local fallback');
 
     process.env.DEEPSEEK_BASE_URL = 'https://user:password@api.deepseek.com';
-    assert.equal(smartStrategy.getSmartStrategyRuntimeStatus().configured, false, 'embedded endpoint credentials must be rejected');
+    assert.equal((await smartStrategy.getSmartStrategyRuntimeStatus()).configured, false, 'embedded endpoint credentials must be rejected');
   } finally {
     global.fetch = originalFetch;
     for (const [key, value] of Object.entries(savedEnvironment)) {

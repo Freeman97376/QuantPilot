@@ -94,6 +94,21 @@ def test_strategy_profile_registry_endpoint() -> None:
     assert profiles["minute_backtest"]["paid_only"] is True
 
 
+def test_desktop_startup_token_protects_all_api_routes(monkeypatch) -> None:
+    monkeypatch.setenv("QUANTPILOT_RUNTIME_MODE", "desktop")
+    monkeypatch.setenv("QUANTPILOT_STARTUP_TOKEN", "desktop-test-token")
+    client = TestClient(create_app())
+
+    unauthorized = client.get("/api/v1/ingestion/strategy-profiles")
+    assert unauthorized.status_code == 401
+
+    authorized = client.get(
+        "/api/v1/ingestion/strategy-profiles",
+        headers={"X-QuantPilot-Startup-Token": "desktop-test-token"},
+    )
+    assert authorized.status_code == 200
+
+
 def test_expected_latest_daily_date_skips_weekend_before_close() -> None:
     monday_morning = datetime(2026, 7, 13, 10, 0, tzinfo=CN_TZ)
     assert strategy_refresh.expected_latest_daily_date(monday_morning).isoformat() == "2026-07-10"

@@ -60,8 +60,8 @@ function GeneralTab({
         </div>
         <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
           <p className="text-xs font-medium text-slate-500">服务令牌</p>
-          <p className="mt-2 text-lg font-semibold text-slate-900">{configuredServiceCount}/3 已配置</p>
-          <p className="mt-1 text-sm text-slate-600">GitHub、Supabase、Vercel 连接状态</p>
+          <p className="mt-2 text-lg font-semibold text-slate-900">{configuredServiceCount}/4 已配置</p>
+          <p className="mt-1 text-sm text-slate-600">DeepSeek、GitHub、Supabase、Vercel 连接状态</p>
         </div>
       </div>
 

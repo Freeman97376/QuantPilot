@@ -2,13 +2,12 @@
 
 const fs = require('fs/promises');
 const path = require('path');
-const os = require('os');
 const { spawn } = require('child_process');
 const dotenv = require('dotenv');
 
 const rootDir = path.join(__dirname, '..', '..');
 const sqlDir = path.join(rootDir, 'sqls');
-const isWindows = os.platform() === 'win32';
+const prismaCliPath = require.resolve('prisma/build/index.js');
 
 dotenv.config({ path: path.join(rootDir, '.env') });
 dotenv.config({ path: path.join(rootDir, '.env.local') });
@@ -18,7 +17,6 @@ function run(command, args, options = {}) {
     const child = spawn(command, args, {
       cwd: options.cwd ?? rootDir,
       stdio: options.stdio ?? 'inherit',
-      shell: isWindows,
       env: {
         ...process.env,
         ...(options.env ?? {}),
@@ -36,6 +34,10 @@ function run(command, args, options = {}) {
   });
 }
 
+function runPrisma(args, options = {}) {
+  return run(process.execPath, [prismaCliPath, ...args], options);
+}
+
 async function listSqlFiles() {
   const entries = await fs.readdir(sqlDir, { withFileTypes: true });
   return entries
@@ -47,7 +49,7 @@ async function listSqlFiles() {
 async function applySqlFile(filePath) {
   await fs.access(filePath);
   console.log(`[db:init] applying ${path.relative(rootDir, filePath)}`);
-  await run('npx', ['prisma', 'db', 'execute', '--file', filePath, '--schema', path.join(rootDir, 'prisma', 'schema.prisma')], {
+  await runPrisma(['db', 'execute', '--file', filePath, '--schema', path.join(rootDir, 'prisma', 'schema.prisma')], {
     stdio: 'inherit',
     env: {
       PRISMA_HIDE_UPDATE_MESSAGE: '1',
@@ -77,7 +79,7 @@ async function applyBootstrapSql() {
 async function main() {
   await applyBootstrapSql();
   console.log('[db:init] syncing Prisma schema');
-  await run('npx', ['prisma', 'db', 'push'], {
+  await runPrisma(['db', 'push'], {
     env: {
       PRISMA_HIDE_UPDATE_MESSAGE: '1',
     },

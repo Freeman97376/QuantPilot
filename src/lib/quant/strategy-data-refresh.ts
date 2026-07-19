@@ -7,11 +7,7 @@ import type {
   StrategyRefreshItem,
   StrategyRefreshResponse,
 } from '@/lib/quant/strategy-types';
-
-const MARKET_API_BASE_URL =
-  process.env.QUANTPILOT_MARKET_API_URL ||
-  process.env.QUANTPILOT_MARKET_API_BASE_URL ||
-  'http://127.0.0.1:8000';
+import { marketApiFetch } from '@/lib/quant/market-api-client';
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -140,7 +136,7 @@ export async function refreshStrategyData(params: {
         .update(grantPayload)
         .digest('hex');
     }
-    const response = await fetch(`${MARKET_API_BASE_URL}/api/v1/ingestion/strategy-refresh`, {
+    const response = await marketApiFetch('/api/v1/ingestion/strategy-refresh', {
       method: 'POST',
       headers,
       body: JSON.stringify({

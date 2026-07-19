@@ -669,11 +669,12 @@ export default function HomePage() {
             type="button"
             onClick={() => setShowGlobalSettings(true)}
             variant="ghost"
-            size="icon"
-            className="h-8 w-8"
+            size="sm"
+            className="h-9 gap-2 px-3"
             aria-label="设置"
           >
             <Settings className="h-4 w-4" />
+            <span>设置</span>
           </Button>
         </div>
       </header>

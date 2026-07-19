@@ -27,6 +27,21 @@ function main() {
   copyRequired(path.join(nextStandalone, '.next'), path.join(stageDir, '.next'));
   copyRequired(path.join(rootDir, '.next', 'static'), path.join(stageDir, '.next', 'static'));
   copyRequired(path.join(rootDir, 'public'), path.join(stageDir, 'public'));
+  copyRequired(
+    path.join(rootDir, 'node_modules', '@quantpilot', 'prisma-desktop-client'),
+    path.join(stageDir, 'node_modules', '@quantpilot', 'prisma-desktop-client')
+  );
+
+  const desktopQueryEngine = path.join(
+    stageDir,
+    'node_modules',
+    '@quantpilot',
+    'prisma-desktop-client',
+    'query_engine-windows.dll.node'
+  );
+  if (!fs.existsSync(desktopQueryEngine)) {
+    throw new Error(`Desktop Prisma query engine is missing: ${desktopQueryEngine}`);
+  }
 
   for (const relative of ['.claude', 'config']) {
     const source = path.join(rootDir, relative);

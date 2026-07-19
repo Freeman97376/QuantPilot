@@ -52,5 +52,13 @@ if (hasCompleteAzureConfiguration) {
 module.exports = {
   ...baseConfig,
   forceCodeSigning: releaseSigningRequired,
+  extraResources: [
+    ...(baseConfig.extraResources || []),
+    {
+      from: 'node_modules/@quantpilot/prisma-desktop-client',
+      to: 'standalone/node_modules/@quantpilot/prisma-desktop-client',
+      filter: ['**/*'],
+    },
+  ],
   win,
 };

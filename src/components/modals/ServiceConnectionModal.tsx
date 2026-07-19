@@ -1,13 +1,15 @@
 "use client";
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { BrainCircuit } from 'lucide-react';
+import type { ServiceProvider } from '@/types/shared/service';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? '';
 
 interface ServiceConnectionModalProps {
   isOpen: boolean;
   onClose: () => void;
-  provider: 'github' | 'supabase' | 'vercel';
+  provider: ServiceProvider;
   projectId?: string;
 }
 
@@ -73,8 +75,8 @@ export default function ServiceConnectionModal({
       });
       
       if (response.ok) {
-        const savedTokenData = await response.json();
-        setSavedToken(savedTokenData);
+        const savedTokenPayload = await response.json();
+        setSavedToken(savedTokenPayload.data ?? savedTokenPayload);
         setToken('');
         setShowTokenInput(false);
         // Use a more elegant notification instead of alert
@@ -292,6 +294,21 @@ export default function ServiceConnectionModal({
             "Paste the token below and click 'Save Token'"
           ],
           actions: ['deploy']
+        };
+      case 'deepseek':
+        return {
+          title: 'DeepSeek',
+          description: '用于智能策略的自然语言意图解析；最终筛选仍由 QuantPilot 本地确定性执行。',
+          tokenUrl: 'https://platform.deepseek.com/api_keys',
+          tokenName: 'API Key',
+          icon: <BrainCircuit className="h-8 w-8" aria-hidden="true" />,
+          instructions: [
+            '打开 DeepSeek 开放平台并登录账号',
+            '进入 API Keys 页面创建一个新密钥',
+            '复制密钥并粘贴到下方输入框',
+            '保存后返回智能策略页面重新生成策略',
+          ],
+          actions: [],
         };
     }
   };

@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/db/client';
-import { Prisma } from '@/lib/db/types';
+import type { Prisma } from '@/lib/db/types';
 
 export type MinuteDataPolicy = 'unset' | 'enabled' | 'disabled';
 

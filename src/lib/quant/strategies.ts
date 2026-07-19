@@ -3,6 +3,7 @@ import { getRuntimeDegradationConfig } from '@/lib/config/degradation';
 import { getQuantCapability, type QuantCapabilityId } from '@/lib/quant/capabilities';
 import { serializeProjects } from '@/lib/serializers/project';
 import type { Project } from '@/types';
+import { MARKET_API_BASE_URL, marketApiFetch } from './market-api-client';
 
 export type {
   StrategyStatus,
@@ -55,6 +56,8 @@ export type {
   StrategyIngestionJob,
   StrategyIngestionJobControlResult,
   StrategyIngestionJobsResponse,
+  StrategyAShareUniverseImportResult,
+  SmartStrategyPageData,
   StrategyFoundationComponent,
   StrategyFactorDefinition,
   StrategyTradingCalendarDay,
@@ -79,7 +82,6 @@ export type {
 import {
   FALLBACK_FOUNDATION_STATE,
   SAMPLE_UNIVERSE_ID,
-  SAMPLE_UNIVERSE_MEMBER_SEEDS,
   STRATEGY_FACTOR_CATALOG,
   STRATEGY_TEMPLATES,
 } from './strategy-catalog';
@@ -122,6 +124,8 @@ import type {
   StrategyIngestionJob,
   StrategyIngestionJobControlResult,
   StrategyIngestionJobsResponse,
+  StrategyAShareUniverseImportResult,
+  SmartStrategyPageData,
   StrategyFoundationComponent,
   StrategyFactorDefinition,
   StrategyTradingCalendarDay,
@@ -136,10 +140,6 @@ import type {
   StrategyDashboardData
 } from './strategy-types';
 
-const MARKET_API_BASE_URL =
-  process.env.QUANTPILOT_MARKET_API_URL ||
-  process.env.QUANTPILOT_MARKET_API_BASE_URL ||
-  'http://127.0.0.1:8000';
 function getMarketApiConfig() {
   return getRuntimeDegradationConfig().components.marketApi;
 }
@@ -149,43 +149,6 @@ function assertMarketApiEnabled() {
     throw new Error('market API 已按降级配置停用');
   }
 }
-
-const SAMPLE_UNIVERSE_MEMBERS: StrategyUniverseMember[] = SAMPLE_UNIVERSE_MEMBER_SEEDS.map(
-  (member) => ({
-    ...member,
-    concepts: [],
-    sectorTags: inferSampleSectorTags(member.name),
-    assetType: 'stock',
-    currency: 'CNY',
-    timezone: 'Asia/Shanghai',
-    provider: 'eastmoney',
-    securityStatus: 'active',
-    role: 'member',
-    weight: Number((1 / SAMPLE_UNIVERSE_MEMBER_SEEDS.length).toFixed(8)),
-    rowCount: 0,
-    latestClose: null,
-    latestChangePct: null,
-    latestAmount: null,
-    latestTurnover: null,
-    strength20dPct: null,
-    strength60dPct: null,
-    ma20: null,
-    ma60: null,
-    trendStatus: 'insufficient',
-    avgAmount20d: null,
-    avgVolume20d: null,
-    avgTurnover20d: null,
-    tradeStatus: null,
-    isSt: null,
-    limitUp: null,
-    limitDown: null,
-    peTtm: null,
-    pbMrq: null,
-    psTtm: null,
-    pcfNcfTtm: null,
-    dataStatus: 'missing',
-  })
-);
 
 const FALLBACK_RESEARCH_STATE: StrategyResearchState = {
   primaryUniverseId: SAMPLE_UNIVERSE_ID,
@@ -201,9 +164,9 @@ const FALLBACK_RESEARCH_STATE: StrategyResearchState = {
       defaultTimeframe: 'daily',
       defaultAdjustment: 'qfq',
       provider: 'eastmoney',
-      members: SAMPLE_UNIVERSE_MEMBERS,
-      memberCount: SAMPLE_UNIVERSE_MEMBERS.length,
-      stockCount: SAMPLE_UNIVERSE_MEMBERS.length,
+      members: [],
+      memberCount: 0,
+      stockCount: 0,
       etfCount: 0,
       indexCount: 0,
       fundCount: 0,
@@ -232,15 +195,7 @@ const FALLBACK_RESEARCH_STATE: StrategyResearchState = {
       latestTs: null,
     },
   ],
-  coverage: SAMPLE_UNIVERSE_MEMBERS.map(member => ({
-    symbol: member.symbol,
-    name: member.name,
-    timeframe: 'daily',
-    adjustment: 'qfq',
-    provider: 'eastmoney',
-    rowCount: 0,
-    dataStatus: 'missing',
-  })),
+  coverage: [],
   ingestionPlan: {
     provider: 'eastmoney',
     universeId: SAMPLE_UNIVERSE_ID,
@@ -319,8 +274,8 @@ async function fetchBacktest(params: {
   for (const [key, value] of Object.entries(params.parameters)) {
     query.set(key, String(value));
   }
-  const response = await fetch(
-    `${MARKET_API_BASE_URL}/api/v1/backtests/strategies/${encodeURIComponent(params.strategyId)}/${encodeURIComponent(params.symbol)}?${query.toString()}`,
+  const response = await marketApiFetch(
+    `/api/v1/backtests/strategies/${encodeURIComponent(params.strategyId)}/${encodeURIComponent(params.symbol)}?${query.toString()}`,
     { cache: 'no-store' }
   );
   if (!response.ok) {
@@ -1427,7 +1382,7 @@ async function fetchMarketApiJson<T>(
     ? setTimeout(() => controller.abort(), options.timeoutMs)
     : null;
   try {
-    const response = await fetch(`${MARKET_API_BASE_URL}${pathName}`, {
+    const response = await marketApiFetch(pathName, {
       cache: 'no-store',
       signal: controller?.signal,
     });
@@ -1503,7 +1458,7 @@ export async function runTechnicalScreener(params: {
     ? setTimeout(() => controller.abort(), params.timeoutMs)
     : null;
   try {
-    const response = await fetch(`${MARKET_API_BASE_URL}/api/v1/research/screeners/a-share/technical`, {
+    const response = await marketApiFetch('/api/v1/research/screeners/a-share/technical', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1551,8 +1506,8 @@ export async function controlStrategyIngestionJob(params: {
   assertMarketApiEnabled();
   const jobId = params.jobId.trim();
   if (!jobId) throw new Error('缺少补数任务 ID');
-  const response = await fetch(
-    `${MARKET_API_BASE_URL}/api/v1/ingestion/jobs/${encodeURIComponent(jobId)}/control`,
+  const response = await marketApiFetch(
+    `/api/v1/ingestion/jobs/${encodeURIComponent(jobId)}/control`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1576,7 +1531,7 @@ export async function runStrategyDataQualityScan(params: {
   persist?: boolean;
 } = {}): Promise<StrategyDataQualityScan> {
   assertMarketApiEnabled();
-  const response = await fetch(`${MARKET_API_BASE_URL}/api/v1/foundation/data-quality/scan`, {
+  const response = await marketApiFetch('/api/v1/foundation/data-quality/scan', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -1810,11 +1765,67 @@ export async function getStrategyDashboardData(): Promise<StrategyDashboardData>
   };
 }
 
-export async function getSmartStrategyPageData(): Promise<Pick<StrategyDashboardData, 'generatedAt' | 'research'>> {
+export async function getSmartStrategyPageData(): Promise<SmartStrategyPageData> {
+  const [research, ingestionJobs] = await Promise.all([
+    getStrategyResearchState(),
+    getStrategyIngestionJobs({ limit: 20 }).catch(() => ({
+      jobs: [],
+      fetchedAt: new Date().toISOString(),
+    })),
+  ]);
   return {
     generatedAt: new Date().toISOString(),
-    research: await getStrategyResearchState(),
+    research,
+    ingestionJobs,
   };
+}
+
+export async function importStrategyAShareUniverse(params: {
+  universeId?: string;
+  pageSize?: number;
+} = {}): Promise<StrategyAShareUniverseImportResult> {
+  assertMarketApiEnabled();
+  const universeId = params.universeId || SAMPLE_UNIVERSE_ID;
+  const pageSize = Math.max(1, Math.min(params.pageSize ?? 100, 100));
+  let page = 1;
+  let totalPages = 1;
+  let totalAvailable = 0;
+  let importedCount = 0;
+  let completedPages = 0;
+
+  while (page <= totalPages && completedPages < 100) {
+    const response = await marketApiFetch('/api/v1/research/a-share/import-batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        universe_id: universeId,
+        page,
+        page_size: pageSize,
+        role: 'member',
+      }),
+      cache: 'no-store',
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      throw new Error(`A 股证券目录导入失败（第 ${page} 页，HTTP ${response.status}）：${text.slice(0, 220)}`);
+    }
+    const payload = asRecord(await response.json());
+    totalAvailable = asNumber(payload.total_available) ?? totalAvailable;
+    totalPages = Math.max(1, asNumber(payload.total_pages) ?? totalPages);
+    importedCount += asNumber(payload.imported_count) ?? 0;
+    completedPages += 1;
+    const nextPage = asNumber(payload.next_page);
+    if (!nextPage) break;
+    if (nextPage <= page) {
+      throw new Error(`A 股证券目录导入返回了无效下一页：${nextPage}`);
+    }
+    page = nextPage;
+  }
+
+  if (completedPages < totalPages) {
+    throw new Error(`A 股证券目录导入未完成：${completedPages}/${totalPages} 页`);
+  }
+  return { universeId, totalAvailable, totalPages, importedCount, completedPages };
 }
 
 export function buildStrategyPrompt(templateId: string, symbol?: string) {
@@ -1845,7 +1856,7 @@ export async function ingestStrategyUniverseHistory(params: {
     limit: params.limit ?? FALLBACK_RESEARCH_STATE.ingestionPlan.suggestedLimit,
     lookback_years: params.lookbackYears ?? FALLBACK_RESEARCH_STATE.ingestionPlan.lookbackYears,
   };
-  const response = await fetch(`${MARKET_API_BASE_URL}/api/v1/ingestion/eastmoney/history`, {
+  const response = await marketApiFetch('/api/v1/ingestion/eastmoney/history', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -1884,7 +1895,7 @@ export async function ingestStrategyUniverseHistoryBatch(params: {
     include_valuation_factors: params.includeValuationFactors === true,
     request_delay_seconds: 0.2,
   };
-  const response = await fetch(`${MARKET_API_BASE_URL}/api/v1/ingestion/baostock/history/batch`, {
+  const response = await marketApiFetch('/api/v1/ingestion/baostock/history/batch', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -1926,7 +1937,7 @@ export async function startStrategyUniverseHistoryAutoFill(params: {
     batch_delay_seconds: 0.2,
     max_batches: params.maxBatches,
   };
-  const response = await fetch(`${MARKET_API_BASE_URL}/api/v1/ingestion/baostock/history/autofill`, {
+  const response = await marketApiFetch('/api/v1/ingestion/baostock/history/autofill', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -1946,8 +1957,8 @@ export async function addStrategyUniverseMember(params: {
 }): Promise<StrategyUniverseMemberAddResult> {
   assertMarketApiEnabled();
   const universeId = params.universeId || SAMPLE_UNIVERSE_ID;
-  const response = await fetch(
-    `${MARKET_API_BASE_URL}/api/v1/research/universes/${encodeURIComponent(universeId)}/members`,
+  const response = await marketApiFetch(
+    `/api/v1/research/universes/${encodeURIComponent(universeId)}/members`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2003,8 +2014,8 @@ export async function getStrategySymbolBars(params: {
     include_metadata: params.includeMetadata ? 'true' : 'false',
   });
   if (params.provider) query.set('provider', params.provider);
-  const response = await fetch(
-    `${MARKET_API_BASE_URL}/api/v1/research/bars/${encodeURIComponent(params.symbol)}?${query.toString()}`,
+  const response = await marketApiFetch(
+    `/api/v1/research/bars/${encodeURIComponent(params.symbol)}?${query.toString()}`,
     { cache: 'no-store' }
   );
   if (!response.ok) {
@@ -2022,8 +2033,8 @@ export async function getStrategySymbolDividends(params: {
   const query = new URLSearchParams({
     limit: String(params.limit ?? 20),
   });
-  const response = await fetch(
-    `${MARKET_API_BASE_URL}/api/v1/events/dividends/${encodeURIComponent(params.symbol)}?${query.toString()}`,
+  const response = await marketApiFetch(
+    `/api/v1/events/dividends/${encodeURIComponent(params.symbol)}?${query.toString()}`,
     { cache: 'no-store' }
   );
   if (!response.ok) {

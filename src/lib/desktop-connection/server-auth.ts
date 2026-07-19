@@ -2,7 +2,6 @@ import crypto from 'node:crypto';
 import { hash, verify } from '@node-rs/argon2';
 import type { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db/client';
-import { Prisma } from '@/lib/db/types';
 import { isServerRuntime } from '@/lib/runtime/mode';
 
 export const ACCESS_TOKEN_TTL_MS = 15 * 60 * 1000;
@@ -94,7 +93,7 @@ async function recordFailedLogin(accountId: string): Promise<void> {
                 : account.lockedUntil,
           },
         });
-      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      }, { isolationLevel: 'Serializable' });
       return;
     } catch (error) {
       if (attempt === 2) throw error;

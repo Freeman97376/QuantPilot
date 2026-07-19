@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import { Prisma } from '@/lib/db/types';
+import { isPrismaKnownRequestError } from '@/lib/db/errors';
 import { prisma } from '@/lib/db/client';
 import { encrypt, decrypt } from '@/lib/crypto';
 import type { EnvVar } from '@/lib/db/types';
@@ -100,7 +100,7 @@ export async function createEnvVar(
     await syncDbToEnvFile(projectId);
     return mapEnvVar(created);
   } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+    if (isPrismaKnownRequestError(error, 'P2002')) {
       throw new Error(`Environment variable "${input.key}" already exists`);
     }
     throw error;
@@ -129,7 +129,7 @@ export async function updateEnvVar(
     await syncDbToEnvFile(projectId);
     return true;
   } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+    if (isPrismaKnownRequestError(error, 'P2025')) {
       return false;
     }
     throw error;
@@ -151,7 +151,7 @@ export async function deleteEnvVar(projectId: string, key: string): Promise<bool
     await syncDbToEnvFile(projectId);
     return true;
   } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+    if (isPrismaKnownRequestError(error, 'P2025')) {
       return false;
     }
     throw error;

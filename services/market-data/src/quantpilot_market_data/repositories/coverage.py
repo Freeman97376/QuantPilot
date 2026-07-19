@@ -9,6 +9,10 @@ from quantpilot_market_data.models import (
     MarketDataCoverageItem,
     MarketDataCoverageSummary,
 )
+from quantpilot_market_data.repositories.factory import (
+    get_duckdb_repository,
+    is_desktop_repository,
+)
 
 __all__ = ["MarketDataCoveragePage", "get_market_data_coverage_page", "list_market_data_coverage"]
 
@@ -60,6 +64,36 @@ async def get_market_data_coverage_page(
     normalized_page = max(1, page)
     normalized_page_size = max(1, page_size)
     offset = (normalized_page - 1) * normalized_page_size
+    if is_desktop_repository():
+        rows = await get_duckdb_repository().coverage_rows(
+            universe_id=universe_id,
+            include_inactive=include_inactive,
+        )
+        items = [_coverage_item_from_row(row) for row in rows]
+        total = len(items)
+        ready = sum(item.data_status == "ready" for item in items)
+        missing = sum(item.data_status == "missing" for item in items)
+        stale = sum(item.data_status == "stale" for item in items)
+        latest_ts = max(
+            (item.last_ts for item in items if item.last_ts is not None),
+            default=None,
+        )
+        summary = MarketDataCoverageSummary(
+            total=total,
+            ready=ready,
+            missing=missing,
+            stale=stale,
+            ready_ratio=round((ready / total) * 100, 2) if total else 0,
+            latest_ts=latest_ts,
+            total_rows=sum(item.row_count for item in items),
+        )
+        total_pages = max(1, (total + normalized_page_size - 1) // normalized_page_size)
+        return MarketDataCoveragePage(
+            items=items[offset : offset + normalized_page_size],
+            total=total,
+            total_pages=total_pages,
+            summary=summary,
+        )
     async with await connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
         if universe_id:
             await cursor.execute(

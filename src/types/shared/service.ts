@@ -2,7 +2,7 @@
  * Shared Service Types
  */
 
-export type ServiceProvider = 'github' | 'vercel' | 'supabase';
+export type ServiceProvider = 'github' | 'vercel' | 'supabase' | 'deepseek';
 
 export type ServiceStatus = 'connected' | 'disconnected' | 'error';
 

@@ -4,6 +4,7 @@ import {
   serializeQuantCapabilities,
 } from '@/lib/quant/capabilities';
 import { getRuntimeDegradationConfig } from '@/lib/config/degradation';
+import { MARKET_API_BASE_URL, marketApiFetch } from '@/lib/quant/market-api-client';
 import { getSkillsDashboardData } from '@/lib/quant/skills-dashboard';
 
 type JsonRecord = Record<string, unknown>;
@@ -87,11 +88,6 @@ export interface CapabilityCenterData {
   capabilities: CapabilityCenterItem[];
   dataProviders: CapabilityCenterDataProvider[];
 }
-
-const MARKET_API_BASE_URL =
-  process.env.QUANTPILOT_MARKET_API_URL ||
-  process.env.QUANTPILOT_MARKET_API_BASE_URL ||
-  'http://127.0.0.1:8000';
 
 const FALLBACK_DATA_PROVIDERS: CapabilityCenterDataProvider[] = [
   {
@@ -305,11 +301,11 @@ async function fetchMarketRegistry(): Promise<{
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 2_500);
   try {
-    const healthResponse = await fetch(`${MARKET_API_BASE_URL}/health`, {
+    const healthResponse = await marketApiFetch('/health', {
       cache: 'no-store',
       signal: controller.signal,
     });
-    const registryResponse = await fetch(`${MARKET_API_BASE_URL}/api/v1/registry`, {
+    const registryResponse = await marketApiFetch('/api/v1/registry', {
       cache: 'no-store',
       signal: controller.signal,
     });

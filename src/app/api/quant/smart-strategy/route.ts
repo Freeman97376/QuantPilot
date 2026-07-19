@@ -11,7 +11,14 @@ import {
   TECHNICAL_SCREENER_ALLOWED_FIELDS,
   TECHNICAL_SCREENER_ALLOWED_SORT_FIELDS,
 } from '@/lib/quant/strategy-intent';
-import { runTechnicalScreener } from '@/lib/quant/strategies';
+import {
+  controlStrategyIngestionJob,
+  getSmartStrategyPageData,
+  getStrategyIngestionJobs,
+  importStrategyAShareUniverse,
+  runTechnicalScreener,
+  startStrategyUniverseHistoryAutoFill,
+} from '@/lib/quant/strategies';
 import type { StrategyDataProfileId } from '@/lib/quant/strategies';
 import { refreshStrategyData } from '@/lib/quant/strategy-data-refresh';
 import {
@@ -142,10 +149,83 @@ function firstIssue(error: z.ZodError) {
   return `${path}${issue?.message ?? '参数格式不正确'}`;
 }
 
+async function ensureUniverseReady(
+  universeId: string | undefined,
+  allowReadySubset: boolean
+) {
+  const pageData = await getSmartStrategyPageData();
+  const universe = pageData.research.universes.find((item) => item.id === universeId)
+    ?? pageData.research.universes.find((item) => item.id === pageData.research.primaryUniverseId)
+    ?? pageData.research.universes[0];
+  if (!universe || universe.memberCount <= 0) {
+    return createErrorResponse(
+      '股票池没有真实证券数据',
+      '请先在当前页面点击“导入全 A 股并开始补数”。',
+      409
+    );
+  }
+  if (universe.readyCount <= 0) {
+    return createErrorResponse(
+      '本地日线尚未就绪',
+      '补数已经启动时请等待首批完成；任务进度会在当前页面自动刷新。',
+      409
+    );
+  }
+  if (!allowReadySubset && universe.readyCount < universe.memberCount) {
+    return createErrorResponse(
+      '所选股票池仍在补数',
+      `当前 ${universe.readyCount}/${universe.memberCount} 支已就绪。请等待全部完成，或在页面明确开启“仅筛选已就绪标的”。`,
+      409
+    );
+  }
+  return null;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json().catch(() => ({}));
     const action = typeof body.action === 'string' ? body.action : '';
+
+    if (action === 'data-status') {
+      return createSuccessResponse(await getSmartStrategyPageData());
+    }
+
+    if (action === 'initialize-market-data') {
+      const input = z.object({ universeId: universeIdSchema }).safeParse(body);
+      if (!input.success) return invalidRequest(firstIssue(input.error));
+      const universeId = input.data.universeId;
+      const catalog = await importStrategyAShareUniverse({ universeId });
+      const jobs = await getStrategyIngestionJobs({ universeId, limit: 20 });
+      const activeJob = jobs.jobs.find((job) => (
+        job.provider === 'baostock-autofill' && job.status === 'running'
+      ));
+      const autofill = activeJob ?? await startStrategyUniverseHistoryAutoFill({
+        universeId,
+        batchSize: 25,
+        lookbackYears: 5,
+        period: 'daily',
+        adjustment: 'qfq',
+      });
+      return createSuccessResponse({
+        catalog,
+        autofill,
+        state: await getSmartStrategyPageData(),
+      }, 201);
+    }
+
+    if (action === 'control-data-task') {
+      const input = z.object({
+        jobId: z.string().trim().min(1).max(180),
+        taskAction: z.enum(['pause', 'resume', 'stop']),
+      }).safeParse(body);
+      if (!input.success) return invalidRequest(firstIssue(input.error));
+      await controlStrategyIngestionJob({
+        jobId: input.data.jobId,
+        action: input.data.taskAction,
+        reason: 'smart-strategy-workbench',
+      });
+      return createSuccessResponse(await getSmartStrategyPageData());
+    }
 
     if (action === 'draft') {
       const input = z.object({
@@ -203,9 +283,15 @@ export async function POST(request: NextRequest) {
         universeId: universeIdSchema,
         tradeDate: tradeDateSchema,
         limit: limitSchema,
+        allowReadySubset: z.boolean().optional(),
         spec: technicalSpecSchema,
       }).safeParse(body);
       if (!input.success) return invalidRequest(firstIssue(input.error));
+      const readinessError = await ensureUniverseReady(
+        input.data.universeId,
+        input.data.allowReadySubset === true
+      );
+      if (readinessError) return readinessError;
       return createSuccessResponse(
         await runTechnicalScreener({
           universeId: input.data.universeId,

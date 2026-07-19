@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import { Prisma } from '@/lib/db/types';
+import type { Prisma } from '@/lib/db/types';
 import { prisma } from '@/lib/db/client';
 import { getRuntimeDegradationConfig } from '@/lib/config/degradation';
 import type { StrategyScanJob, StrategyScanRun, StrategyScanRunResult } from './strategy-types';

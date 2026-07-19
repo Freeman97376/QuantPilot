@@ -6,7 +6,7 @@ import shutil
 import threading
 from collections import defaultdict
 from collections.abc import Iterable
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import duckdb
 
 from quantpilot_market_data.database_core import (
+    DatabaseError,
     canonical_symbol,
     date_cutoff_datetime,
     lookback_cutoff_datetime,
@@ -24,6 +25,47 @@ from quantpilot_market_data.indicators import build_technical_feature_rows
 from quantpilot_market_data.models import LocalKlineBar, LocalKlineResponse, LocalKlineSummary
 
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _json_array(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
+def _dict_rows(cursor: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
+    columns = [item[0] for item in cursor.description]
+    return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+
+
+def _aware_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    return None
 
 
 class DuckDBMarketRepository:
@@ -122,6 +164,30 @@ class DuckDBMarketRepository:
                 connection.execute(
                     "INSERT INTO quant.market_schema_version VALUES (1, now()) ON CONFLICT DO NOTHING"
                 )
+                connection.execute(
+                    """
+                    INSERT INTO quant.security_universes
+                      (id, name, description, tags, metadata)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    [
+                        "a-share-sample-research-pool",
+                        "全 A 股股票池",
+                        "桌面端真实 A 股标的目录；首次进入智能策略页后从东方财富导入。",
+                        json.dumps(["a-share", "desktop", "full-market"], ensure_ascii=False),
+                        json.dumps(
+                            {
+                                "provider": "baostock",
+                                "source": "eastmoney",
+                                "default_timeframe": "daily",
+                                "default_adjustment": "qfq",
+                                "catalog_status": "empty",
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ],
+                )
             finally:
                 connection.close()
             self._initialized = True
@@ -176,6 +242,7 @@ class DuckDBMarketRepository:
             ))
         if not rows:
             return symbol, 0, first_date, last_date
+        await self.ensure_disk_capacity(len(rows) * 512)
         with self._lock:
             connection = self._connect()
             try:
@@ -215,7 +282,18 @@ class DuckDBMarketRepository:
                 if universe_id:
                     connection.execute(
                         "INSERT INTO quant.security_universes (id, name, metadata) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
-                        [universe_id, universe_id, json.dumps({"default_timeframe": "daily", "default_adjustment": "qfq"})],
+                        [
+                            universe_id,
+                            universe_id,
+                            json.dumps(
+                                {
+                                    "default_timeframe": "daily",
+                                    "default_adjustment": "qfq",
+                                    "provider": "baostock",
+                                    "source": "local-market-data",
+                                }
+                            ),
+                        ],
                     )
                     connection.execute(
                         "INSERT INTO quant.security_universe_members (universe_id, symbol) VALUES (?, ?) ON CONFLICT DO NOTHING",
@@ -352,6 +430,486 @@ class DuckDBMarketRepository:
             finally:
                 connection.close()
 
+    async def coverage_rows(
+        self,
+        *,
+        universe_id: str | None,
+        include_inactive: bool = False,
+    ) -> list[dict[str, Any]]:
+        await self.initialize()
+        with self._lock:
+            connection = self._connect()
+            try:
+                if universe_id:
+                    cursor = connection.execute(
+                        """
+                        WITH targets AS (
+                          SELECT
+                            members.symbol,
+                            securities.name,
+                            COALESCE(
+                              json_extract_string(universes.metadata, '$.default_timeframe'),
+                              'daily'
+                            ) AS timeframe,
+                            COALESCE(
+                              json_extract_string(universes.metadata, '$.default_adjustment'),
+                              'qfq'
+                            ) AS adjustment,
+                            COALESCE(
+                              json_extract_string(universes.metadata, '$.provider'),
+                              'baostock'
+                            ) AS default_provider
+                          FROM quant.security_universe_members members
+                          JOIN quant.security_universes universes
+                            ON universes.id=members.universe_id
+                          JOIN quant.securities securities
+                            ON securities.symbol=members.symbol
+                          WHERE members.universe_id=?
+                            AND (
+                              ?
+                              OR (
+                                members.role <> 'inactive'
+                                AND securities.status NOT IN ('inactive', 'delisted')
+                              )
+                            )
+                        ),
+                        ranked AS (
+                          SELECT
+                            targets.symbol,
+                            targets.name,
+                            targets.timeframe,
+                            targets.adjustment,
+                            COALESCE(sync_state.provider, targets.default_provider) AS provider,
+                            sync_state.first_ts,
+                            sync_state.last_ts,
+                            COALESCE(sync_state.row_count, 0) AS row_count,
+                            row_number() OVER (
+                              PARTITION BY targets.symbol
+                              ORDER BY
+                                (sync_state.provider=targets.default_provider) DESC,
+                                sync_state.last_ts DESC NULLS LAST
+                            ) AS provider_rank
+                          FROM targets
+                          LEFT JOIN quant.market_data_sync_state sync_state
+                            ON sync_state.symbol=targets.symbol
+                           AND sync_state.timeframe=targets.timeframe
+                           AND sync_state.adjustment=targets.adjustment
+                        )
+                        SELECT symbol, name, timeframe, adjustment, provider,
+                          first_ts, last_ts, row_count
+                        FROM ranked
+                        WHERE provider_rank=1
+                        ORDER BY symbol
+                        """,
+                        [universe_id, include_inactive],
+                    )
+                else:
+                    cursor = connection.execute(
+                        """
+                        SELECT sync_state.symbol, securities.name, sync_state.timeframe,
+                          sync_state.adjustment, sync_state.provider, sync_state.first_ts,
+                          sync_state.last_ts, sync_state.row_count
+                        FROM quant.market_data_sync_state sync_state
+                        LEFT JOIN quant.securities securities USING(symbol)
+                        ORDER BY sync_state.symbol, sync_state.timeframe,
+                          sync_state.adjustment, sync_state.provider
+                        """
+                    )
+                return _dict_rows(cursor)
+            finally:
+                connection.close()
+
+    async def universe_summaries(self) -> list[dict[str, Any]]:
+        await self.initialize()
+        with self._lock:
+            connection = self._connect()
+            try:
+                cursor = connection.execute(
+                    """
+                    WITH member_rows AS (
+                      SELECT
+                        universes.id,
+                        universes.name,
+                        universes.description,
+                        universes.status,
+                        universes.tags,
+                        universes.metadata,
+                        universes.created_at,
+                        universes.updated_at,
+                        securities.symbol,
+                        securities.asset_type,
+                        COALESCE((
+                          SELECT sync_state.row_count
+                          FROM quant.market_data_sync_state sync_state
+                          WHERE sync_state.symbol=securities.symbol
+                            AND sync_state.timeframe=COALESCE(
+                              json_extract_string(universes.metadata, '$.default_timeframe'),
+                              'daily'
+                            )
+                            AND sync_state.adjustment=COALESCE(
+                              json_extract_string(universes.metadata, '$.default_adjustment'),
+                              'qfq'
+                            )
+                          ORDER BY (
+                            sync_state.provider=COALESCE(
+                              json_extract_string(universes.metadata, '$.provider'),
+                              'baostock'
+                            )
+                          ) DESC, sync_state.last_ts DESC NULLS LAST
+                          LIMIT 1
+                        ), 0) AS row_count,
+                        (
+                          SELECT sync_state.last_ts
+                          FROM quant.market_data_sync_state sync_state
+                          WHERE sync_state.symbol=securities.symbol
+                            AND sync_state.timeframe=COALESCE(
+                              json_extract_string(universes.metadata, '$.default_timeframe'),
+                              'daily'
+                            )
+                            AND sync_state.adjustment=COALESCE(
+                              json_extract_string(universes.metadata, '$.default_adjustment'),
+                              'qfq'
+                            )
+                          ORDER BY (
+                            sync_state.provider=COALESCE(
+                              json_extract_string(universes.metadata, '$.provider'),
+                              'baostock'
+                            )
+                          ) DESC, sync_state.last_ts DESC NULLS LAST
+                          LIMIT 1
+                        ) AS last_ts
+                      FROM quant.security_universes universes
+                      LEFT JOIN quant.security_universe_members members
+                        ON members.universe_id=universes.id
+                       AND members.role <> 'inactive'
+                      LEFT JOIN quant.securities securities
+                        ON securities.symbol=members.symbol
+                       AND securities.status NOT IN ('inactive', 'delisted')
+                    )
+                    SELECT
+                      id,
+                      name,
+                      description,
+                      status,
+                      tags,
+                      metadata,
+                      created_at,
+                      updated_at,
+                      count(symbol) AS member_count,
+                      count(*) FILTER (WHERE asset_type='stock') AS stock_count,
+                      count(*) FILTER (WHERE asset_type='etf') AS etf_count,
+                      count(*) FILTER (WHERE asset_type='index') AS index_count,
+                      count(*) FILTER (WHERE asset_type='fund') AS fund_count,
+                      count(*) FILTER (WHERE row_count > 0 AND last_ts IS NOT NULL) AS ready_count,
+                      COALESCE(sum(row_count), 0) AS bar_count,
+                      max(last_ts) AS latest_ts
+                    FROM member_rows
+                    GROUP BY id, name, description, status, tags, metadata, created_at, updated_at
+                    ORDER BY
+                      TRY_CAST(json_extract_string(metadata, '$.display_order') AS INTEGER)
+                        NULLS LAST,
+                      created_at
+                    """
+                )
+                rows = _dict_rows(cursor)
+            finally:
+                connection.close()
+        for row in rows:
+            metadata = _json_object(row.get("metadata"))
+            row["metadata"] = metadata
+            row["tags"] = [str(item) for item in _json_array(row.get("tags"))]
+            row["source"] = str(metadata.get("source") or "local-market-data")
+            row["default_timeframe"] = str(metadata.get("default_timeframe") or "daily")
+            row["default_adjustment"] = str(metadata.get("default_adjustment") or "qfq")
+            row["provider"] = str(metadata.get("provider") or "baostock")
+        return rows
+
+    async def universe_member_rows(
+        self,
+        *,
+        universe_id: str,
+        page: int,
+        page_size: int,
+        keyword: str | None,
+        include_inactive: bool,
+    ) -> tuple[list[dict[str, Any]], int, int, int]:
+        await self.initialize()
+        clean_keyword = (keyword or "").strip().lower()
+        keyword_pattern = f"%{clean_keyword}%"
+        normalized_size = max(1, page_size)
+        with self._lock:
+            connection = self._connect()
+            try:
+                total = int(
+                    connection.execute(
+                        """
+                        SELECT count(*)
+                        FROM quant.security_universe_members members
+                        JOIN quant.securities securities USING(symbol)
+                        WHERE members.universe_id=?
+                          AND (
+                            ?
+                            OR (
+                              members.role <> 'inactive'
+                              AND securities.status NOT IN ('inactive', 'delisted')
+                            )
+                          )
+                          AND (
+                            ?=''
+                            OR lower(securities.symbol) LIKE ?
+                            OR lower(securities.code) LIKE ?
+                            OR lower(COALESCE(securities.name, '')) LIKE ?
+                            OR lower(COALESCE(securities.exchange, '')) LIKE ?
+                            OR lower(COALESCE(securities.asset_type, '')) LIKE ?
+                            OR lower(CAST(securities.metadata AS VARCHAR)) LIKE ?
+                          )
+                        """,
+                        [
+                            universe_id,
+                            include_inactive,
+                            clean_keyword,
+                            keyword_pattern,
+                            keyword_pattern,
+                            keyword_pattern,
+                            keyword_pattern,
+                            keyword_pattern,
+                            keyword_pattern,
+                        ],
+                    ).fetchone()[0]
+                    or 0
+                )
+                total_pages = max(1, (total + normalized_size - 1) // normalized_size)
+                current_page = min(max(1, page), total_pages)
+                offset = (current_page - 1) * normalized_size
+                cursor = connection.execute(
+                    """
+                    WITH paged AS (
+                      SELECT
+                        universes.metadata AS universe_metadata,
+                        securities.symbol,
+                        securities.code,
+                        securities.name AS security_name,
+                        securities.exchange,
+                        securities.asset_type,
+                        securities.currency,
+                        securities.timezone,
+                        securities.secid,
+                        securities.provider,
+                        securities.metadata AS security_metadata,
+                        securities.status AS security_status,
+                        members.role,
+                        members.metadata AS member_metadata,
+                        COALESCE(
+                          json_extract_string(universes.metadata, '$.default_timeframe'),
+                          'daily'
+                        ) AS timeframe,
+                        COALESCE(
+                          json_extract_string(universes.metadata, '$.default_adjustment'),
+                          'qfq'
+                        ) AS adjustment
+                      FROM quant.security_universe_members members
+                      JOIN quant.security_universes universes
+                        ON universes.id=members.universe_id
+                      JOIN quant.securities securities USING(symbol)
+                      WHERE members.universe_id=?
+                        AND (
+                          ?
+                          OR (
+                            members.role <> 'inactive'
+                            AND securities.status NOT IN ('inactive', 'delisted')
+                          )
+                        )
+                        AND (
+                          ?=''
+                          OR lower(securities.symbol) LIKE ?
+                          OR lower(securities.code) LIKE ?
+                          OR lower(COALESCE(securities.name, '')) LIKE ?
+                          OR lower(COALESCE(securities.exchange, '')) LIKE ?
+                          OR lower(COALESCE(securities.asset_type, '')) LIKE ?
+                          OR lower(CAST(securities.metadata AS VARCHAR)) LIKE ?
+                        )
+                      ORDER BY
+                        TRY_CAST(
+                          json_extract_string(members.metadata, '$.order') AS INTEGER
+                        ) NULLS LAST,
+                        securities.symbol
+                      LIMIT ? OFFSET ?
+                    )
+                    SELECT
+                      paged.*,
+                      NULL AS weight,
+                      COALESCE(metrics.row_count, 0) AS row_count,
+                      metrics.first_ts,
+                      metrics.last_ts,
+                      metrics.data_provider,
+                      COALESCE(metrics.sample_count, 0) AS sample_count,
+                      metrics.latest_close,
+                      metrics.previous_close,
+                      metrics.latest_change_percent,
+                      metrics.latest_amount,
+                      metrics.latest_turnover,
+                      metrics.close_20d,
+                      metrics.close_60d,
+                      metrics.ma20,
+                      metrics.ma60,
+                      metrics.avg_amount_20d,
+                      metrics.avg_volume_20d,
+                      metrics.avg_turnover_20d,
+                      metrics.trade_status,
+                      metrics.is_st,
+                      metrics.limit_up,
+                      metrics.limit_down,
+                      NULL AS pe_ttm,
+                      NULL AS pb_mrq,
+                      NULL AS ps_ttm,
+                      NULL AS pcf_ncf_ttm
+                    FROM paged
+                    LEFT JOIN LATERAL (
+                      SELECT
+                        max(total_count) AS row_count,
+                        min(first_ts) AS first_ts,
+                        max(last_ts) AS last_ts,
+                        arg_max(provider, ts) AS data_provider,
+                        max(total_count) AS sample_count,
+                        max(close) FILTER (WHERE rn=1) AS latest_close,
+                        max(previous_close) FILTER (WHERE rn=1) AS previous_close,
+                        max(change_percent) FILTER (WHERE rn=1) AS latest_change_percent,
+                        max(amount) FILTER (WHERE rn=1) AS latest_amount,
+                        max(turnover) FILTER (WHERE rn=1) AS latest_turnover,
+                        max(close) FILTER (WHERE rn=21) AS close_20d,
+                        max(close) FILTER (WHERE rn=61) AS close_60d,
+                        avg(close) FILTER (WHERE rn <= 20) AS ma20,
+                        avg(close) FILTER (WHERE rn <= 60) AS ma60,
+                        avg(amount) FILTER (WHERE rn <= 20) AS avg_amount_20d,
+                        avg(volume) FILTER (WHERE rn <= 20) AS avg_volume_20d,
+                        avg(turnover) FILTER (WHERE rn <= 20) AS avg_turnover_20d,
+                        max(trade_status) FILTER (WHERE rn=1) AS trade_status,
+                        max(is_st) FILTER (WHERE rn=1) AS is_st,
+                        max(limit_up) FILTER (WHERE rn=1) AS limit_up,
+                        max(limit_down) FILTER (WHERE rn=1) AS limit_down
+                      FROM (
+                        SELECT
+                          bars.*,
+                          row_number() OVER (ORDER BY bars.ts DESC) AS rn,
+                          count(*) OVER () AS total_count,
+                          min(bars.ts) OVER () AS first_ts,
+                          max(bars.ts) OVER () AS last_ts
+                        FROM quant.stock_bars bars
+                        WHERE bars.symbol=paged.symbol
+                          AND bars.timeframe=paged.timeframe
+                          AND bars.adjustment=paged.adjustment
+                        QUALIFY rn <= 61
+                      ) recent
+                    ) metrics ON TRUE
+                    ORDER BY
+                      TRY_CAST(
+                        json_extract_string(paged.member_metadata, '$.order') AS INTEGER
+                      ) NULLS LAST,
+                      paged.symbol
+                    """,
+                    [
+                        universe_id,
+                        include_inactive,
+                        clean_keyword,
+                        keyword_pattern,
+                        keyword_pattern,
+                        keyword_pattern,
+                        keyword_pattern,
+                        keyword_pattern,
+                        keyword_pattern,
+                        normalized_size,
+                        offset,
+                    ],
+                )
+                rows = _dict_rows(cursor)
+            finally:
+                connection.close()
+        for row in rows:
+            row["security_metadata"] = _json_object(row.get("security_metadata"))
+            row["universe_metadata"] = _json_object(row.get("universe_metadata"))
+            row["member_metadata"] = _json_object(row.get("member_metadata"))
+        return rows, total, total_pages, current_page
+
+    async def ingestion_preflight(
+        self,
+        *,
+        symbols: list[str],
+        timeframe: str,
+        adjustment: str,
+        cutoff: datetime,
+        end_cutoff: datetime | None,
+        require_fields: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        await self.initialize()
+        if not symbols:
+            return {}
+        placeholders = ", ".join("?" for _ in symbols)
+        with self._lock:
+            connection = self._connect()
+            try:
+                cursor = connection.execute(
+                    f"""
+                    SELECT symbol, ts, amount, turnover, trade_status, is_st, limit_up, limit_down
+                    FROM quant.stock_bars
+                    WHERE symbol IN ({placeholders})
+                      AND timeframe=?
+                      AND adjustment=?
+                    ORDER BY symbol, ts
+                    """,
+                    [*symbols, timeframe, adjustment],
+                )
+                rows = _dict_rows(cursor)
+            finally:
+                connection.close()
+
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        benchmark_dates: set[datetime] = set()
+        for row in rows:
+            ts = _aware_datetime(row.get("ts"))
+            if ts is None:
+                continue
+            row["ts"] = ts
+            grouped[str(row["symbol"])].append(row)
+            if ts >= cutoff and (end_cutoff is None or ts <= end_cutoff):
+                benchmark_dates.add(ts)
+
+        benchmark_last_ts = max(benchmark_dates, default=None)
+        if end_cutoff is not None and (
+            benchmark_last_ts is None or end_cutoff > benchmark_last_ts
+        ):
+            benchmark_last_ts = end_cutoff
+        expected_rows = len(benchmark_dates)
+        result: dict[str, dict[str, Any]] = {}
+        for symbol in symbols:
+            symbol_rows = grouped.get(symbol, [])
+            requested_rows = [
+                row
+                for row in symbol_rows
+                if row["ts"] >= cutoff
+                and (end_cutoff is None or row["ts"] <= end_cutoff)
+            ]
+
+            def row_is_complete(row: dict[str, Any]) -> bool:
+                return all(row.get(field) is not None for field in require_fields)
+
+            result[symbol] = {
+                "symbol": symbol,
+                "first_ts": symbol_rows[0]["ts"] if symbol_rows else None,
+                "last_ts": symbol_rows[-1]["ts"] if symbol_rows else None,
+                "benchmark_last_ts": benchmark_last_ts,
+                "row_count": len(symbol_rows),
+                "rows_since_cutoff": len(requested_rows),
+                "expected_rows_since_cutoff": expected_rows,
+                "complete_rows_since_cutoff": sum(
+                    1 for row in requested_rows if row_is_complete(row)
+                ),
+                "pe_ttm_count": 0,
+                "pb_mrq_count": 0,
+                "ps_ttm_count": 0,
+                "pcf_ncf_ttm_count": 0,
+            }
+        return result
+
     async def universe_symbols(self, universe_id: str) -> list[str]:
         await self.initialize()
         with self._lock:
@@ -375,7 +933,10 @@ class DuckDBMarketRepository:
                     JOIN quant.securities securities USING(symbol)
                     WHERE members.universe_id=? AND members.role <> 'inactive'
                       AND securities.status NOT IN ('inactive','delisted')
-                    ORDER BY securities.symbol""",
+                    ORDER BY
+                      TRY_CAST(json_extract_string(members.metadata, '$.order') AS INTEGER)
+                        NULLS LAST,
+                      securities.symbol""",
                     [universe_id],
                 ).fetchall()
             finally:
@@ -389,13 +950,41 @@ class DuckDBMarketRepository:
         self, *, universe_id: str, securities: list[Any], role: str, added_source: str
     ) -> list[dict[str, Any]]:
         await self.initialize()
+        await self.ensure_disk_capacity(max(1, len(securities)) * 2048)
         members: list[dict[str, Any]] = []
         with self._lock:
             connection = self._connect()
             try:
+                connection.execute("BEGIN TRANSACTION")
                 connection.execute(
                     "INSERT INTO quant.security_universes (id, name, metadata) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
-                    [universe_id, universe_id, json.dumps({"default_timeframe": "daily", "default_adjustment": "qfq", "provider": "eastmoney"})],
+                    [
+                        universe_id,
+                        "全 A 股股票池" if universe_id == "a-share-sample-research-pool" else universe_id,
+                        json.dumps(
+                            {
+                                "default_timeframe": "daily",
+                                "default_adjustment": "qfq",
+                                "provider": "baostock",
+                                "source": "eastmoney",
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ],
+                )
+                next_order = int(
+                    connection.execute(
+                        """
+                        SELECT COALESCE(
+                          max(TRY_CAST(json_extract_string(metadata, '$.order') AS INTEGER)),
+                          0
+                        ) + 1
+                        FROM quant.security_universe_members
+                        WHERE universe_id=?
+                        """,
+                        [universe_id],
+                    ).fetchone()[0]
+                    or 1
                 )
                 for index, security in enumerate(securities):
                     symbol = canonical_symbol(security.symbol, security.market)
@@ -420,13 +1009,43 @@ class DuckDBMarketRepository:
                         """INSERT INTO quant.security_universe_members (universe_id, symbol, role, metadata)
                         VALUES (?, ?, ?, ?) ON CONFLICT(universe_id, symbol) DO UPDATE SET
                           role=excluded.role, metadata=excluded.metadata""",
-                        [universe_id, symbol, role or "member", json.dumps({"order": index + 1, "added_source": added_source})],
+                        [
+                            universe_id,
+                            symbol,
+                            role or "member",
+                            json.dumps(
+                                {
+                                    "order": (
+                                        int(existing_order[0])
+                                        if (
+                                            existing_order := connection.execute(
+                                                """
+                                                SELECT TRY_CAST(
+                                                  json_extract_string(metadata, '$.order') AS INTEGER
+                                                )
+                                                FROM quant.security_universe_members
+                                                WHERE universe_id=? AND symbol=?
+                                                """,
+                                                [universe_id, symbol],
+                                            ).fetchone()
+                                        )
+                                        and existing_order[0] is not None
+                                        else next_order + index
+                                    ),
+                                    "added_source": added_source,
+                                }
+                            ),
+                        ],
                     )
                     members.append({
                         "symbol": symbol, "code": security.symbol, "name": security.name,
                         "exchange": security.market, "asset_type": security.asset_type,
                         "secid": security.secid, "provider": security.source, "role": role or "member",
                     })
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
             finally:
                 connection.close()
         return members
@@ -448,19 +1067,48 @@ class DuckDBMarketRepository:
             try:
                 cursor = connection.execute(
                     """
-                    SELECT securities.symbol, securities.code, securities.name, securities.exchange,
-                      securities.metadata AS security_metadata, bars.ts, bars.open, bars.high, bars.low,
-                      bars.close, bars.previous_close, bars.amount, bars.volume, bars.turnover,
-                      bars.amplitude, bars.change_percent, bars.limit_up, bars.is_st, bars.provider
-                    FROM quant.security_universe_members members
-                    JOIN quant.securities securities ON securities.symbol=members.symbol
-                    JOIN quant.stock_bars bars ON bars.symbol=members.symbol
-                    WHERE members.universe_id=? AND members.role <> 'inactive'
-                      AND securities.asset_type='stock' AND securities.status NOT IN ('inactive','delisted')
-                      AND bars.timeframe=? AND bars.adjustment=?
-                    ORDER BY securities.symbol, bars.ts
+                    WITH ranked AS (
+                      SELECT
+                        securities.symbol,
+                        securities.code,
+                        securities.name,
+                        securities.exchange,
+                        securities.metadata AS security_metadata,
+                        bars.ts,
+                        bars.open,
+                        bars.high,
+                        bars.low,
+                        bars.close,
+                        bars.previous_close,
+                        bars.amount,
+                        bars.volume,
+                        bars.turnover,
+                        bars.amplitude,
+                        bars.change_percent,
+                        bars.limit_up,
+                        bars.is_st,
+                        bars.provider,
+                        row_number() OVER (
+                          PARTITION BY securities.symbol ORDER BY bars.ts DESC
+                        ) AS recent_rank
+                      FROM quant.security_universe_members members
+                      JOIN quant.securities securities ON securities.symbol=members.symbol
+                      JOIN quant.stock_bars bars ON bars.symbol=members.symbol
+                      WHERE members.universe_id=? AND members.role <> 'inactive'
+                        AND securities.asset_type='stock'
+                        AND securities.status NOT IN ('inactive','delisted')
+                        AND bars.timeframe=? AND bars.adjustment=?
+                        AND (
+                          ? IS NULL
+                          OR CAST(timezone('Asia/Shanghai', bars.ts) AS DATE) <= ?
+                        )
+                    )
+                    SELECT * EXCLUDE (recent_rank)
+                    FROM ranked
+                    WHERE recent_rank <= 260
+                    ORDER BY symbol, ts
                     """,
-                    [universe_id, timeframe, adjustment],
+                    [universe_id, timeframe, adjustment, trade_date, trade_date],
                 )
                 columns = [item[0] for item in cursor.description]
                 raw_rows = [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
@@ -572,14 +1220,20 @@ class DuckDBMarketRepository:
         await self.initialize()
         allowed = {"status", "completed_symbols", "failed_symbols", "rows_received", "rows_upserted", "error", "completed_at"}
         values = {key: value for key, value in updates.items() if key in allowed and value is not None}
-        if "metadata" in updates and updates["metadata"] is not None:
-            values["metadata"] = json.dumps(updates["metadata"], default=str)
-        if not values:
-            return
-        assignments = ", ".join(f"{key}=?" for key in values)
         with self._lock:
             connection = self._connect()
             try:
+                if "metadata" in updates and updates["metadata"] is not None:
+                    current = connection.execute(
+                        "SELECT metadata FROM quant.market_data_ingestion_jobs WHERE id=?",
+                        [job_id],
+                    ).fetchone()
+                    merged = _json_object(current[0]) if current else {}
+                    merged.update(_json_object(updates["metadata"]))
+                    values["metadata"] = json.dumps(merged, default=str)
+                if not values:
+                    return
+                assignments = ", ".join(f"{key}=?" for key in values)
                 connection.execute(
                     f"UPDATE quant.market_data_ingestion_jobs SET {assignments}, updated_at=now() WHERE id=?",
                     [*values.values(), job_id],
@@ -599,6 +1253,174 @@ class DuckDBMarketRepository:
                 return row[0] if row else None
             finally:
                 connection.close()
+
+    async def control_ingestion_job(
+        self,
+        *,
+        job_id: str,
+        control: str,
+        reason: str | None,
+    ) -> dict[str, Any] | None:
+        await self.initialize()
+        now_iso = datetime.now(UTC).isoformat()
+        with self._lock:
+            connection = self._connect()
+            try:
+                current = connection.execute(
+                    "SELECT metadata FROM quant.market_data_ingestion_jobs WHERE id=?",
+                    [job_id],
+                ).fetchone()
+                if current is None:
+                    return None
+                metadata = _json_object(current[0])
+                metadata.update(
+                    {
+                        "control": control,
+                        "control_reason": reason,
+                        "control_updated_at": now_iso,
+                    }
+                )
+                connection.execute(
+                    """
+                    UPDATE quant.market_data_ingestion_jobs
+                    SET metadata=?, updated_at=now()
+                    WHERE id=?
+                    """,
+                    [json.dumps(metadata, default=str), job_id],
+                )
+                cursor = connection.execute(
+                    """
+                    SELECT id, universe_id, provider, timeframe, adjustment, status,
+                      total_symbols, completed_symbols, failed_symbols, rows_received,
+                      rows_upserted, error, metadata, started_at, completed_at,
+                      created_at, updated_at
+                    FROM quant.market_data_ingestion_jobs
+                    WHERE id=?
+                    """,
+                    [job_id],
+                )
+                rows = _dict_rows(cursor)
+            finally:
+                connection.close()
+        if not rows:
+            return None
+        rows[0]["metadata"] = _json_object(rows[0].get("metadata"))
+        return rows[0]
+
+    async def reconcile_stale_ingestion_jobs(
+        self,
+        *,
+        universe_id: str | None,
+        heartbeat_timeout_seconds: int,
+        stop_grace_seconds: int,
+    ) -> int:
+        await self.initialize()
+        now = datetime.now(UTC)
+        with self._lock:
+            connection = self._connect()
+            try:
+                if universe_id:
+                    cursor = connection.execute(
+                        """
+                        SELECT id, error, metadata, updated_at
+                        FROM quant.market_data_ingestion_jobs
+                        WHERE status='running' AND universe_id=?
+                        """,
+                        [universe_id],
+                    )
+                else:
+                    cursor = connection.execute(
+                        """
+                        SELECT id, error, metadata, updated_at
+                        FROM quant.market_data_ingestion_jobs
+                        WHERE status='running'
+                        """
+                    )
+                rows = _dict_rows(cursor)
+                reconciled = 0
+                for row in rows:
+                    metadata = _json_object(row.get("metadata"))
+                    control = str(metadata.get("control") or "run")
+                    reference = _aware_datetime(
+                        metadata.get(
+                            "control_updated_at" if control == "stop" else "last_heartbeat_at"
+                        )
+                    ) or _aware_datetime(row.get("updated_at"))
+                    timeout_seconds = (
+                        stop_grace_seconds if control == "stop" else heartbeat_timeout_seconds
+                    )
+                    if reference is None or now - reference <= timedelta(seconds=timeout_seconds):
+                        continue
+                    reason = (
+                        "补数任务已请求停止，心跳未继续，已自动收口。"
+                        if control == "stop"
+                        else "补数任务心跳过期，已自动标记为部分完成。"
+                    )
+                    metadata.update(
+                        {
+                            "control": "idle",
+                            "active_child_job_id": None,
+                            "stop_reason": "stopped" if control == "stop" else "stale_heartbeat",
+                            "stale_reconciled_at": now.isoformat(),
+                        }
+                    )
+                    connection.execute(
+                        """
+                        UPDATE quant.market_data_ingestion_jobs
+                        SET status='partial', completed_at=COALESCE(completed_at, now()),
+                          error=COALESCE(error, ?), metadata=?, updated_at=now()
+                        WHERE id=?
+                        """,
+                        [reason, json.dumps(metadata, default=str), row["id"]],
+                    )
+                    reconciled += 1
+            finally:
+                connection.close()
+        return reconciled
+
+    async def list_ingestion_jobs(
+        self,
+        *,
+        universe_id: str | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        await self.initialize()
+        with self._lock:
+            connection = self._connect()
+            try:
+                if universe_id:
+                    cursor = connection.execute(
+                        """
+                        SELECT id, universe_id, provider, timeframe, adjustment, status,
+                          total_symbols, completed_symbols, failed_symbols, rows_received,
+                          rows_upserted, error, metadata, started_at, completed_at,
+                          created_at, updated_at
+                        FROM quant.market_data_ingestion_jobs
+                        WHERE universe_id=?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                        """,
+                        [universe_id, limit],
+                    )
+                else:
+                    cursor = connection.execute(
+                        """
+                        SELECT id, universe_id, provider, timeframe, adjustment, status,
+                          total_symbols, completed_symbols, failed_symbols, rows_received,
+                          rows_upserted, error, metadata, started_at, completed_at,
+                          created_at, updated_at
+                        FROM quant.market_data_ingestion_jobs
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                        """,
+                        [limit],
+                    )
+                rows = _dict_rows(cursor)
+            finally:
+                connection.close()
+        for row in rows:
+            row["metadata"] = _json_object(row.get("metadata"))
+        return rows
 
     async def save_backtest(self, run: dict[str, Any], orders: Iterable[dict[str, Any]]) -> None:
         await self.initialize()
@@ -627,5 +1449,12 @@ class DuckDBMarketRepository:
 
     async def ensure_disk_capacity(self, required_bytes: int) -> None:
         usage = shutil.disk_usage(self.database_path.parent)
-        if usage.free < max(required_bytes, 256 * 1024 * 1024):
-            raise RuntimeError("Insufficient disk space for the requested market-data write.")
+        minimum_free_bytes = max(
+            256 * 1024 * 1024,
+            int(os.getenv("QUANTPILOT_MARKET_MIN_FREE_BYTES", str(1024**3))),
+        )
+        if usage.free - max(0, required_bytes) < minimum_free_bytes:
+            raise DatabaseError(
+                "本地磁盘剩余空间不足，已停止行情写入；至少保留 "
+                f"{minimum_free_bytes // (1024**2)} MB 空闲空间。"
+            )

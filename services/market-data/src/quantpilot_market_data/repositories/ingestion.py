@@ -221,6 +221,15 @@ async def control_ingestion_job(
         "control_reason": reason,
         "control_updated_at": now_iso,
     }
+    if is_desktop_repository():
+        row = await get_duckdb_repository().control_ingestion_job(
+            job_id=job_id,
+            control=control,
+            reason=reason,
+        )
+        if row is None:
+            raise DatabaseError(f"补数任务不存在：{job_id}")
+        return ingestion_job_summary_from_row(row)
     async with await connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
         await cursor.execute(
             """
@@ -264,6 +273,12 @@ async def reconcile_stale_ingestion_jobs(
     stop_grace_seconds: int = INGESTION_JOB_STOP_GRACE_SECONDS,
 ) -> int:
     """Close running ingestion jobs that no longer have a live worker behind them."""
+    if is_desktop_repository():
+        return await get_duckdb_repository().reconcile_stale_ingestion_jobs(
+            universe_id=universe_id,
+            heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+            stop_grace_seconds=stop_grace_seconds,
+        )
     now_iso = datetime.now(UTC).isoformat()
     universe_sql = "AND universe_id = %s" if universe_id else ""
     params: list[Any] = [stop_grace_seconds, heartbeat_timeout_seconds]
@@ -335,6 +350,13 @@ async def list_ingestion_jobs(
     limit: int = 20,
 ) -> list[IngestionJobSummary]:
     normalized_limit = max(1, min(limit, 100))
+    if is_desktop_repository():
+        await reconcile_stale_ingestion_jobs(universe_id=universe_id)
+        rows = await get_duckdb_repository().list_ingestion_jobs(
+            universe_id=universe_id,
+            limit=normalized_limit,
+        )
+        return [ingestion_job_summary_from_row(row) for row in rows]
     params: tuple[Any, ...]
     where_sql = ""
     if universe_id:
@@ -437,6 +459,20 @@ async def get_history_ingestion_preflight(
     require_fields = require_fields or []
     if not symbols:
         return {}
+
+    if is_desktop_repository():
+        rows = await get_duckdb_repository().ingestion_preflight(
+            symbols=symbols,
+            timeframe=timeframe,
+            adjustment=adjustment,
+            cutoff=cutoff,
+            end_cutoff=end_cutoff,
+            require_fields=require_fields,
+        )
+        return {
+            symbol: IngestionPreflightCoverage(**row)
+            for symbol, row in rows.items()
+        }
 
     async with await connect() as connection, connection.cursor(row_factory=dict_row) as cursor:
         await cursor.execute(

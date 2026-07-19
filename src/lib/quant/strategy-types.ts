@@ -701,6 +701,20 @@ export interface StrategyIngestionJobsResponse {
   fetchedAt: string;
 }
 
+export interface StrategyAShareUniverseImportResult {
+  universeId: string;
+  totalAvailable: number;
+  totalPages: number;
+  importedCount: number;
+  completedPages: number;
+}
+
+export interface SmartStrategyPageData {
+  generatedAt: string;
+  research: StrategyResearchState;
+  ingestionJobs: StrategyIngestionJobsResponse;
+}
+
 export interface StrategyFoundationComponent {
   id: string;
   name: string;

@@ -6,7 +6,7 @@ import {
   putDesktopSecret,
 } from '@/lib/desktop/secret-broker';
 
-const SUPPORTED_PROVIDERS = ['github', 'supabase', 'vercel'] as const;
+const SUPPORTED_PROVIDERS = ['github', 'supabase', 'vercel', 'deepseek'] as const;
 export type ServiceProvider = (typeof SUPPORTED_PROVIDERS)[number];
 
 interface ServiceTokenRecord {

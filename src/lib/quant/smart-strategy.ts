@@ -11,6 +11,8 @@ import {
   TECHNICAL_SCREENER_ALLOWED_FIELDS,
   TECHNICAL_SCREENER_ALLOWED_SORT_FIELDS,
 } from '@/lib/quant/strategy-intent';
+import { isDesktopRuntime } from '@/lib/runtime/mode';
+import { getPlainServiceToken } from '@/lib/services/tokens';
 
 const DEEPSEEK_DEFAULT_BASE_URL = 'https://api.deepseek.com';
 const DEEPSEEK_DEFAULT_MODEL = 'deepseek-v4-flash';
@@ -140,10 +142,25 @@ function normalizeEndpoint(baseUrl: string) {
   return endpoint.toString();
 }
 
-function getDeepSeekConfig() {
-  const apiKey = process.env.DEEPSEEK_API_KEY?.trim();
+async function resolveDeepSeekApiKey() {
+  const environmentKey = process.env.DEEPSEEK_API_KEY?.trim();
+  if (environmentKey) return environmentKey;
+  if (!isDesktopRuntime) return null;
+  try {
+    return (await getPlainServiceToken('deepseek'))?.trim() || null;
+  } catch (error) {
+    console.warn(
+      '[SmartStrategy] Failed to read the desktop DeepSeek key:',
+      error instanceof Error ? error.message : String(error)
+    );
+    return null;
+  }
+}
+
+async function getDeepSeekConfig() {
+  const apiKey = await resolveDeepSeekApiKey();
   if (!apiKey) {
-    throw new Error('DEEPSEEK_API_KEY is not configured. Add it to .env.local to use Smart Strategy.');
+    throw new Error('DEEPSEEK_API_KEY is not configured. Add it in Platform Settings to use Smart Strategy.');
   }
   const timeoutRaw = Number(process.env.DEEPSEEK_TIMEOUT_MS?.trim());
   return {
@@ -154,16 +171,16 @@ function getDeepSeekConfig() {
   };
 }
 
-function getOptionalDeepSeekConfig() {
+async function getOptionalDeepSeekConfig() {
   try {
-    return getDeepSeekConfig();
+    return await getDeepSeekConfig();
   } catch {
     return null;
   }
 }
 
-export function getSmartStrategyRuntimeStatus(): SmartStrategyRuntimeStatus {
-  const config = getOptionalDeepSeekConfig();
+export async function getSmartStrategyRuntimeStatus(): Promise<SmartStrategyRuntimeStatus> {
+  const config = await getOptionalDeepSeekConfig();
   return {
     configured: Boolean(config),
     provider: config ? 'deepseek' : 'rule-template',
@@ -218,7 +235,7 @@ export async function buildDeepSeekStrategyIntents(
     throw new Error(`Smart strategy description must be ${SMART_STRATEGY_MAX_PROMPT_LENGTH} characters or fewer.`);
   }
 
-  const config = getOptionalDeepSeekConfig();
+  const config = await getOptionalDeepSeekConfig();
   if (!config) {
     return buildRuleParseResult(
       prompt,

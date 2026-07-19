@@ -3,11 +3,13 @@ import { useState, useEffect, useCallback } from "react";
 import { AnimatePresence } from "framer-motion";
 import { MotionDiv } from "@/lib/motion";
 import { FaCog } from "react-icons/fa";
+import { BrainCircuit } from "lucide-react";
 import ServiceConnectionModal from "@/components/modals/ServiceConnectionModal";
 import { useGlobalSettings } from "@/contexts/GlobalSettingsContext";
 import { getModelDefinitionsForCli, normalizeModelId } from "@/lib/constants/cliModels";
 import { fetchCliStatusSnapshot, createCliStatusFallback } from "@/hooks/useCLI";
 import type { CLIStatus } from "@/types/cli";
+import type { ServiceProvider } from "@/types/shared/service";
 
 import { GeneralTab } from "./tabs/GeneralTab";
 import { AIAgentsTab, type CLIOption } from "./tabs/AIAgentsTab";
@@ -140,17 +142,21 @@ function getProviderIcon(provider: string) {
       </svg>
     );
   }
+  if (provider === "deepseek") {
+    return <BrainCircuit className="h-5 w-5" aria-hidden="true" />;
+  }
   return null;
 }
 
 export default function GlobalSettings({ isOpen, onClose, initialTab = "general" }: GlobalSettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
   const [serviceModalOpen, setServiceModalOpen] = useState(false);
-  const [selectedProvider, setSelectedProvider] = useState<"github" | "supabase" | "vercel" | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState<ServiceProvider | null>(null);
   const [tokens, setTokens] = useState<{ [key: string]: ServiceToken | null }>({
     github: null,
     supabase: null,
     vercel: null,
+    deepseek: null,
   });
   const [cliStatus, setCLIStatus] = useState<CLIStatus>({});
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
@@ -170,7 +176,7 @@ export default function GlobalSettings({ isOpen, onClose, initialTab = "general"
   };
 
   const loadAllTokens = useCallback(async () => {
-    const providers = ["github", "supabase", "vercel"];
+    const providers: ServiceProvider[] = ["deepseek", "github", "supabase", "vercel"];
     const newTokens: { [key: string]: ServiceToken | null } = {};
     for (const provider of providers) {
       try {
@@ -183,7 +189,7 @@ export default function GlobalSettings({ isOpen, onClose, initialTab = "general"
     setTokens(newTokens);
   }, []);
 
-  const handleServiceClick = (provider: "github" | "supabase" | "vercel") => {
+  const handleServiceClick = (provider: ServiceProvider) => {
     setSelectedProvider(provider);
     setServiceModalOpen(true);
   };
@@ -354,7 +360,7 @@ export default function GlobalSettings({ isOpen, onClose, initialTab = "general"
                 </span>
                 <div>
                   <h2 className="text-xl font-semibold text-slate-900">平台设置</h2>
-                  <p className="text-sm text-slate-600">管理生成工作空间使用的智能体、模型与服务令牌</p>
+                  <p className="text-sm text-slate-600">管理智能策略、生成工作空间使用的模型与服务密钥</p>
                 </div>
               </div>
               <button
