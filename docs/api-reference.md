@@ -109,9 +109,9 @@
 | `/api/v1/research/screeners/a-share/technical` | `POST` | 根据受控技术指标策略 JSON 执行 A 股股票池筛选；适合 LLM 将自然语言转为白名单条件后调用 |
 | `/api/v1/research/sector-capital-flow` | `GET` | 板块资金和市场资金概览 |
 
-股票池和覆盖明细页面应优先走服务端分页，避免一次加载 5000+ 标的。K 线详情只在点击行后按 symbol 请求。覆盖明细首屏使用 `page_size=100`，摘要来自 `quant.market_data_sync_state`，不要在线聚合全量 `stock_bars`。默认股票池、覆盖率、筛选器和 ClickHouse 同步只处理 active 成员；诊断全量历史池时显式传 `include_inactive=true`。
+股票池和覆盖明细页面应优先走服务端分页，避免一次加载 5000+ 标的。K 线详情只在点击行后按 symbol 请求。覆盖明细首屏使用 `page_size=100`。服务器摘要使用同步水位；桌面摘要由 DuckDB 对实际 `stock_bars` 按 symbol 聚合并应用 5 年完整性口径。默认股票池、覆盖率、筛选器和 ClickHouse 同步只处理 active 成员；诊断全量历史池时显式传 `include_inactive=true`。
 
-`/api/quant/smart-strategy` 是 Next.js 端的受控编译入口，支持 `parse-intent`、`compile`、`draft`、`run`、`prepare-analysis` 五个 action：`parse-intent` 只返回系统理解到的 `StrategyIntent[]`，`compile` 将意图数组编译为 `TechnicalScreenerSpec`，`draft` 兼容一键流程并内部执行两阶段链路，`run` 再调用 market-data 技术筛选，`prepare-analysis` 只允许对当前日线命中候选按需准备分钟数据。未配置 DeepSeek 或远端解析失败时，`draft` 会明确标注并降级到本地确定性解析；资金流、主力、大单、盘口等未接入真实字段时必须返回未支持，不应映射为成交额，也不得自动执行只有风控默认项的草案。
+`/api/quant/smart-strategy` 是 Next.js 端的受控入口。数据准备使用 `data-status`、`initialize-market-data`、`control-data-task`；策略使用 `parse-intent`、`compile`、`draft`、`run`、`estimate-analysis`、`prepare-analysis`。`initialize-market-data` 导入完整证券目录后启动后台补数，`run` 默认要求全市场就绪，只有 `allowReadySubset=true` 才允许使用已就绪子集。未配置 DeepSeek 或远端解析失败时，`draft` 会明确标注并降级到本地确定性解析；资金流、主力、大单、盘口等未接入真实字段时必须返回未支持，不应映射为成交额，也不得自动执行只有风控默认项的草案。
 
 ### 外部行情和补数
 
@@ -129,6 +129,7 @@
 | `/api/v1/ingestion/eastmoney/realtime-snapshot` | `POST` | 实时快照入库 |
 | `/api/v1/ingestion/jobs` | `GET` | 补数任务和日志摘要 |
 | `/api/v1/ingestion/jobs/{job_id}/control` | `POST` | 暂停、继续、停止补数任务 |
+| `/api/v1/market-data/readiness` | `GET` | 桌面运行模式、DuckDB 存储、provider 最近成败和真实覆盖分类 |
 
 补数规则：
 

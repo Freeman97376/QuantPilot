@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -25,6 +26,17 @@ from quantpilot_market_data.repositories.factory import (
 
 INGESTION_JOB_STALE_SECONDS = 15 * 60
 INGESTION_JOB_STOP_GRACE_SECONDS = 60
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _expected_latest_daily_cutoff() -> datetime:
+    current = datetime.now(SHANGHAI_TZ)
+    candidate = current.date()
+    if current.weekday() < 5 and current.time() < time(hour=15, minute=20):
+        candidate -= timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate -= timedelta(days=1)
+    return datetime.combine(candidate, time.min, tzinfo=SHANGHAI_TZ).astimezone(UTC)
 
 __all__ = [
     "control_ingestion_job",
@@ -455,6 +467,10 @@ async def get_history_ingestion_preflight(
     if cutoff is None:
         cutoff = datetime.min.replace(tzinfo=UTC)
     end_cutoff = date_cutoff_datetime(end)
+    if timeframe == "daily":
+        expected_latest = _expected_latest_daily_cutoff()
+        if end_cutoff is None or end_cutoff > expected_latest:
+            end_cutoff = expected_latest
     symbols = [str(target["symbol"]) for target in targets if target.get("symbol")]
     require_fields = require_fields or []
     if not symbols:

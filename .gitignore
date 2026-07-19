@@ -48,5 +48,5 @@ __pycache__/
 .venv/
 
 # electron packaging
-release/
+/release/
 .desktop-build/

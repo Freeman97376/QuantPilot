@@ -1,6 +1,6 @@
 {
   "name": "quantpilot",
-  "version": "2.1.0-alpha.2",
+  "version": "2.1.0-alpha.3",
   "description": "Quant-focused AI workflow builder powered by Claude Code compatible runtimes",
   "private": true,
   "main": "index.js",
@@ -13,6 +13,7 @@
     "clean:local": "node scripts/dev/cleanup-local-artifacts.js",
     "clean:local:dry-run": "node scripts/dev/cleanup-local-artifacts.js --dry-run",
     "clean:workspaces": "node scripts/dev/cleanup-local-artifacts.js --include-workspace-builds",
+    "clean:desktop-dist": "node scripts/build/clean-desktop-artifacts.js",
     "build": "node scripts/build/run-build.js",
     "build:server": "node scripts/build/run-server-build.js",
     "build:standalone": "node scripts/build/run-build.js --standalone",
@@ -63,6 +64,7 @@
     "check:module-boundaries": "node scripts/checks/check-module-boundaries.js",
     "check:service-catalog": "node scripts/checks/check-service-catalog.js",
     "check:smart-strategy": "node scripts/checks/check-smart-strategy-contract.js",
+    "check:desktop-data": "node scripts/checks/check-desktop-data-upgrade.js",
     "check:quant-guardrails": "node scripts/checks/check-quant-research-guardrails.js",
     "check:benchmark-coverage": "node scripts/checks/check-quant-benchmark-coverage.js",
     "check:eval-schedule": "node scripts/checks/check-eval-schedule.js",

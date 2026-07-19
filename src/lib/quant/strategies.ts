@@ -57,6 +57,8 @@ export type {
   StrategyIngestionJobControlResult,
   StrategyIngestionJobsResponse,
   StrategyAShareUniverseImportResult,
+  StrategyMarketProviderState,
+  StrategyMarketDataReadiness,
   SmartStrategyPageData,
   StrategyFoundationComponent,
   StrategyFactorDefinition,
@@ -139,6 +141,7 @@ import type {
   StrategyCatalogItem,
   StrategyDashboardData
 } from './strategy-types';
+import { getStrategyMarketDataReadiness } from './market-data-readiness';
 
 function getMarketApiConfig() {
   return getRuntimeDegradationConfig().components.marketApi;
@@ -377,7 +380,9 @@ function inferSampleSectorTags(name?: string | null): string[] {
 }
 
 function dataStatus(value: unknown): StrategyUniverseMember['dataStatus'] {
-  return value === 'ready' || value === 'stale' || value === 'missing' ? value : 'missing';
+  return value === 'ready' || value === 'partial' || value === 'stale' || value === 'missing'
+    ? value
+    : 'missing';
 }
 
 function trendStatus(value: unknown): StrategyUniverseMember['trendStatus'] {
@@ -1773,10 +1778,12 @@ export async function getSmartStrategyPageData(): Promise<SmartStrategyPageData>
       fetchedAt: new Date().toISOString(),
     })),
   ]);
+  const marketData = await getStrategyMarketDataReadiness(research.primaryUniverseId);
   return {
     generatedAt: new Date().toISOString(),
     research,
     ingestionJobs,
+    marketData,
   };
 }
 

@@ -39,7 +39,7 @@ DEFAULT_EASTMONEY_KLINE_BASE_URLS = (
 )
 DEFAULT_TENCENT_KLINE_LIMIT_CAP = 800
 EASTMONEY_A_SHARE_LIST_FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
-EASTMONEY_A_SHARE_LIST_FIELDS = "f12,f13,f14,f100,f102,f103"
+EASTMONEY_A_SHARE_LIST_FIELDS = "f12,f13,f14,f26,f100,f102,f103"
 EASTMONEY_ETF_LIST_FS = "b:MK0021,b:MK0022,b:MK0023,b:MK0024"
 EASTMONEY_ETF_LIST_FIELDS = EASTMONEY_A_SHARE_LIST_FIELDS
 SH_ETF_CODE_PREFIXES = (
@@ -700,6 +700,7 @@ def parse_security_list_payload(
                 source="eastmoney",
                 raw={
                     **row,
+                    "listing_date": row.get("f26"),
                     "industry": row.get("f100"),
                     "region": row.get("f102"),
                     "concepts": row.get("f103"),

@@ -10,6 +10,7 @@ const net = require('net');
 const { autoUpdater } = require('electron-updater');
 const {
   applyDesktopMigrations,
+  backupMarketDatabaseForVersion,
   initializeDesktopDataDirectory,
   sqliteUrl,
 } = require('./desktop-data');
@@ -23,6 +24,7 @@ let secretBroker = null;
 let productionUrl = null;
 let shuttingDown = false;
 let desktopData = null;
+let desktopLogStreams = null;
 const launchToken = crypto.randomBytes(32).toString('base64url');
 
 const rootDir = path.join(__dirname, '..');
@@ -33,6 +35,87 @@ const preloadPath = path.join(__dirname, 'preload.js');
 
 const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
 app.setPath('userData', path.join(localAppData, 'QuantPilot'));
+
+function rotateLogFile(filePath, maxBytes = 10 * 1024 * 1024, backups = 5) {
+  if (!fs.existsSync(filePath) || fs.statSync(filePath).size < maxBytes) return;
+  const oldestBackup = `${filePath}.${backups}`;
+  if (fs.existsSync(oldestBackup)) fs.unlinkSync(oldestBackup);
+  for (let index = backups - 1; index >= 1; index -= 1) {
+    const source = `${filePath}.${index}`;
+    const target = `${filePath}.${index + 1}`;
+    if (fs.existsSync(source)) fs.renameSync(source, target);
+  }
+  fs.renameSync(filePath, `${filePath}.1`);
+}
+
+function openLogStream(logsDir, name) {
+  const filePath = path.join(logsDir, name);
+  rotateLogFile(filePath);
+  return fs.createWriteStream(filePath, { flags: 'a', encoding: 'utf8' });
+}
+
+function formatLogValue(value) {
+  if (value instanceof Error) return value.stack || value.message;
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function initializeDesktopLogging(logsDir) {
+  desktopLogStreams = {
+    electron: openLogStream(logsDir, 'electron.log'),
+    next: openLogStream(logsDir, 'next.log'),
+    market: openLogStream(logsDir, 'market-data.log'),
+  };
+  for (const method of ['log', 'warn', 'error']) {
+    const original = console[method].bind(console);
+    console[method] = (...values) => {
+      original(...values);
+      desktopLogStreams?.electron.write(
+        `[${new Date().toISOString()}] ${method.toUpperCase()} ${values.map(formatLogValue).join(' ')}\n`
+      );
+    };
+  }
+}
+
+function pipeChildLogs(child, label, stream) {
+  child.stdout?.on('data', (chunk) => {
+    process.stdout.write(`[${label}] ${chunk}`);
+    stream?.write(`[${new Date().toISOString()}] STDOUT ${chunk}`);
+  });
+  child.stderr?.on('data', (chunk) => {
+    process.stderr.write(`[${label}] ${chunk}`);
+    stream?.write(`[${new Date().toISOString()}] STDERR ${chunk}`);
+  });
+}
+
+function fetchJson(targetUrl, headers = {}) {
+  const { protocol } = new URL(targetUrl);
+  const requester = protocol === 'https:' ? https : http;
+  return new Promise((resolve, reject) => {
+    const request = requester.get(targetUrl, { headers }, (response) => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { body += chunk; });
+      response.on('end', () => {
+        if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
+          reject(new Error(`Health request failed with HTTP ${response.statusCode ?? 'unknown'}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(body));
+        } catch (error) {
+          reject(new Error(`Health response is not valid JSON: ${error instanceof Error ? error.message : error}`));
+        }
+      });
+    });
+    request.setTimeout(5_000, () => request.destroy(new Error('Health request timed out.')));
+    request.on('error', reject);
+  });
+}
 
 function waitForUrl(targetUrl, timeoutMs = 30_000, intervalMs = 200, headers = {}) {
   const { protocol } = new URL(targetUrl);
@@ -148,9 +231,10 @@ async function startProductionServer() {
   nextServerProcess = spawn(process.execPath, [serverPath], {
     cwd: standaloneDir,
     env,
-    stdio: 'inherit',
+    stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
+  pipeChildLogs(nextServerProcess, 'next', desktopLogStreams?.next);
 
   nextServerProcess.on('exit', (code, signal) => {
     if (!shuttingDown && typeof code === 'number' && code !== 0) {
@@ -211,8 +295,7 @@ async function startMarketSidecar() {
       QUANTPILOT_REDIS_CACHE_ENABLED: '0',
     },
   });
-  sidecarProcess.stdout.on('data', (chunk) => process.stdout.write(`[market-data] ${chunk}`));
-  sidecarProcess.stderr.on('data', (chunk) => process.stderr.write(`[market-data] ${chunk}`));
+  pipeChildLogs(sidecarProcess, 'market-data', desktopLogStreams?.market);
   sidecarProcess.on('exit', (code, signal) => {
     sidecarProcess = null;
     if (!shuttingDown) {
@@ -227,7 +310,16 @@ async function startMarketSidecar() {
   await waitForUrl(healthUrl, 45_000, 250, {
     'X-QuantPilot-Startup-Token': launchToken,
   });
+  const health = await fetchJson(healthUrl, {
+    'X-QuantPilot-Startup-Token': launchToken,
+  });
+  if (health.status !== 'ok' || health.engine !== 'duckdb' || health.runtime_mode !== 'desktop') {
+    throw new Error(
+      `Packaged desktop requires the local DuckDB sidecar; received ${JSON.stringify(health)}`
+    );
+  }
   process.env.QUANTPILOT_MARKET_API_URL = `http://127.0.0.1:${port}`;
+  process.env.QUANTPILOT_MARKET_API_BASE_URL = process.env.QUANTPILOT_MARKET_API_URL;
 }
 
 function stopProductionServer() {
@@ -359,6 +451,9 @@ app.on('before-quit', () => {
   stopProductionServer();
   stopSidecar();
   secretBroker?.server.close();
+  const streams = Object.values(desktopLogStreams || {});
+  desktopLogStreams = null;
+  for (const stream of streams) stream.end();
 });
 
 app.on('activate', () => {
@@ -375,7 +470,10 @@ if (setupSingleInstanceLock()) {
     .whenReady()
     .then(async () => {
       desktopData = initializeDesktopDataDirectory(app.getPath('userData'));
+      initializeDesktopLogging(desktopData.logsDir);
       if (!isDev) {
+        const marketBackup = backupMarketDatabaseForVersion(desktopData, app.getVersion());
+        if (marketBackup) console.log(`Created pre-upgrade market database backup: ${marketBackup}`);
         applyDesktopMigrations(
           desktopData,
           path.join(process.resourcesPath, 'desktop-migrations')
@@ -386,8 +484,15 @@ if (setupSingleInstanceLock()) {
         launchToken,
       });
       registerIpcHandlers();
-      if (!process.env.QUANTPILOT_MARKET_API_URL) {
+      const useExternalMarketApi = isDev
+        && process.env.QUANTPILOT_DESKTOP_MARKET_API_OVERRIDE === '1'
+        && Boolean(process.env.QUANTPILOT_MARKET_API_URL);
+      if (!useExternalMarketApi) {
+        delete process.env.QUANTPILOT_MARKET_API_URL;
+        delete process.env.QUANTPILOT_MARKET_API_BASE_URL;
         await startMarketSidecar();
+      } else {
+        console.warn('Desktop development is using an explicitly configured external market-data API.');
       }
       await createMainWindow();
       if (!isDev && process.env.QUANTPILOT_DISABLE_AUTO_UPDATE !== '1') {

@@ -1,6 +1,6 @@
 # QuantPilot 市场数据服务
 
-这个子模块用于给量化分析 Agent 和策略平台提供行情、财务、事件、补数、基础组件和回测数据能力。当前以东方财富为实时行情和事件主源，历史 K 线优先走东方财富，失败时使用 Baostock 补 A 股日线增强字段，AKShare 作为补充聚合层，Yahoo Finance 仅用于海外市场方向。
+这个子模块用于给量化分析 Agent 和策略平台提供行情、财务、事件、补数、基础组件和回测数据能力。服务器端允许按能力路由多个 provider；桌面安装包的固定策略是东方财富提供证券目录和候选详情实时行情，Baostock 提供近 5 年前复权日线，单标的失败时自动使用 AKShare。桌面数据写入 DuckDB，服务器数据写入 TimescaleDB，策略始终优先读取各自运行模式的本地事实库。
 
 所有核心响应会保留原有业务字段，同时补充统一数据契约字段，方便 Agent 判断来源和质量：
 
@@ -169,6 +169,12 @@ curl 'http://127.0.0.1:8000/api/v1/quotes/history/600519?period=daily&adjustment
 ### 历史 K 线字段补数
 
 Baostock / AKShare 补数端点用于把 `amount`、`amplitude`、`change_percent`、`change_amount`、`turnover`、停牌/ST 和涨跌停字段写入正式列。它不会删除已有更早历史，稀疏源也不会覆盖已有非空增强字段。当前本地优先使用 Baostock，因为它不依赖东方财富历史域名。估值因子默认不参与日常增量补数，需要时传 `include_valuation_factors=true` 单独纳入完整性检查。
+
+桌面状态可通过以下接口查看；它返回 `runtime_mode=desktop`、`engine=duckdb`、数据库大小和可写性、provider 最近成功/失败，以及 `missing/partial/stale/ready` 覆盖数量：
+
+```bash
+curl 'http://127.0.0.1:8000/api/v1/market-data/readiness?universe_id=a-share-sample-research-pool'
+```
 
 ```bash
 curl -X POST 'http://127.0.0.1:8000/api/v1/ingestion/baostock/history' \

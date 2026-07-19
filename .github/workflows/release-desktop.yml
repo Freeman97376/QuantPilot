@@ -80,7 +80,8 @@ jobs:
       - name: Run silent installer smoke test
         shell: pwsh
         run: |
-          $installer = (Get-ChildItem dist -File -Filter 'QuantPilot Setup *.exe' | Select-Object -First 1).FullName
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          $installer = (Resolve-Path -LiteralPath "dist/QuantPilot Setup $version.exe").Path
           ./scripts/release/test-windows-installer.ps1 -CurrentInstaller $installer
 
       - name: Preserve verified artifacts
@@ -89,10 +90,10 @@ jobs:
           name: quantpilot-${{ github.ref_name }}-windows-x64
           if-no-files-found: error
           path: |
-            dist/QuantPilot Setup *.exe
-            dist/QuantPilot Setup *.exe.blockmap
-            dist/latest.yml
-            dist/SHA256SUMS.txt
+            dist/release-assets/QuantPilot-Setup-*.exe
+            dist/release-assets/QuantPilot-Setup-*.exe.blockmap
+            dist/release-assets/latest.yml
+            dist/release-assets/SHA256SUMS.txt
 
       - name: Publish verified GitHub Release
         shell: pwsh
@@ -100,11 +101,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ github.ref_name }}"
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          $releaseDirectory = 'dist/release-assets'
           $assets = @(
-            (Get-ChildItem dist -File -Filter 'QuantPilot Setup *.exe' | Select-Object -First 1).FullName,
-            (Get-ChildItem dist -File -Filter 'QuantPilot Setup *.exe.blockmap' | Select-Object -First 1).FullName,
-            (Resolve-Path dist/latest.yml).Path,
-            (Resolve-Path dist/SHA256SUMS.txt).Path
+            (Resolve-Path -LiteralPath "$releaseDirectory/QuantPilot-Setup-$version.exe").Path,
+            (Resolve-Path -LiteralPath "$releaseDirectory/QuantPilot-Setup-$version.exe.blockmap").Path,
+            (Resolve-Path -LiteralPath "$releaseDirectory/latest.yml").Path,
+            (Resolve-Path -LiteralPath "$releaseDirectory/SHA256SUMS.txt").Path
           )
           if ($assets -contains $null) { throw 'Release assets are incomplete.' }
           $releaseArgs = @('release', 'create', $tag) + $assets + @(

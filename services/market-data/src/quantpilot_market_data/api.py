@@ -28,6 +28,9 @@ from quantpilot_market_data.providers.akshare import AkShareClient, AkShareError
 from quantpilot_market_data.providers.baostock import BaoStockClient, BaoStockError
 from quantpilot_market_data.providers.eastmoney import EastMoneyClient, EastMoneyError
 from quantpilot_market_data.providers.tushare import TushareClient
+from quantpilot_market_data.repositories.duckdb_repository import (
+    DESKTOP_COVERAGE_LOOKBACK_YEARS,
+)
 from quantpilot_market_data.repositories.factory import (
     get_duckdb_repository,
     initialize_runtime_repository,
@@ -125,19 +128,64 @@ def create_app() -> FastAPI:
         request: HistoryIngestionRequest,
     ):
         try:
-            return await fetch_baostock_kline_for_ingestion(
+            kline = await fetch_baostock_kline_for_ingestion(
                 baostock_client,
                 symbol_or_secid,
                 request,
             )
+            if is_desktop_repository():
+                await get_duckdb_repository().record_provider_attempt(
+                    provider="baostock",
+                    capability="history",
+                    success=True,
+                    metadata={"symbol": kline.symbol, "bars": len(kline.bars)},
+                )
+            return kline
         except (BaoStockError, ValueError) as primary_error:
+            if is_desktop_repository():
+                await get_duckdb_repository().record_provider_attempt(
+                    provider="baostock",
+                    capability="history",
+                    success=False,
+                    error=str(primary_error),
+                    metadata={"symbol": symbol_or_secid},
+                )
             try:
-                return await fetch_akshare_kline_for_ingestion(
+                kline = await fetch_akshare_kline_for_ingestion(
                     akshare_client,
                     symbol_or_secid,
                     request,
                 )
+                kline = kline.model_copy(
+                    update={
+                        "metadata": {
+                            **kline.metadata,
+                            "fallback_from": "baostock",
+                            "fallback_reason": str(primary_error),
+                        }
+                    }
+                )
+                if is_desktop_repository():
+                    await get_duckdb_repository().record_provider_attempt(
+                        provider="akshare",
+                        capability="history-fallback",
+                        success=True,
+                        metadata={
+                            "symbol": kline.symbol,
+                            "bars": len(kline.bars),
+                            "fallback_reason": str(primary_error),
+                        },
+                    )
+                return kline
             except (AkShareError, ValueError) as fallback_error:
+                if is_desktop_repository():
+                    await get_duckdb_repository().record_provider_attempt(
+                        provider="akshare",
+                        capability="history-fallback",
+                        success=False,
+                        error=str(fallback_error),
+                        metadata={"symbol": symbol_or_secid},
+                    )
                 raise BaoStockError(
                     f"Baostock 失败：{primary_error}；AKShare 兜底失败：{fallback_error}"
                 ) from fallback_error
@@ -231,6 +279,54 @@ def create_app() -> FastAPI:
         if is_desktop_repository():
             return await get_duckdb_repository().health()
         return {"status": "ok", "engine": "timescaledb"}
+
+    @app.get("/api/v1/market-data/readiness")
+    async def market_data_readiness(
+        universe_id: str = "a-share-sample-research-pool",
+    ) -> dict[str, object]:
+        if not is_desktop_repository():
+            return {
+                "runtime_mode": "server",
+                "engine": "timescaledb",
+                "universe_id": universe_id,
+                "providers": [],
+                "coverage": {},
+            }
+        repository = get_duckdb_repository()
+        health_state, providers, coverage_rows = await asyncio.gather(
+            repository.health(),
+            repository.provider_states(),
+            repository.coverage_rows(universe_id=universe_id),
+        )
+        coverage_counts = {
+            status: sum(row.get("data_status") == status for row in coverage_rows)
+            for status in ("missing", "partial", "stale", "ready")
+        }
+        return {
+            "runtime_mode": "desktop",
+            "engine": "duckdb",
+            "universe_id": universe_id,
+            "source_policy": {
+                "catalog": "eastmoney",
+                "history_primary": "baostock",
+                "history_fallback": "akshare",
+                "realtime": "eastmoney",
+                "realtime_scope": "candidate-detail-only",
+            },
+            "storage": health_state,
+            "providers": providers,
+            "coverage": {
+                "total": len(coverage_rows),
+                **coverage_counts,
+                "row_count": sum(int(row.get("row_count") or 0) for row in coverage_rows),
+                "lookback_years": DESKTOP_COVERAGE_LOOKBACK_YEARS,
+                "latest_ts": max(
+                    (row.get("last_ts") for row in coverage_rows if row.get("last_ts")),
+                    default=None,
+                ),
+            },
+            "fetched_at": datetime.now(UTC),
+        }
 
     @app.post("/api/v1/ingestion/eastmoney/history", response_model=HistoryIngestionResponse)
     async def ingest_eastmoney_history(

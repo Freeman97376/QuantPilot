@@ -1,6 +1,6 @@
 # QuantPilot v2.1.0 release checklist
 
-`v2.1.0-alpha.2` is the first public signed desktop alpha. Do not create the
+`v2.1.0-alpha.3` is the data-readiness desktop alpha. Do not create the
 stable `v2.1.0` tag until every stable gate below has evidence attached to the
 release issue or run log.
 
@@ -30,11 +30,20 @@ elevated PowerShell window and run:
 
 - `npm ci` and `npm run release:check` pass.
 - `npm run build:server` and `npm run build:desktop` pass from a clean checkout.
+- The desktop build starts by cleaning only repository `dist` and
+  `.desktop-build`, then emits exactly one installer matching the package
+  version. It does not read or delete `%LOCALAPPDATA%\QuantPilot`.
 - Authenticode status is `Valid` for the installer, Electron executable, and
   Python sidecar; each signature has a timestamp and the expected publisher.
 - Packaged standalone resources contain no `.env` file.
 - Unpacked and silent-installer smoke tests create `app.db`, `market.duckdb`,
   and `installation-id`, return HTTP 200, and leave no process behind.
+- Packaged `/health` returns `runtime_mode=desktop`, `engine=duckdb`, a writable
+  database, and schema version 2. Ambient market API overrides do not replace
+  the bundled sidecar.
+- An alpha.2-to-alpha.3 upgrade preserves the existing `market.duckdb`, creates
+  one versioned backup, preserves existing row counts, and opens the smart
+  strategy page with provider and coverage status visible.
 - On the server, run `quantpilot-maintain backup` as the deployment user, take a cloud disk
   snapshot, then run `quantpilot-maintain update` during the maintenance
   window. Never use `docker compose down -v`.
@@ -46,8 +55,8 @@ To validate an upgrade on a disposable Windows VM:
 
 ```powershell
 ./scripts/release/test-windows-installer.ps1 `
-  -PreviousInstaller './dist/QuantPilot Setup 2.1.0-alpha.1.exe' `
-  -CurrentInstaller './dist/QuantPilot Setup 2.1.0-alpha.2.exe'
+  -PreviousInstaller './upgrade-fixtures/QuantPilot Setup 2.1.0-alpha.2.exe' `
+  -CurrentInstaller './dist/QuantPilot Setup 2.1.0-alpha.3.exe'
 ```
 
 ## Stable v2.1.0 gate

@@ -1,13 +1,24 @@
 #!/usr/bin/env node
 
-const os = require('os');
+const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
 const rootDir = path.join(__dirname, '..', '..');
 const marketDataDir = path.join(rootDir, 'services', 'market-data');
 const uv = process.platform === 'win32' ? 'uv.exe' : 'uv';
-const pytestBase = path.join(os.tmpdir(), `quantpilot-pytest-${process.pid}-${Date.now()}`);
+const pytestRoot = path.join(marketDataDir, '.test-tmp');
+const pytestBase = path.join(pytestRoot, `release-${process.pid}-${Date.now()}`);
+fs.mkdirSync(pytestRoot, { recursive: true });
+process.on('exit', () => {
+  const relative = path.relative(marketDataDir, pytestBase);
+  if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) {
+    fs.rmSync(pytestBase, { recursive: true, force: true });
+    if (fs.existsSync(pytestRoot) && fs.readdirSync(pytestRoot).length === 0) {
+      fs.rmdirSync(pytestRoot);
+    }
+  }
+});
 const npmCli = process.env.npm_execpath;
 if (!npmCli) {
   console.error('[release-check] npm_execpath is missing. Run this check through `npm run release:check`.');
@@ -28,6 +39,7 @@ const checks = [
   npmCheck('module boundaries', ['run', 'check:module-boundaries']),
   npmCheck('service catalog', ['run', 'check:service-catalog']),
   npmCheck('smart strategy contract', ['run', 'check:smart-strategy']),
+  npmCheck('desktop data upgrade contract', ['run', 'check:desktop-data']),
   npmCheck('quant guardrails', ['run', 'check:quant-guardrails']),
   npmCheck('benchmark coverage', ['run', 'check:benchmark-coverage']),
   { name: 'market-data lint', command: uv, args: ['run', 'ruff', 'check', '.'], cwd: marketDataDir },

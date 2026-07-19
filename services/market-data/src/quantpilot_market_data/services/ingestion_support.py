@@ -121,7 +121,14 @@ def missing_preflight_fields(
     expected_rows = max(1, getattr(coverage, "expected_rows_since_cutoff", 0) or 0)
     if (
         coverage.benchmark_last_ts is not None
-        and (coverage.last_ts is None or coverage.last_ts < coverage.benchmark_last_ts)
+        and (
+            coverage.last_ts is None
+            or (
+                coverage.benchmark_last_ts.astimezone(SHANGHAI_TZ).date()
+                - coverage.last_ts.astimezone(SHANGHAI_TZ).date()
+            ).days
+            > 4
+        )
     ):
         missing.append("latest_trade_date")
     if coverage.rows_since_cutoff < expected_rows:

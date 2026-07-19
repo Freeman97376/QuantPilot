@@ -105,7 +105,9 @@ def research_member_from_row(row: dict[str, Any]) -> ResearchUniverseMember:
         pb_mrq=decimal_or_none(row.get("pb_mrq")),
         ps_ttm=decimal_or_none(row.get("ps_ttm")),
         pcf_ncf_ttm=decimal_or_none(row.get("pcf_ncf_ttm")),
-        data_status=coverage_status(row_count, row["last_ts"]),
+        data_status=str(
+            row.get("data_status") or coverage_status(row_count, row["last_ts"])
+        ),
     )
 
 

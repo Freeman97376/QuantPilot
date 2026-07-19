@@ -1,6 +1,8 @@
 # 行情数据源采集知识库
 
-QuantPilot 的行情链路以 PostgreSQL + TimescaleDB 为事实库，外部数据源只作为采集入口。生成工作空间和策略平台应优先读取本地后端，不要在页面里临时抓网页接口。
+QuantPilot 的行情链路按运行模式使用本地事实库：服务器使用 PostgreSQL + TimescaleDB，桌面安装包使用 `%LOCALAPPDATA%\QuantPilot\market.duckdb`。外部数据源只作为采集入口；生成工作空间和策略平台应优先读取本地后端，不要在页面里临时抓网页接口。
+
+桌面端的固定来源策略是：东方财富负责全 A 股证券目录和候选详情实时行情，Baostock 负责近 5 年前复权日线主补数，Baostock 失败时自动改用 AKShare。服务器端可以保留更广的 provider 路由，但不能把服务器策略误写成桌面安装包的实际行为。
 
 ## 字段口径
 
@@ -23,10 +25,10 @@ K 线交易字段在 `quant.stock_bars` 中均为正式列，估值类因子写�
 
 ## 采集优先级
 
-1. 东方财富直连：实时行情、分红、公告和证券解析继续作为主链路。
-2. 东方财富历史 K 线：如果本机可达，优先用于 OHLCV、成交额、振幅、涨跌幅、涨跌额、换手率。
-3. Baostock 历史补数：当东方财富历史端点不可达，使用 `/api/v1/ingestion/baostock/history` 或批量端点补 `amount/amplitude/change_percent/change_amount/turnover/trade_status/is_st/limit_*`；估值因子通过 `include_valuation_factors=true` 显式纳入，不跟日常增量补数混跑。
-4. AKShare 历史补数：用于聚合接口验证；如果底层仍走东方财富且本机不可达，降级到 Baostock。
+1. 东方财富直连：证券目录、实时行情、分红、公告和证券解析继续作为主链路；桌面实时行情只在候选详情按需请求。
+2. 桌面 Baostock 历史补数：作为 5 年 `daily/qfq` 主数据源，提供 OHLCV、成交额、换手率、交易状态、ST 和涨跌停字段。
+3. 桌面 AKShare 历史兜底：Baostock 单标的请求失败后自动调用，并把实际 provider、主源失败原因和字段级来源写入 DuckDB 元数据。
+4. 服务器东方财富历史 K 线：在部署环境可达时仍可作为服务器采集链路之一，不改变桌面端固定的 Baostock → AKShare 顺序。
 5. 腾讯 K 线兜底：只作为 OHLCV 连续样本兜底，成交额和换手率通常为空，不能覆盖已有增强字段。
 6. Tushare：后续作为日频基本面和估值补充，重点字段包括换手率、量比、市盈率、市净率、市值、流通股本。
 7. Yahoo/yfinance：只用于海外股票、ETF、指数，不作为 A 股主源。
@@ -39,8 +41,11 @@ K 线交易字段在 `quant.stock_bars` 中均为正式列，估值类因子写�
 - 补数只更新同一天同口径记录，不删除已有更早历史。
 - 稀疏兜底源不能把已有非空增强字段覆盖成空。
 - 每次采集任务写入 `quant.market_data_ingestion_jobs`，每个 provider 的水位写入 `quant.market_data_sync_state`。
-- 5857 只 A 股和 ETF/指数池补数必须用批量端点低频推进，前端只展示任务进度和下一批 offset。
+- 桌面端把 provider 最近成败写入 `quant.market_data_provider_state`；K 线 `metadata.field_sources` 保留每个非空字段的实际来源。
+- 全 A 股和 ETF/指数池补数必须用批量端点低频推进，智能策略页展示任务、来源、覆盖和错误，不用固定数量冒充完整市场。
 - 页面和生成工作空间读取 `/api/v1/research/bars/{symbol}` 或后端封装接口，不直接读数据库。
+
+桌面 5 年日线覆盖不能用“存在一行”判断。状态定义为：无 K 线是 `missing`；低于基于上市日期和工作日估算的最低覆盖是 `partial`；行数满足但最新日期落后是 `stale`；行数和新鲜度都满足才是 `ready`。`20500101` 只表示 provider 的“取最新”占位值，预检必须截到当前应有交易日，不能把 2050 年当作真实完成目标。
 
 ## 本地优先判断流程
 

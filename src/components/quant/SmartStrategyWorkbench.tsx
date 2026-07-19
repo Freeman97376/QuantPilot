@@ -115,6 +115,18 @@ function formatBytes(value: number): string {
   return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
+function formatStatusTime(value?: string | null): string {
+  if (!value) return "尚无记录";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(parsed);
+}
+
 const MINUTE_PROFILE_OPTIONS: Array<{
   id: MinuteProfileId;
   label: string;
@@ -511,10 +523,42 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
   const reviewMessage = draft ? draftReviewMessage(draft) : null;
   const memberCount = selectedUniverse?.memberCount ?? 0;
   const readyCount = selectedUniverse?.readyCount ?? 0;
+  const marketReadiness = marketState.marketData;
+  const partialCount = marketReadiness.coverage.partial;
+  const staleCount = marketReadiness.coverage.stale;
+  const missingCount = marketReadiness.coverage.missing;
+  const providerCards = [
+    {
+      id: "eastmoney-catalog",
+      name: "东方财富",
+      role: "证券目录 · 候选详情实时行情",
+      state: marketReadiness.providers.find((item) => (
+        item.provider === "eastmoney" && item.capability === "catalog"
+      )),
+      countLabel: `${memberCount.toLocaleString("zh-CN")} 支目录证券`,
+    },
+    {
+      id: "baostock-history",
+      name: "Baostock",
+      role: "5 年前复权日线主数据源",
+      state: marketReadiness.providers.find((item) => (
+        item.provider === "baostock" && item.capability === "history"
+      )),
+      countLabel: null,
+    },
+    {
+      id: "akshare-history",
+      name: "AKShare",
+      role: "Baostock 失败时自动兜底",
+      state: marketReadiness.providers.find((item) => item.provider === "akshare"),
+      countLabel: null,
+    },
+  ];
   const priorityTarget = Math.min(300, memberCount);
   const priorityReady = Math.min(priorityTarget, readyCount);
   const fullMarketReady = memberCount > 0 && readyCount >= memberCount;
   const marketDataReady = !marketState.research.error
+    && !marketReadiness.error
     && (fullMarketReady || (allowReadySubset && readyCount > 0));
   const activeIngestionJob = marketState.ingestionJobs.jobs.find((job) => (
     job.provider === "baostock-autofill" && job.status === "running"
@@ -897,7 +941,7 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
               <Database className="h-4 w-4 text-blue-600" />
               <h2 className="text-sm font-semibold text-slate-950">数据准备</h2>
               <Badge variant="outline" className="border-blue-200 bg-blue-50 text-blue-700">
-                桌面本地 DuckDB · 不需要 Docker
+                {marketReadiness.runtimeMode === "desktop" ? "桌面本地" : "服务端"} {marketReadiness.engine.toUpperCase()} · 不需要 Docker
               </Badge>
               <Badge
                 variant="outline"
@@ -939,8 +983,48 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
             <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
               <p className="text-[11px] font-medium uppercase tracking-wide text-slate-400">3 · 全市场覆盖</p>
               <p className="mt-1 text-lg font-semibold tabular-nums text-slate-950">{readyCount.toLocaleString("zh-CN")}/{memberCount.toLocaleString("zh-CN")}</p>
-              <p className="mt-1 text-xs text-slate-500">Baostock 日线 · AKShare 失败兜底</p>
+              <p className="mt-1 text-xs text-slate-500">
+                部分 {partialCount.toLocaleString("zh-CN")} · 过期 {staleCount.toLocaleString("zh-CN")} · 缺失 {missingCount.toLocaleString("zh-CN")}
+              </p>
             </div>
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-3">
+            {providerCards.map((provider) => {
+              const status = provider.state?.status ?? "unknown";
+              const statusLabel = status === "ready" ? "可用" : status === "error" ? "最近失败" : "等待首次调用";
+              return (
+                <div key={provider.id} className="rounded-md border border-slate-200 bg-white p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-slate-900">{provider.name}</p>
+                      <p className="mt-0.5 text-[11px] leading-4 text-slate-500">{provider.role}</p>
+                    </div>
+                    <Badge
+                      variant="outline"
+                      className={status === "ready"
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                        : status === "error"
+                          ? "border-red-200 bg-red-50 text-red-700"
+                          : "border-slate-200 bg-slate-50 text-slate-600"}
+                    >
+                      {statusLabel}
+                    </Badge>
+                  </div>
+                  <p className="mt-3 text-xs font-medium tabular-nums text-slate-700">
+                    {provider.countLabel ?? `${(provider.state?.symbolCount ?? 0).toLocaleString("zh-CN")} 支 · ${(provider.state?.rowCount ?? 0).toLocaleString("zh-CN")} 行`}
+                  </p>
+                  <p className="mt-1 text-[11px] text-slate-400">
+                    最近成功：{formatStatusTime(provider.state?.lastSuccessAt)}
+                  </p>
+                  {provider.state?.lastError ? (
+                    <p className="mt-2 line-clamp-2 text-[11px] leading-4 text-red-600" title={provider.state.lastError}>
+                      {provider.state.lastError}
+                    </p>
+                  ) : null}
+                </div>
+              );
+            })}
           </div>
 
           <div>
@@ -960,12 +1044,26 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
             ) : null}
           </div>
 
-          {dataError || marketState.research.error ? (
+          {dataError || marketState.research.error || marketReadiness.error ? (
             <div role="alert" className="flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700">
               <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-              <p className="min-w-0 break-words leading-5">{dataError ?? marketState.research.error}</p>
+              <p className="min-w-0 break-words leading-5">{dataError ?? marketState.research.error ?? marketReadiness.error}</p>
             </div>
           ) : null}
+
+          <details className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs text-slate-600">
+            <summary className="cursor-pointer select-none font-medium text-slate-700">本地数据与来源详情</summary>
+            <div className="mt-3 grid gap-x-6 gap-y-2 sm:grid-cols-2 lg:grid-cols-4">
+              <p>数据库：<span className="font-medium text-slate-900">{marketReadiness.storage.databaseFile ?? "未创建"}</span></p>
+              <p>数据库大小：<span className="font-medium text-slate-900">{formatBytes(marketReadiness.storage.databaseSizeBytes)}</span></p>
+              <p>可用磁盘：<span className="font-medium text-slate-900">{formatBytes(marketReadiness.storage.freeDiskBytes)}</span></p>
+              <p>Schema：<span className="font-medium text-slate-900">v{marketReadiness.storage.schemaVersion}</span></p>
+              <p>本地行情：<span className="font-medium text-slate-900">{marketReadiness.coverage.rowCount.toLocaleString("zh-CN")} 行</span></p>
+              <p>最新交易日：<span className="font-medium text-slate-900">{formatStatusTime(marketReadiness.coverage.latestTs)}</span></p>
+              <p>历史源策略：<span className="font-medium text-slate-900">{marketReadiness.sourcePolicy.historyPrimary} → {marketReadiness.sourcePolicy.historyFallback}</span></p>
+              <p>实时范围：<span className="font-medium text-slate-900">仅候选详情</span></p>
+            </div>
+          </details>
 
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div className="flex flex-wrap gap-2">

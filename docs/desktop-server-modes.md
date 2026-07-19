@@ -34,6 +34,10 @@ location is IP-rate-limited and all desktop request bodies are capped at 64 KB.
   `resources/app.asar/node_modules`.
 - Node, Python, PostgreSQL, Redis, and Docker are not required on an installed
   machine.
+- A packaged desktop always starts its bundled loopback FastAPI sidecar and
+  DuckDB repository. Ambient `QUANTPILOT_MARKET_API_URL` values are ignored in
+  packaged builds, so a stale server or developer environment cannot silently
+  replace the desktop data source.
 - Data lives below `%LOCALAPPDATA%\QuantPilot` in `app.db`, `market.duckdb`,
   `cache`, `workspaces`, `backups`, and `logs`.
 - Electron starts both loopback services on private random ports, authenticates
@@ -41,6 +45,10 @@ location is IP-rate-limited and all desktop request bodies are capped at 64 KB.
   stops them on exit.
 - SQLite migrations run before the UI opens. The database is backed up first;
   a failed migration restores the backup and blocks startup.
+- Before the first packaged start of each application version, an existing
+  `market.duckdb` is copied to `backups` without resetting or deleting the live
+  database. Electron rotates `electron.log`, `next.log`, and `market-data.log`
+  at 10 MB with five retained backups.
 - Secrets are encrypted with Electron `safeStorage` (Windows DPAPI). SQLite
   stores only opaque secret references.
 
@@ -56,10 +64,19 @@ The official server connection is optional and fixed to
 consented diagnostic/version metadata. Local projects, strategies, chat, market
 data, API keys, and LLM traffic remain local and continue working offline.
 
+The `/smart-strategy` page is the normal desktop entry point for first-use data
+preparation. One action imports the complete EastMoney A-share catalog and
+starts a resumable five-year `daily/qfq` history job. Baostock is the history
+primary and AKShare is the automatic fallback; EastMoney realtime is requested
+only for selected candidate details. The page exposes provider success/failure,
+DuckDB size and free disk, job progress, and `missing`, `partial`, `stale`, and
+`ready` coverage. Full-market readiness is the default execution gate; using a
+ready subset requires an explicit switch.
+
 ## Release and update
 
 Set `package.json` to the release version and push the matching public tag, for
-example `v2.1.0-alpha.1`. `release-desktop.yml` builds the Windows x64 installer
+example `v2.1.0-alpha.3`. `release-desktop.yml` builds the Windows x64 installer
 and publishes electron-builder update metadata to the public GitHub Release.
 The desktop updater reads that public release without distributing a GitHub
 access token. Application databases and user-data directories are outside the
@@ -70,6 +87,13 @@ certificate, verifies the publisher and timestamp, and refuses unsigned release
 artifacts. Local development builds may remain unsigned. Before a stable
 release, run install, upgrade, backup/restore, offline, revoked-account, and
 insufficient-disk tests on two clean Windows x64 machines.
+
+`npm run build:desktop` deletes only repository-owned `dist` and
+`.desktop-build` directories before packaging, then requires exactly one
+installer named for the current `package.json` version. It never deletes
+`%LOCALAPPDATA%\QuantPilot`. Public GitHub release assets from older versions
+remain available for upgrade and rollback testing; stale local installers are
+not carried into a new build.
 
 Server maintenance creates and verifies a PostgreSQL backup before additive
 migrations, builds into `.next-candidate` while the current web process remains

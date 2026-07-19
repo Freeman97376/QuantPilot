@@ -151,7 +151,7 @@ export interface StrategyUniverseMember {
   pbMrq?: number | null;
   psTtm?: number | null;
   pcfNcfTtm?: number | null;
-  dataStatus: 'ready' | 'missing' | 'stale';
+  dataStatus: 'ready' | 'missing' | 'partial' | 'stale';
 }
 
 export interface StrategyUniverse {
@@ -412,7 +412,7 @@ export interface StrategyDataCoverageItem {
   firstTs?: string | null;
   lastTs?: string | null;
   rowCount: number;
-  dataStatus: 'ready' | 'missing' | 'stale';
+  dataStatus: 'ready' | 'missing' | 'partial' | 'stale';
 }
 
 export interface StrategyLocalKlineBar {
@@ -709,10 +709,62 @@ export interface StrategyAShareUniverseImportResult {
   completedPages: number;
 }
 
+export interface StrategyMarketProviderState {
+  provider: string;
+  capability: string;
+  status: 'ready' | 'error' | 'unknown';
+  successCount: number;
+  failureCount: number;
+  rowCount: number;
+  symbolCount: number;
+  firstTs?: string | null;
+  lastTs?: string | null;
+  lastSuccessAt?: string | null;
+  lastFailureAt?: string | null;
+  lastError?: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface StrategyMarketDataReadiness {
+  runtimeMode: 'desktop' | 'server' | 'unknown';
+  engine: string;
+  universeId: string;
+  sourcePolicy: {
+    catalog: string;
+    historyPrimary: string;
+    historyFallback: string;
+    realtime: string;
+    realtimeScope: string;
+  };
+  storage: {
+    status: string;
+    engine: string;
+    databaseFile?: string | null;
+    databaseSizeBytes: number;
+    freeDiskBytes: number;
+    writable: boolean;
+    schemaVersion: number;
+  };
+  providers: StrategyMarketProviderState[];
+  coverage: {
+    total: number;
+    missing: number;
+    partial: number;
+    stale: number;
+    ready: number;
+    rowCount: number;
+    lookbackYears: number;
+    latestTs?: string | null;
+  };
+  fetchedAt: string;
+  error?: string | null;
+}
+
 export interface SmartStrategyPageData {
   generatedAt: string;
   research: StrategyResearchState;
   ingestionJobs: StrategyIngestionJobsResponse;
+  marketData: StrategyMarketDataReadiness;
 }
 
 export interface StrategyFoundationComponent {

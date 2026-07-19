@@ -8,6 +8,7 @@ const rootDir = path.join(__dirname, '..', '..');
 const prismaCli = require.resolve('prisma/build/index.js');
 const buildDir = path.join(rootDir, '.desktop-build');
 const migrationsDir = path.join(buildDir, 'migrations');
+const { cleanDesktopArtifacts } = require('./clean-desktop-artifacts');
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -28,6 +29,7 @@ function main() {
   if (process.platform !== 'win32') {
     throw new Error('The first desktop release supports Windows x64 only.');
   }
+  cleanDesktopArtifacts();
   fs.mkdirSync(migrationsDir, { recursive: true });
   const env = {
     QUANTPILOT_RUNTIME_MODE: 'desktop',
@@ -73,6 +75,20 @@ function main() {
     builderArgs.push('--publish', 'always');
   }
   run(process.execPath, builderArgs, { env });
+
+  const packageJson = require(path.join(rootDir, 'package.json'));
+  const expectedInstaller = path.join(
+    rootDir,
+    'dist',
+    `QuantPilot Setup ${packageJson.version}.exe`
+  );
+  const installers = fs.readdirSync(path.join(rootDir, 'dist'))
+    .filter((name) => /^QuantPilot Setup .+\.exe$/i.test(name));
+  if (!fs.existsSync(expectedInstaller) || installers.length !== 1) {
+    throw new Error(
+      `Desktop build must produce exactly ${path.basename(expectedInstaller)}; found: ${installers.join(', ') || 'none'}`
+    );
+  }
 
   const packagedDesktopQueryEngine = path.join(
     rootDir,

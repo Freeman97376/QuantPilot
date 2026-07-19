@@ -451,7 +451,7 @@ class ResearchUniverseMember(BaseModel):
     pb_mrq: Decimal | None = Field(default=None, description="市净率 MRQ")
     ps_ttm: Decimal | None = Field(default=None, description="TTM 市销率")
     pcf_ncf_ttm: Decimal | None = Field(default=None, description="TTM 市现率")
-    data_status: Literal["ready", "missing", "stale"] = Field(
+    data_status: Literal["ready", "missing", "partial", "stale"] = Field(
         default="missing",
         description="本地数据状态",
     )
@@ -631,7 +631,7 @@ class MarketDataCoverageItem(BaseModel):
     first_ts: datetime | None = None
     last_ts: datetime | None = None
     row_count: int = 0
-    data_status: Literal["ready", "missing", "stale"] = "missing"
+    data_status: Literal["ready", "missing", "partial", "stale"] = "missing"
 
 
 class MarketDataCoverageSummary(BaseModel):

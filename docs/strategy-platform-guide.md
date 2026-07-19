@@ -111,6 +111,8 @@ MA5 > MA10 > MA20 > MA30 > MA60；
 
 首次进入智能策略页时，页面预填一个可执行示例，并将“生成草案 -> 执行筛选”合并为一个主动作。未配置 DeepSeek 或远端请求失败时，服务端会在草案中标注原因并降级为本地确定性解析；如果出现冲突条件、不支持词或只有样本/ST/涨停等默认风控项，前端必须停在复核阶段，不得自动运行。
 
+同一页面也负责桌面端首次数据准备。用户无需安装 Docker，也无需先进入数据平台：点击“导入全 A 股并开始补数”后，页面导入东方财富证券目录并启动可暂停、继续、停止和重启续跑的后台任务。页面必须显示 DuckDB 文件与容量、完整/部分/过期/缺失数量、Baostock 和 AKShare 的实际使用状态及最近错误。默认等待全市场 `ready` 后执行；用户只有显式打开“仅筛选已就绪标的”才能提前运行。实时行情只对日线筛选后的候选详情按需请求。
+
 第一批白名单指标包括：
 
 - 趋势：`ma5/10/20/30/60/120/250`、`ma5_slope_5d_pct`、`ma10_slope_5d_pct`、`ma20_slope_5d_pct`、`ma60_slope_20d_pct`、`ema12`、`ema26`、`close_to_ma120_pct`
@@ -259,4 +261,7 @@ MA5 > MA10 > MA20 > MA30 > MA60；
 | 成交额和换手率为空 | Baostock/AKShare 补数是否完成，`amount`、`turnover` 是否被空值覆盖 |
 | 补数一直显示运行中 | `quant.market_data_ingestion_jobs` 的 parent job 和 child job 心跳 |
 | 本地已有数据还重复拉接口 | preflight 必需字段是否过多，日期范围是否超出本地覆盖 |
+| 点击补数后就绪数不增加 | `/api/v1/market-data/readiness` 的 `partial/missing`、provider 最近错误、`market-data.log`，以及 2050 占位日期是否被截到当前交易日 |
+| 页面只显示约 100/150 支 | 东方财富目录分页是否跑完、目录 provider 状态中的 `total_available`，不要把首批或优先批次当作全市场总数 |
+| 桌面机器没有 Docker | 正常；安装包必须使用内置 sidecar + DuckDB，先看 `/health` 是否返回 `runtime_mode=desktop` 和 `engine=duckdb` |
 | 策略显示可执行但结果不可信 | 策略依赖字段是否真的存在，尤其是 DDE、停牌/ST 和涨跌停 |

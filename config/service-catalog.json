@@ -29,7 +29,7 @@
     {
       "id": "market-data",
       "name": "Python 市场数据后端",
-      "summary": "FastAPI 市场数据、股票池、回测、ClickHouse 同步和 provider 编排。",
+      "summary": "FastAPI 市场数据、股票池、回测、provider 编排，以及桌面 sidecar 的 DuckDB 就绪状态。",
       "runtime": "python",
       "kind": "api",
       "domain": "market-data",
@@ -51,7 +51,7 @@
         "test": "cd services/market-data && uv run pytest"
       },
       "dependencies": ["timescaledb", "redis", "clickhouse"],
-      "capabilities": ["quotes", "research-universe", "backtests", "analytics"]
+      "capabilities": ["quotes", "research-universe", "backtests", "analytics", "data-readiness", "desktop-duckdb"]
     },
     {
       "id": "timescaledb",

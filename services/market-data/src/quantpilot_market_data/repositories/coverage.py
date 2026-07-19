@@ -35,7 +35,10 @@ def _coverage_item_from_row(row) -> MarketDataCoverageItem:
         first_ts=row["first_ts"],
         last_ts=row["last_ts"],
         row_count=int(row["row_count"] or 0),
-        data_status=coverage_status(int(row["row_count"] or 0), row["last_ts"]),
+        data_status=str(
+            row.get("data_status")
+            or coverage_status(int(row["row_count"] or 0), row["last_ts"])
+        ),
     )
 
 
@@ -73,7 +76,7 @@ async def get_market_data_coverage_page(
         total = len(items)
         ready = sum(item.data_status == "ready" for item in items)
         missing = sum(item.data_status == "missing" for item in items)
-        stale = sum(item.data_status == "stale" for item in items)
+        stale = sum(item.data_status in {"stale", "partial"} for item in items)
         latest_ts = max(
             (item.last_ts for item in items if item.last_ts is not None),
             default=None,

@@ -26,6 +26,7 @@ const config = [
   },
   {
     ignores: [
+      '.desktop-build/**',
       '.next/**',
       '**/.venv/**',
       '**/.pytest_cache/**',

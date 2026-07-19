@@ -45,6 +45,36 @@ function backupDatabase(dataPaths) {
   return backupPath;
 }
 
+function backupMarketDatabaseForVersion(dataPaths, version) {
+  if (!fs.existsSync(dataPaths.marketDatabasePath)) {
+    return null;
+  }
+  const safeVersion = String(version || 'unknown').replace(/[^a-z0-9._-]/gi, '-');
+  const markerPath = path.join(dataPaths.baseDir, `.market-backup-${safeVersion}.json`);
+  if (fs.existsSync(markerPath)) {
+    return null;
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupPath = path.join(dataPaths.backupsDir, `market-${safeVersion}-${stamp}.duckdb`);
+  const backupTempPath = `${backupPath}.tmp`;
+  const markerTempPath = `${markerPath}.tmp`;
+  try {
+    fs.copyFileSync(dataPaths.marketDatabasePath, backupTempPath);
+    fs.renameSync(backupTempPath, backupPath);
+    fs.writeFileSync(
+      markerTempPath,
+      JSON.stringify({ version: safeVersion, backupPath, createdAt: new Date().toISOString() }, null, 2),
+      { encoding: 'utf8', mode: 0o600 }
+    );
+    fs.renameSync(markerTempPath, markerPath);
+  } catch (error) {
+    if (fs.existsSync(backupTempPath)) fs.unlinkSync(backupTempPath);
+    if (fs.existsSync(markerTempPath)) fs.unlinkSync(markerTempPath);
+    throw error;
+  }
+  return backupPath;
+}
+
 function applyDesktopMigrations(dataPaths, migrationsDir) {
   if (!fs.existsSync(migrationsDir)) {
     throw new Error(`Desktop migrations are missing: ${migrationsDir}`);
@@ -96,6 +126,7 @@ function applyDesktopMigrations(dataPaths, migrationsDir) {
 
 module.exports = {
   applyDesktopMigrations,
+  backupMarketDatabaseForVersion,
   initializeDesktopDataDirectory,
   sqliteUrl,
 };

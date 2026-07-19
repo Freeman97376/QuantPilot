@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import threading
@@ -25,6 +26,9 @@ from quantpilot_market_data.indicators import build_technical_feature_rows
 from quantpilot_market_data.models import LocalKlineBar, LocalKlineResponse, LocalKlineSummary
 
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+DESKTOP_COVERAGE_LOOKBACK_YEARS = 5
+DESKTOP_COVERAGE_MIN_RATIO = 0.85
+DESKTOP_COVERAGE_MAX_LAG_DAYS = 4
 
 
 def _json_object(value: Any) -> dict[str, Any]:
@@ -66,6 +70,78 @@ def _aware_datetime(value: Any) -> datetime | None:
             return None
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
     return None
+
+
+def _catalog_listing_date(metadata: Any) -> date | None:
+    payload = _json_object(metadata)
+    raw = payload.get("listing_date")
+    if raw is None and isinstance(payload.get("raw"), dict):
+        raw = payload["raw"].get("f26")
+    text = str(raw or "").strip().replace("-", "")
+    if len(text) != 8 or not text.isdigit() or text == "00000000":
+        return None
+    try:
+        return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
+    except ValueError:
+        return None
+
+
+def _expected_latest_daily_date(now: datetime | None = None) -> date:
+    current = (now or datetime.now(SHANGHAI_TZ)).astimezone(SHANGHAI_TZ)
+    candidate = current.date()
+    if current.weekday() < 5 and (current.hour, current.minute) < (15, 20):
+        candidate -= timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+def _lookback_start_date(target_date: date, years: int) -> date:
+    try:
+        return target_date.replace(year=target_date.year - years)
+    except ValueError:
+        return target_date.replace(year=target_date.year - years, day=28)
+
+
+def _minimum_expected_sessions(start_date: date, end_date: date) -> int:
+    if start_date > end_date:
+        return 0
+    total_days = (end_date - start_date).days + 1
+    full_weeks, remaining_days = divmod(total_days, 7)
+    weekdays = full_weeks * 5
+    weekdays += sum(
+        1
+        for offset in range(remaining_days)
+        if (start_date.weekday() + offset) % 7 < 5
+    )
+    return math.ceil(weekdays * DESKTOP_COVERAGE_MIN_RATIO)
+
+
+def _desktop_coverage_status(row: dict[str, Any]) -> str:
+    row_count = int(row.get("row_count") or 0)
+    if row_count <= 0 or row.get("last_ts") is None:
+        row["expected_row_count"] = int(row.get("expected_row_count") or 0)
+        row["coverage_ratio"] = 0.0
+        return "missing"
+
+    target_date = _expected_latest_daily_date()
+    start_date = _lookback_start_date(target_date, DESKTOP_COVERAGE_LOOKBACK_YEARS)
+    listing_date = _catalog_listing_date(row.get("security_metadata"))
+    if listing_date and listing_date > start_date:
+        start_date = listing_date
+    expected_rows = _minimum_expected_sessions(start_date, target_date)
+    row["expected_row_count"] = expected_rows
+    row["coverage_ratio"] = round(min(1.0, row_count / max(1, expected_rows)), 4)
+    if row_count < expected_rows:
+        return "partial"
+
+    last_ts = _aware_datetime(row.get("last_ts"))
+    if last_ts is None:
+        return "missing"
+    last_date = last_ts.astimezone(SHANGHAI_TZ).date()
+    if (target_date - last_date).days > DESKTOP_COVERAGE_MAX_LAG_DAYS:
+        return "stale"
+    return "ready"
 
 
 class DuckDBMarketRepository:
@@ -137,6 +213,17 @@ class DuckDBMarketRepository:
                       created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                       PRIMARY KEY(symbol, timeframe, adjustment, provider)
                     );
+                    CREATE TABLE IF NOT EXISTS quant.market_data_provider_state (
+                      provider VARCHAR NOT NULL, capability VARCHAR NOT NULL,
+                      status VARCHAR NOT NULL DEFAULT 'unknown',
+                      success_count BIGINT NOT NULL DEFAULT 0,
+                      failure_count BIGINT NOT NULL DEFAULT 0,
+                      last_success_at TIMESTAMPTZ, last_failure_at TIMESTAMPTZ,
+                      last_error VARCHAR, metadata JSON NOT NULL DEFAULT '{}',
+                      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                      PRIMARY KEY(provider, capability)
+                    );
                     CREATE TABLE IF NOT EXISTS quant.market_data_ingestion_jobs (
                       id VARCHAR PRIMARY KEY, universe_id VARCHAR, provider VARCHAR, timeframe VARCHAR,
                       adjustment VARCHAR, status VARCHAR NOT NULL, total_symbols INTEGER NOT NULL DEFAULT 0,
@@ -162,7 +249,7 @@ class DuckDBMarketRepository:
                     """
                 )
                 connection.execute(
-                    "INSERT INTO quant.market_schema_version VALUES (1, now()) ON CONFLICT DO NOTHING"
+                    "INSERT INTO quant.market_schema_version VALUES (1, now()), (2, now()) ON CONFLICT DO NOTHING"
                 )
                 connection.execute(
                     """
@@ -192,6 +279,102 @@ class DuckDBMarketRepository:
                 connection.close()
             self._initialized = True
 
+    async def record_provider_attempt(
+        self,
+        *,
+        provider: str,
+        capability: str,
+        success: bool,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        await self.initialize()
+        with self._lock:
+            connection = self._connect()
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO quant.market_data_provider_state
+                      (provider, capability, status, success_count, failure_count,
+                       last_success_at, last_failure_at, last_error, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(provider, capability) DO UPDATE SET
+                      status=excluded.status,
+                      success_count=quant.market_data_provider_state.success_count
+                        + excluded.success_count,
+                      failure_count=quant.market_data_provider_state.failure_count
+                        + excluded.failure_count,
+                      last_success_at=coalesce(
+                        excluded.last_success_at,
+                        quant.market_data_provider_state.last_success_at
+                      ),
+                      last_failure_at=coalesce(
+                        excluded.last_failure_at,
+                        quant.market_data_provider_state.last_failure_at
+                      ),
+                      last_error=CASE
+                        WHEN excluded.last_success_at IS NOT NULL THEN NULL
+                        ELSE excluded.last_error
+                      END,
+                      metadata=excluded.metadata,
+                      updated_at=now()
+                    """,
+                    [
+                        provider,
+                        capability,
+                        "ready" if success else "error",
+                        1 if success else 0,
+                        0 if success else 1,
+                        datetime.now(UTC) if success else None,
+                        None if success else datetime.now(UTC),
+                        None if success else error,
+                        json.dumps(metadata or {}, ensure_ascii=False, default=str),
+                    ],
+                )
+            finally:
+                connection.close()
+
+    async def provider_states(self) -> list[dict[str, Any]]:
+        await self.initialize()
+        with self._lock:
+            connection = self._connect()
+            try:
+                rows = _dict_rows(
+                    connection.execute(
+                        """
+                        WITH bar_stats AS (
+                          SELECT provider, count(*) AS row_count,
+                            count(DISTINCT symbol) AS symbol_count,
+                            min(ts) AS first_ts, max(ts) AS last_ts
+                          FROM quant.stock_bars
+                          GROUP BY provider
+                        )
+                        SELECT COALESCE(state.provider, stats.provider) AS provider,
+                          COALESCE(state.capability, 'history') AS capability,
+                          COALESCE(
+                            state.status,
+                            CASE WHEN stats.row_count > 0 THEN 'ready' ELSE 'unknown' END
+                          ) AS status,
+                          COALESCE(state.success_count, 0) AS success_count,
+                          COALESCE(state.failure_count, 0) AS failure_count,
+                          state.last_success_at, state.last_failure_at, state.last_error,
+                          COALESCE(state.metadata, '{}') AS metadata,
+                          state.created_at, state.updated_at,
+                          COALESCE(stats.row_count, 0) AS row_count,
+                          COALESCE(stats.symbol_count, 0) AS symbol_count,
+                          stats.first_ts, stats.last_ts
+                        FROM quant.market_data_provider_state state
+                        FULL OUTER JOIN bar_stats stats USING(provider)
+                        ORDER BY provider, capability
+                        """
+                    )
+                )
+            finally:
+                connection.close()
+        for row in rows:
+            row["metadata"] = _json_object(row.get("metadata"))
+        return rows
+
     async def health(self) -> dict[str, Any]:
         await self.initialize()
         with self._lock:
@@ -202,7 +385,19 @@ class DuckDBMarketRepository:
                 ).fetchone()[0]
             finally:
                 connection.close()
-        return {"status": "ok", "engine": "duckdb", "schema_version": int(version or 0)}
+        disk = shutil.disk_usage(self.database_path.parent)
+        return {
+            "status": "ok",
+            "runtime_mode": "desktop",
+            "engine": "duckdb",
+            "schema_version": int(version or 0),
+            "database_file": self.database_path.name,
+            "database_size_bytes": (
+                self.database_path.stat().st_size if self.database_path.exists() else 0
+            ),
+            "free_disk_bytes": disk.free,
+            "writable": os.access(self.database_path.parent, os.W_OK),
+        }
 
     async def upsert_kline(
         self,
@@ -231,7 +426,17 @@ class DuckDBMarketRepository:
             metadata = {
                 "secid": kline.secid, "name": kline.name, "market": kline.market,
                 "asset_type": kline.asset_type, "source": kline.source,
-                "source_bar": bar.metadata, "universe_id": universe_id,
+                "source_bar": bar.metadata, "response_metadata": kline.metadata,
+                "field_sources": {
+                    field: kline.source
+                    for field in (
+                        "open", "high", "low", "close", "previous_close", "volume",
+                        "amount", "amplitude", "change_percent", "change_amount",
+                        "turnover", "trade_status", "is_st", "limit_up", "limit_down",
+                    )
+                    if getattr(bar, field) is not None
+                },
+                "universe_id": universe_id,
             }
             rows.append((
                 symbol, ts, kline.period, kline.adjustment, bar.open, bar.high, bar.low,
@@ -253,7 +458,9 @@ class DuckDBMarketRepository:
                       (symbol, code, name, exchange, asset_type, currency, timezone, secid, provider, metadata)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(symbol) DO UPDATE SET name=excluded.name, exchange=excluded.exchange,
-                      provider=excluded.provider, metadata=excluded.metadata, updated_at=now()
+                      provider=excluded.provider,
+                      metadata=json_merge_patch(quant.securities.metadata, excluded.metadata),
+                      updated_at=now()
                     """,
                     [symbol, kline.symbol, kline.name, kline.market, kline.asset_type,
                      kline.currency, kline.timezone, kline.secid, kline.source,
@@ -275,7 +482,8 @@ class DuckDBMarketRepository:
                       is_st=coalesce(excluded.is_st, quant.stock_bars.is_st),
                       limit_up=coalesce(excluded.limit_up, quant.stock_bars.limit_up),
                       limit_down=coalesce(excluded.limit_down, quant.stock_bars.limit_down),
-                      provider=excluded.provider, metadata=excluded.metadata
+                      provider=excluded.provider,
+                      metadata=json_merge_patch(quant.stock_bars.metadata, excluded.metadata)
                     """,
                     rows,
                 )
@@ -447,6 +655,7 @@ class DuckDBMarketRepository:
                           SELECT
                             members.symbol,
                             securities.name,
+                            securities.metadata AS security_metadata,
                             COALESCE(
                               json_extract_string(universes.metadata, '$.default_timeframe'),
                               'daily'
@@ -473,51 +682,75 @@ class DuckDBMarketRepository:
                               )
                             )
                         ),
-                        ranked AS (
+                        bar_coverage AS (
                           SELECT
-                            targets.symbol,
-                            targets.name,
-                            targets.timeframe,
-                            targets.adjustment,
-                            COALESCE(sync_state.provider, targets.default_provider) AS provider,
-                            sync_state.first_ts,
-                            sync_state.last_ts,
-                            COALESCE(sync_state.row_count, 0) AS row_count,
-                            row_number() OVER (
-                              PARTITION BY targets.symbol
-                              ORDER BY
-                                (sync_state.provider=targets.default_provider) DESC,
-                                sync_state.last_ts DESC NULLS LAST
-                            ) AS provider_rank
-                          FROM targets
-                          LEFT JOIN quant.market_data_sync_state sync_state
-                            ON sync_state.symbol=targets.symbol
-                           AND sync_state.timeframe=targets.timeframe
-                           AND sync_state.adjustment=targets.adjustment
+                            bars.symbol, bars.timeframe, bars.adjustment,
+                            count(*) AS row_count, min(bars.ts) AS first_ts,
+                            max(bars.ts) AS last_ts, arg_max(bars.provider, bars.ts) AS provider
+                          FROM quant.stock_bars bars
+                          JOIN targets
+                            ON targets.symbol=bars.symbol
+                           AND targets.timeframe=bars.timeframe
+                           AND targets.adjustment=bars.adjustment
+                          GROUP BY bars.symbol, bars.timeframe, bars.adjustment
+                        ),
+                        sync_coverage AS (
+                          SELECT sync_state.symbol, sync_state.timeframe,
+                            sync_state.adjustment, max(sync_state.last_success_at) AS last_success_at
+                          FROM quant.market_data_sync_state sync_state
+                          JOIN targets
+                            ON targets.symbol=sync_state.symbol
+                           AND targets.timeframe=sync_state.timeframe
+                           AND targets.adjustment=sync_state.adjustment
+                          GROUP BY sync_state.symbol, sync_state.timeframe, sync_state.adjustment
                         )
-                        SELECT symbol, name, timeframe, adjustment, provider,
-                          first_ts, last_ts, row_count
-                        FROM ranked
-                        WHERE provider_rank=1
-                        ORDER BY symbol
+                        SELECT targets.symbol, targets.name, targets.security_metadata,
+                          targets.timeframe, targets.adjustment,
+                          COALESCE(bar_coverage.provider, targets.default_provider) AS provider,
+                          bar_coverage.first_ts, bar_coverage.last_ts,
+                          COALESCE(bar_coverage.row_count, 0) AS row_count,
+                          sync_coverage.last_success_at
+                        FROM targets
+                        LEFT JOIN bar_coverage
+                          ON bar_coverage.symbol=targets.symbol
+                         AND bar_coverage.timeframe=targets.timeframe
+                         AND bar_coverage.adjustment=targets.adjustment
+                        LEFT JOIN sync_coverage
+                          ON sync_coverage.symbol=targets.symbol
+                         AND sync_coverage.timeframe=targets.timeframe
+                         AND sync_coverage.adjustment=targets.adjustment
+                        ORDER BY targets.symbol
                         """,
                         [universe_id, include_inactive],
                     )
                 else:
                     cursor = connection.execute(
                         """
-                        SELECT sync_state.symbol, securities.name, sync_state.timeframe,
-                          sync_state.adjustment, sync_state.provider, sync_state.first_ts,
-                          sync_state.last_ts, sync_state.row_count
-                        FROM quant.market_data_sync_state sync_state
+                        SELECT bars.symbol, securities.name,
+                          securities.metadata AS security_metadata,
+                          bars.timeframe, bars.adjustment,
+                          arg_max(bars.provider, bars.ts) AS provider,
+                          min(bars.ts) AS first_ts, max(bars.ts) AS last_ts,
+                          count(*) AS row_count,
+                          max(sync_state.last_success_at) AS last_success_at
+                        FROM quant.stock_bars bars
                         LEFT JOIN quant.securities securities USING(symbol)
-                        ORDER BY sync_state.symbol, sync_state.timeframe,
-                          sync_state.adjustment, sync_state.provider
+                        LEFT JOIN quant.market_data_sync_state sync_state
+                          ON sync_state.symbol=bars.symbol
+                         AND sync_state.timeframe=bars.timeframe
+                         AND sync_state.adjustment=bars.adjustment
+                        GROUP BY bars.symbol, securities.name, securities.metadata,
+                          bars.timeframe, bars.adjustment
+                        ORDER BY bars.symbol, bars.timeframe, bars.adjustment
                         """
                     )
-                return _dict_rows(cursor)
+                rows = _dict_rows(cursor)
             finally:
                 connection.close()
+        for row in rows:
+            row["security_metadata"] = _json_object(row.get("security_metadata"))
+            row["data_status"] = _desktop_coverage_status(row)
+        return rows
 
     async def universe_summaries(self) -> list[dict[str, Any]]:
         await self.initialize()
@@ -622,6 +855,18 @@ class DuckDBMarketRepository:
             row["default_timeframe"] = str(metadata.get("default_timeframe") or "daily")
             row["default_adjustment"] = str(metadata.get("default_adjustment") or "qfq")
             row["provider"] = str(metadata.get("provider") or "baostock")
+            coverage_rows = await self.coverage_rows(universe_id=str(row["id"]))
+            coverage_counts = {
+                status: sum(item.get("data_status") == status for item in coverage_rows)
+                for status in ("missing", "partial", "stale", "ready")
+            }
+            row["ready_count"] = coverage_counts["ready"]
+            row["bar_count"] = sum(int(item.get("row_count") or 0) for item in coverage_rows)
+            row["latest_ts"] = max(
+                (item.get("last_ts") for item in coverage_rows if item.get("last_ts")),
+                default=None,
+            )
+            metadata["coverage_counts"] = coverage_counts
         return rows
 
     async def universe_member_rows(
@@ -828,6 +1073,7 @@ class DuckDBMarketRepository:
             row["security_metadata"] = _json_object(row.get("security_metadata"))
             row["universe_metadata"] = _json_object(row.get("universe_metadata"))
             row["member_metadata"] = _json_object(row.get("member_metadata"))
+            row["data_status"] = _desktop_coverage_status(row)
         return rows, total, total_pages, current_page
 
     async def ingestion_preflight(
@@ -843,6 +1089,12 @@ class DuckDBMarketRepository:
         await self.initialize()
         if not symbols:
             return {}
+        if end_cutoff is None and timeframe == "daily":
+            end_cutoff = datetime.combine(
+                _expected_latest_daily_date(),
+                datetime.min.time(),
+                tzinfo=SHANGHAI_TZ,
+            ).astimezone(UTC)
         placeholders = ", ".join("?" for _ in symbols)
         with self._lock:
             connection = self._connect()
@@ -859,10 +1111,20 @@ class DuckDBMarketRepository:
                     [*symbols, timeframe, adjustment],
                 )
                 rows = _dict_rows(cursor)
+                metadata_rows = _dict_rows(
+                    connection.execute(
+                        f"SELECT symbol, metadata FROM quant.securities WHERE symbol IN ({placeholders})",
+                        symbols,
+                    )
+                )
             finally:
                 connection.close()
 
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        security_metadata = {
+            str(row["symbol"]): _json_object(row.get("metadata"))
+            for row in metadata_rows
+        }
         benchmark_dates: set[datetime] = set()
         for row in rows:
             ts = _aware_datetime(row.get("ts"))
@@ -878,10 +1140,27 @@ class DuckDBMarketRepository:
             benchmark_last_ts is None or end_cutoff > benchmark_last_ts
         ):
             benchmark_last_ts = end_cutoff
-        expected_rows = len(benchmark_dates)
         result: dict[str, dict[str, Any]] = {}
         for symbol in symbols:
             symbol_rows = grouped.get(symbol, [])
+            coverage_start = cutoff.astimezone(SHANGHAI_TZ).date()
+            listing_date = _catalog_listing_date(security_metadata.get(symbol))
+            if listing_date and listing_date > coverage_start:
+                coverage_start = listing_date
+            coverage_end = (
+                benchmark_last_ts.astimezone(SHANGHAI_TZ).date()
+                if benchmark_last_ts
+                else _expected_latest_daily_date()
+            )
+            observed_benchmark_rows = sum(
+                1
+                for benchmark_ts in benchmark_dates
+                if benchmark_ts.astimezone(SHANGHAI_TZ).date() >= coverage_start
+            )
+            expected_rows = max(
+                observed_benchmark_rows,
+                _minimum_expected_sessions(coverage_start, coverage_end),
+            )
             requested_rows = [
                 row
                 for row in symbol_rows
@@ -990,6 +1269,7 @@ class DuckDBMarketRepository:
                     symbol = canonical_symbol(security.symbol, security.market)
                     metadata = {
                         "query": security.query, "raw": security.raw,
+                        "listing_date": security.raw.get("listing_date") or security.raw.get("f26"),
                         "industry": security.raw.get("industry") or security.raw.get("f100"),
                         "region": security.raw.get("region") or security.raw.get("f102"),
                         "concepts": security.raw.get("concepts") or security.raw.get("f103"),

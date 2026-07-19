@@ -25,6 +25,10 @@ from quantpilot_market_data.models import (
     TechnicalScreenerResponse,
 )
 from quantpilot_market_data.providers.base import ResearchUniverseProvider
+from quantpilot_market_data.repositories.factory import (
+    get_duckdb_repository,
+    is_desktop_repository,
+)
 from quantpilot_market_data.repositories.research import (
     add_securities_to_universe,
     add_security_to_universe,
@@ -52,10 +56,33 @@ async def import_a_share_universe_batch(
     client: ResearchUniverseProvider,
     request: AShareUniverseBatchImportRequest,
 ) -> AShareUniverseBatchImportResponse:
-    total_available, securities = await client.list_a_share_symbols(
-        page=request.page,
-        page_size=request.page_size,
-    )
+    try:
+        total_available, securities = await client.list_a_share_symbols(
+            page=request.page,
+            page_size=request.page_size,
+        )
+    except Exception as error:
+        if is_desktop_repository():
+            await get_duckdb_repository().record_provider_attempt(
+                provider="eastmoney",
+                capability="catalog",
+                success=False,
+                error=str(error),
+                metadata={"page": request.page, "page_size": request.page_size},
+            )
+        raise
+    if is_desktop_repository():
+        await get_duckdb_repository().record_provider_attempt(
+            provider="eastmoney",
+            capability="catalog",
+            success=True,
+            metadata={
+                "page": request.page,
+                "page_size": request.page_size,
+                "returned": len(securities),
+                "total_available": total_available,
+            },
+        )
     stock_securities = [security for security in securities if security.asset_type == "stock"]
     members = await add_securities_to_universe(
         universe_id=request.universe_id,
