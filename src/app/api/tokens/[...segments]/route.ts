@@ -1,9 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   deleteServiceToken,
-  getPlainServiceToken,
   getServiceToken,
-  touchServiceToken,
 } from '@/lib/services/tokens';
 
 interface RouteContext {
@@ -32,24 +30,6 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
     }
 
     return NextResponse.json(record);
-  }
-
-  if (segments.length === 3 && segments[0] === 'internal' && segments[2] === 'token') {
-    const provider = segments[1];
-    if (!isProvider(provider) || provider === 'deepseek') {
-      return NextResponse.json(
-        { success: false, error: 'Invalid provider' },
-        { status: 400 },
-      );
-    }
-
-    const token = await getPlainServiceToken(provider);
-    if (!token) {
-      return NextResponse.json({ success: false, error: 'Token not found' }, { status: 404 });
-    }
-
-    await touchServiceToken(provider);
-    return NextResponse.json({ token });
   }
 
   return NextResponse.json({ success: false, error: 'Not found' }, { status: 404 });

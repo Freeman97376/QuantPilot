@@ -6,11 +6,26 @@ import { encrypt, decrypt } from '@/lib/crypto';
 import type { EnvVar } from '@/lib/db/types';
 import type { Project } from '@/types/backend';
 import { getProjectById } from '@/lib/services/project';
+import { resolveSafeFileForWrite } from '@/lib/security/safe-filesystem';
 
 const PROJECTS_DIR = process.env.PROJECTS_DIR || './data/projects';
 const PROJECTS_DIR_ABSOLUTE = path.isAbsolute(PROJECTS_DIR)
   ? PROJECTS_DIR
   : path.resolve(/*turbopackIgnore: true*/ process.cwd(), PROJECTS_DIR);
+const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const MAX_ENV_VALUE_LENGTH = 64 * 1024;
+
+function assertSafeEnvKey(key: string): void {
+  if (!ENV_KEY_PATTERN.test(key)) {
+    throw new Error('Environment variable key must use letters, numbers, and underscores, start with a letter or underscore, and contain at most 128 characters.');
+  }
+}
+
+function assertSafeEnvValue(value: string): void {
+  if (value.length > MAX_ENV_VALUE_LENGTH || /[\r\n\u0000]/u.test(value)) {
+    throw new Error('Environment variable value must be a single-line value no longer than 65536 characters.');
+  }
+}
 
 export interface EnvVarRecord {
   id: string;
@@ -20,6 +35,16 @@ export interface EnvVarRecord {
   var_type: string;
   is_secret: boolean;
   description?: string | null;
+}
+
+export function serializeEnvVarForClient(record: EnvVarRecord) {
+  return {
+    ...record,
+    value: record.is_secret ? '' : record.value,
+    isSecret: record.is_secret,
+    varType: record.var_type,
+    hasValue: record.value.length > 0,
+  };
 }
 
 interface CreateEnvVarInput {
@@ -38,9 +63,9 @@ function resolveRepoRoot(project: Project): string {
     : path.resolve(/*turbopackIgnore: true*/ process.cwd(), repoPath);
 }
 
-function envFilePath(project: Project): string {
+async function envFilePath(project: Project): Promise<string> {
   const repoRoot = resolveRepoRoot(project);
-  return path.join(repoRoot, '.env');
+  return resolveSafeFileForWrite(repoRoot, '.env');
 }
 
 async function ensureProject(projectId: string): Promise<Project> {
@@ -64,6 +89,7 @@ function mapEnvVar(model: EnvVar): EnvVarRecord {
 }
 
 export async function listEnvVars(projectId: string): Promise<EnvVarRecord[]> {
+  await ensureProject(projectId);
   const records = await prisma.envVar.findMany({
     where: { projectId },
     orderBy: { key: 'asc' },
@@ -84,6 +110,8 @@ export async function createEnvVar(
   input: CreateEnvVarInput,
 ): Promise<EnvVarRecord> {
   await ensureProject(projectId);
+  assertSafeEnvKey(input.key);
+  assertSafeEnvValue(input.value);
   try {
     const created = await prisma.envVar.create({
       data: {
@@ -113,6 +141,8 @@ export async function updateEnvVar(
   value: string,
 ): Promise<boolean> {
   await ensureProject(projectId);
+  assertSafeEnvKey(key);
+  assertSafeEnvValue(value);
   try {
     await prisma.envVar.update({
       where: {
@@ -138,6 +168,7 @@ export async function updateEnvVar(
 
 export async function deleteEnvVar(projectId: string, key: string): Promise<boolean> {
   await ensureProject(projectId);
+  assertSafeEnvKey(key);
   try {
     await prisma.envVar.delete({
       where: {
@@ -160,7 +191,7 @@ export async function deleteEnvVar(projectId: string, key: string): Promise<bool
 
 export async function syncDbToEnvFile(projectId: string): Promise<number> {
   const project = await ensureProject(projectId);
-  const repoEnvPath = envFilePath(project);
+  const repoEnvPath = await envFilePath(project);
 
   const envVars = await prisma.envVar.findMany({
     where: { projectId },
@@ -169,7 +200,10 @@ export async function syncDbToEnvFile(projectId: string): Promise<number> {
 
   const entries = envVars.reduce<{ key: string; value: string }[]>((acc, envVar) => {
     try {
-      acc.push({ key: envVar.key, value: decrypt(envVar.valueEncrypted) });
+      assertSafeEnvKey(envVar.key);
+      const value = decrypt(envVar.valueEncrypted);
+      assertSafeEnvValue(value);
+      acc.push({ key: envVar.key, value });
     } catch (error) {
       console.warn(`[EnvService] Failed to decrypt env var ${envVar.key}:`, error);
     }
@@ -220,7 +254,7 @@ function parseEnvFile(contents: string): Record<string, string> {
 
 export async function syncEnvFileToDb(projectId: string): Promise<number> {
   const project = await ensureProject(projectId);
-  const repoEnvPath = envFilePath(project);
+  const repoEnvPath = await envFilePath(project);
 
   let fileContents = '';
   try {
@@ -290,7 +324,7 @@ export async function syncEnvFileToDb(projectId: string): Promise<number> {
 
 export async function detectEnvConflicts(projectId: string) {
   const project = await ensureProject(projectId);
-  const repoEnvPath = envFilePath(project);
+  const repoEnvPath = await envFilePath(project);
 
   let fileContents = '';
   try {
@@ -334,8 +368,8 @@ export async function detectEnvConflicts(projectId: string) {
 
     conflicts.push({
       key,
-      file_value: fileValue,
-      db_value: dbValue,
+      file_value: fileValue === undefined ? undefined : '[redacted]',
+      db_value: dbValue === undefined ? undefined : '[redacted]',
       conflict_type: conflictType,
     });
   }
@@ -350,6 +384,9 @@ export async function upsertEnvVar(
   projectId: string,
   input: CreateEnvVarInput,
 ): Promise<EnvVarRecord> {
+  await ensureProject(projectId);
+  assertSafeEnvKey(input.key);
+  assertSafeEnvValue(input.value);
   const updated = await prisma.envVar.upsert({
     where: {
       projectId_key: {

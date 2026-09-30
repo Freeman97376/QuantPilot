@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? '';
@@ -25,6 +25,14 @@ export default function GitHubRepoModal({
   const [isLoading, setIsLoading] = useState(false);
   const [nameError, setNameError] = useState('');
   const [isCheckingAvailability, setIsCheckingAvailability] = useState(false);
+  const [availabilityCheckedName, setAvailabilityCheckedName] = useState('');
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const repoNameInputRef = useRef<HTMLInputElement | null>(null);
+  const previouslyFocusedElementRef = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  const isLoadingRef = useRef(isLoading);
+  onCloseRef.current = onClose;
+  isLoadingRef.current = isLoading;
 
   const sanitizeRepoName = useCallback((name: string): string => {
     if (!name) return '';
@@ -45,7 +53,7 @@ export default function GitHubRepoModal({
       .substring(0, 100);
   }, []);
 
-  const validateRepoName = (name: string): string => {
+  const validateRepoName = useCallback((name: string): string => {
     if (!name.trim()) {
       return 'Repository name is required';
     }
@@ -74,39 +82,41 @@ export default function GitHubRepoModal({
     }
 
     return '';
-  };
+  }, []);
 
-  const checkRepoAvailability = async (name: string): Promise<string> => {
+  const suggestedRepoName = sanitizeRepoName(`${projectName || projectId || 'project'}-repo`);
+
+  const checkRepoAvailability = useCallback(async (name: string, signal: AbortSignal): Promise<string> => {
     if (!name.trim()) return '';
-    
-    try {
-      setIsCheckingAvailability(true);
-      const response = await fetch(`${API_BASE}/api/github/check-repo/${encodeURIComponent(name)}`, {
-        method: 'GET'
-      });
-      
-      if (response.status === 409) {
-        return `Repository name "${name}" already exists`;
-      } else if (response.status === 404) {
-        // API endpoint not implemented yet, skip availability check
-        console.warn('GitHub check-repo API not implemented yet');
-        return '';
-      } else if (response.status === 401) {
-        return 'GitHub token not configured. Please add your token in Global Settings.';
-      } else if (!response.ok) {
-        // If we can't check availability, don't block the user
-        console.warn('Could not check repository availability:', response.status);
-        return '';
-      }
-      
-      return '';
-    } catch (error) {
-      console.error('Error checking repository availability:', error); // changed warn to error
-      return '';
-    } finally {
-      setIsCheckingAvailability(false);
+
+    const response = await fetch(`${API_BASE}/api/github/check-repo/${encodeURIComponent(name)}`, {
+      method: 'GET',
+      signal,
+    });
+    const payload = await response.json().catch(() => ({})) as {
+      available?: boolean;
+      message?: string;
+      error?: string;
+    };
+
+    if (response.status === 409 || payload.available === false) {
+      return `Repository name "${name}" already exists`;
     }
-  };
+    if (response.status === 401) {
+      return 'GitHub token not configured. Please add your token in Global Settings.';
+    }
+    if (response.status === 404) {
+      return 'Could not verify this repository name (HTTP 404). Check your GitHub connection and try again.';
+    }
+    if (!response.ok) {
+      return payload.message || payload.error || `Could not verify repository availability (HTTP ${response.status}).`;
+    }
+    if (payload.available !== true) {
+      return 'GitHub returned an invalid availability response. Please try again.';
+    }
+
+    return '';
+  }, []);
 
   // Initialize and set sanitized repo name when modal opens
   useEffect(() => {
@@ -118,27 +128,43 @@ export default function GitHubRepoModal({
 
   // Validate repo name when it changes
   useEffect(() => {
-    if (repoName) {
-      const basicError = validateRepoName(repoName);
-      if (basicError) {
-        setNameError(basicError);
-      } else {
-        // Check availability if basic validation passes
-        // Temporarily disable API check - allow modal to appear
-        setNameError(''); // Set no error if basic validation passes
-        /*
-        const timeoutId = setTimeout(async () => {
-          const availabilityError = await checkRepoAvailability(repoName);
-          setNameError(availabilityError);
-        }, 500); // Debounce API calls
-        */
-        
-        // return () => clearTimeout(timeoutId);
-      }
-    } else {
-      setNameError('Repository name is required');
+    if (!isOpen) return;
+
+    const normalizedName = repoName.trim();
+    const basicError = validateRepoName(normalizedName);
+    setAvailabilityCheckedName('');
+
+    if (basicError) {
+      setIsCheckingAvailability(false);
+      setNameError(basicError);
+      return;
     }
-  }, [repoName]);
+
+    const controller = new AbortController();
+    setNameError('');
+    setIsCheckingAvailability(true);
+    const timeoutId = window.setTimeout(async () => {
+      try {
+        const availabilityError = await checkRepoAvailability(normalizedName, controller.signal);
+        if (controller.signal.aborted) return;
+        setNameError(availabilityError);
+        setAvailabilityCheckedName(availabilityError ? '' : normalizedName);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        console.error('Error checking repository availability:', error);
+        setNameError('Could not verify repository availability. Check your connection and try again.');
+      } finally {
+        if (!controller.signal.aborted) {
+          setIsCheckingAvailability(false);
+        }
+      }
+    }, 500);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+      controller.abort();
+    };
+  }, [checkRepoAvailability, isOpen, repoName, validateRepoName]);
 
   // Reset state when modal closes
   useEffect(() => {
@@ -148,7 +174,50 @@ export default function GitHubRepoModal({
       setDescription('');
       setIsPrivate(false);
       setIsCheckingAvailability(false);
+      setAvailabilityCheckedName('');
     }
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    previouslyFocusedElementRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    window.requestAnimationFrame(() => repoNameInputRef.current?.focus());
+
+    const handleDialogKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        if (!isLoadingRef.current) onCloseRef.current();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusableElements = Array.from(dialog.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+      )).filter((element) => !element.hasAttribute('hidden'));
+      if (!focusableElements.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const firstElement = focusableElements[0];
+      const lastElement = focusableElements[focusableElements.length - 1];
+      if (event.shiftKey && document.activeElement === firstElement) {
+        event.preventDefault();
+        lastElement.focus();
+      } else if (!event.shiftKey && document.activeElement === lastElement) {
+        event.preventDefault();
+        firstElement.focus();
+      }
+    };
+
+    document.addEventListener('keydown', handleDialogKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleDialogKeyDown);
+      previouslyFocusedElementRef.current?.focus();
+      previouslyFocusedElementRef.current = null;
+    };
   }, [isOpen]);
 
   const handleRepoNameChange = (value: string) => {
@@ -161,6 +230,10 @@ export default function GitHubRepoModal({
     const error = validateRepoName(repoName);
     if (error) {
       setNameError(error);
+      return;
+    }
+    if (isCheckingAvailability || availabilityCheckedName !== repoName.trim() || nameError) {
+      setNameError(nameError || 'Wait for the current repository name to be verified.');
       return;
     }
 
@@ -218,7 +291,9 @@ export default function GitHubRepoModal({
     <AnimatePresence initial={false}>
       {isOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/50">
-        <div className="absolute inset-0" onClick={onClose}>
+        <div className="absolute inset-0" onClick={() => {
+          if (!isLoading) onClose();
+        }}>
           <motion.div 
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -228,13 +303,18 @@ export default function GitHubRepoModal({
           </motion.div>
         </div>
         
-        <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden border border-slate-200 ">
+        <div className="relative max-h-[calc(100dvh-2rem)] w-full max-w-2xl overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-2xl">
           <motion.div 
             initial={{ opacity: 0, scale: 0.95, y: 20 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.95, y: 20 }}
             transition={{ type: "spring", duration: 0.3 }}
             data-testid="github-repo-modal"
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="github-repo-title"
+            tabIndex={-1}
           >
           {/* Header */}
           <div className="px-6 py-4 border-b border-slate-200 bg-slate-50 ">
@@ -246,14 +326,16 @@ export default function GitHubRepoModal({
                   </svg>
                 </div>
                 <div>
-                  <h2 className="text-xl font-semibold text-slate-900 ">Create a new repository</h2>
+                  <h2 id="github-repo-title" className="text-xl font-semibold text-slate-900 ">Create a new repository</h2>
                   <p className="text-sm text-slate-600 ">A repository contains all project files, including revision history.</p>
                 </div>
               </div>
               <button
+                type="button"
                 onClick={onClose}
                 className="text-slate-400 hover:text-slate-600 p-1"
                 disabled={isLoading}
+                aria-label="Close repository dialog"
               >
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                   <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
@@ -267,11 +349,13 @@ export default function GitHubRepoModal({
             <div className="space-y-6">
               {/* Repository Name */}
               <div>
-                <label className="block text-sm font-medium text-slate-900 mb-2">
+                <label htmlFor="github-repo-name" className="block text-sm font-medium text-slate-900 mb-2">
                   Repository name <span className="text-red-500">*</span>
                 </label>
                 <div className="relative">
                   <input
+                    id="github-repo-name"
+                    ref={repoNameInputRef}
                     type="text"
                     value={repoName}
                     onChange={(e) => handleRepoNameChange(e.target.value)}
@@ -284,6 +368,8 @@ export default function GitHubRepoModal({
                     required
                     disabled={isLoading}
                     maxLength={100}
+                    aria-invalid={Boolean(nameError)}
+                    aria-describedby="github-repo-name-status"
                   />
                   {isCheckingAvailability && (
                     <div className="absolute right-3 top-1/2 transform -translate-y-1/2">
@@ -292,7 +378,7 @@ export default function GitHubRepoModal({
                   )}
                 </div>
                 {nameError && (
-                  <p className="mt-1 text-sm text-red-600 flex items-center gap-1">
+                  <p id="github-repo-name-status" role="alert" className="mt-1 text-sm text-red-600 flex items-center gap-1">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                       <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2"/>
                       <line x1="12" y1="8" x2="12" y2="12" stroke="currentColor" strokeWidth="2"/>
@@ -302,17 +388,16 @@ export default function GitHubRepoModal({
                   </p>
                 )}
                 {!nameError && !isCheckingAvailability && (
-                  <p className="mt-1 text-xs text-slate-500 ">
+                  <p id="github-repo-name-status" className="mt-1 text-xs text-slate-500 ">
                     Great repository names are short and memorable. Need inspiration? How about <button type="button" className="text-slate-900 hover:underline" onClick={() => {
-                      const suggestion = sanitizeRepoName(`${projectName || 'project'}-${Math.random().toString(36).substring(7)}`);
-                      handleRepoNameChange(suggestion);
+                      handleRepoNameChange(suggestedRepoName);
                     }}>
-                      {sanitizeRepoName(`${projectName || 'project'}-${Math.random().toString(36).substring(7)}`)}
+                      {suggestedRepoName}
                     </button>?
                   </p>
                 )}
                 {isCheckingAvailability && (
-                  <p className="mt-1 text-xs text-blue-600 ">
+                  <p id="github-repo-name-status" role="status" aria-live="polite" className="mt-1 text-xs text-blue-600 ">
                     Checking availability...
                   </p>
                 )}
@@ -320,10 +405,11 @@ export default function GitHubRepoModal({
 
               {/* Description */}
               <div>
-                <label className="block text-sm font-medium text-slate-900 mb-2">
+                <label htmlFor="github-repo-description" className="block text-sm font-medium text-slate-900 mb-2">
                   Description <span className="text-slate-500">(optional)</span>
                 </label>
                 <input
+                  id="github-repo-description"
                   type="text"
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
@@ -334,10 +420,10 @@ export default function GitHubRepoModal({
               </div>
 
               {/* Repository Visibility */}
-              <div>
-                <label className="block text-sm font-medium text-slate-900 mb-3">
+              <fieldset>
+                <legend className="block text-sm font-medium text-slate-900 mb-3">
                   Repository visibility
-                </label>
+                </legend>
                 <div className="space-y-3">
                   <label className="flex items-start gap-3 p-3 border border-slate-200 rounded-md cursor-pointer hover:bg-slate-50 ">
                     <input
@@ -384,7 +470,7 @@ export default function GitHubRepoModal({
                     </div>
                   </label>
                 </div>
-              </div>
+              </fieldset>
 
             </div>
 
@@ -401,7 +487,7 @@ export default function GitHubRepoModal({
               <button
                 type="submit"
                 className="px-6 py-2 bg-green-600 hover:bg-green-700 disabled:bg-green-400 text-white rounded-md font-medium transition-colors flex items-center gap-2"
-                disabled={isLoading || isCheckingAvailability || !repoName.trim() || !!nameError}
+                disabled={isLoading || isCheckingAvailability || !repoName.trim() || !!nameError || availabilityCheckedName !== repoName.trim()}
               >
                 {isLoading && (
                   <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>

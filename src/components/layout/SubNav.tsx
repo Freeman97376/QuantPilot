@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 interface SubNavItem {
@@ -20,6 +20,26 @@ interface SubNavProps {
 }
 
 function SubNav({ items, activeId, onChange, actions, className }: SubNavProps) {
+  const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    const tabList = event.currentTarget.parentElement;
+    const enabledTabs = Array.from(
+      tabList?.querySelectorAll<HTMLButtonElement>('[role="tab"]:not(:disabled)') ?? []
+    );
+    if (!enabledTabs.length) return;
+    const currentIndex = enabledTabs.indexOf(event.currentTarget);
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? enabledTabs.length - 1
+        : event.key === "ArrowRight"
+          ? (currentIndex + 1) % enabledTabs.length
+          : (currentIndex - 1 + enabledTabs.length) % enabledTabs.length;
+    event.preventDefault();
+    enabledTabs[nextIndex]?.focus();
+    enabledTabs[nextIndex]?.click();
+  };
+
   return (
     <nav
       className={cn(
@@ -27,7 +47,7 @@ function SubNav({ items, activeId, onChange, actions, className }: SubNavProps) 
         className
       )}
     >
-      <div className="flex h-11 min-w-0 flex-1 items-center gap-1 overflow-x-auto" role="tablist">
+      <div className="flex h-11 min-w-0 flex-1 items-center gap-1 overflow-x-auto" role="tablist" aria-orientation="horizontal">
         {items.map((item) => {
           const isActive = item.id === activeId;
           const isDisabled = item.disabled;
@@ -40,12 +60,14 @@ function SubNav({ items, activeId, onChange, actions, className }: SubNavProps) 
               aria-selected={isActive}
               aria-disabled={isDisabled}
               disabled={isDisabled}
+              tabIndex={isActive ? 0 : -1}
               title={isDisabled ? item.tooltip : undefined}
+              onKeyDown={handleTabKeyDown}
               onClick={() => {
                 if (!isDisabled) onChange(item.id);
               }}
               className={cn(
-                "relative flex h-full shrink-0 items-center gap-2 whitespace-nowrap rounded-t-md px-3 text-sm font-medium transition-colors",
+                "group relative flex h-full shrink-0 items-center gap-2 whitespace-nowrap rounded-t-md px-3 text-sm font-medium transition-colors",
                 isActive && !isDisabled
                   ? "text-blue-700"
                   : isDisabled
@@ -53,7 +75,7 @@ function SubNav({ items, activeId, onChange, actions, className }: SubNavProps) 
                     : "text-slate-500 hover:text-slate-700"
               )}
             >
-              <span className={cn("h-4 w-4", isDisabled && "opacity-40")}>{item.icon}</span>
+              <span aria-hidden="true" className={cn("h-4 w-4", isDisabled && "opacity-40")}>{item.icon}</span>
               <span className="whitespace-nowrap">{item.label}</span>
               {isDisabled && item.tooltip && (
                 <span className="hidden rounded-full border border-slate-200 bg-slate-50 px-1.5 py-0 text-[10px] text-slate-400 group-hover:inline-block sm:inline-block">

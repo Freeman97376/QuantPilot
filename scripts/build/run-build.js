@@ -124,8 +124,6 @@ async function runNextBuild(args, { standalone } = {}) {
         env: {
           ...process.env,
           QUANTPILOT_STANDALONE_BUILD: standalone ? '1' : '0',
-          QUANTPILOT_SKIP_ROUTE_TRACING:
-            process.env.QUANTPILOT_SKIP_ROUTE_TRACING || (standalone ? '0' : '1'),
           NEXT_TELEMETRY_DISABLED: '1',
           NEXT_PUBLIC_PROJECT_ROOT: process.env.NEXT_PUBLIC_PROJECT_ROOT || rootDir,
         },

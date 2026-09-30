@@ -1,7 +1,6 @@
 const path = require('path');
 
 const isStandaloneBuild = process.env.QUANTPILOT_STANDALONE_BUILD === '1';
-const skipRouteOutputTracing = process.env.QUANTPILOT_SKIP_ROUTE_TRACING !== '0' && !isStandaloneBuild;
 const projectRoot = __dirname;
 
 function normalizeDistDir(value) {
@@ -109,9 +108,6 @@ const nextConfig = {
       config.plugins = (config.plugins || []).filter((plugin) => {
         if (plugin?.constructor?.name !== 'TraceEntryPointsPlugin') {
           return true;
-        }
-        if (skipRouteOutputTracing) {
-          return false;
         }
         if (plugin?.constructor?.name === 'TraceEntryPointsPlugin' && Array.isArray(plugin.traceIgnores)) {
           plugin.traceIgnores.push(...tracePluginIgnores);

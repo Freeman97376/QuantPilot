@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -25,7 +25,11 @@ let productionUrl = null;
 let shuttingDown = false;
 let desktopData = null;
 let desktopLogStreams = null;
-const launchToken = crypto.randomBytes(32).toString('base64url');
+const inheritedLaunchToken =
+  isDev || process.env.QUANTPILOT_DESKTOP_SMOKE_TEST === '1'
+    ? process.env.QUANTPILOT_LAUNCH_TOKEN?.trim()
+    : '';
+const launchToken = inheritedLaunchToken?.length >= 32 ? inheritedLaunchToken : crypto.randomBytes(32).toString('base64url');
 
 const rootDir = path.join(__dirname, '..');
 const standaloneDir = app.isPackaged
@@ -350,6 +354,8 @@ async function createMainWindow() {
       preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
       spellcheck: false,
     },
   });
@@ -357,6 +363,40 @@ async function createMainWindow() {
   const startUrl = isDev
     ? process.env.ELECTRON_START_URL || `http://localhost:${process.env.WEB_PORT || '3000'}`
     : await startProductionServer();
+
+  const startOrigin = new URL(startUrl).origin;
+  await mainWindow.webContents.session.cookies.set({
+    url: startUrl,
+    name: 'quantpilot_launch',
+    value: launchToken,
+    httpOnly: true,
+    secure: startUrl.startsWith('https:'),
+    sameSite: 'strict',
+    path: '/',
+  });
+
+  const openExternalUrl = (targetUrl) => {
+    try {
+      const parsed = new URL(targetUrl);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        shell.openExternal(parsed.toString()).catch((error) => {
+          console.error('Failed to open external URL:', error);
+        });
+      }
+    } catch (error) {
+      console.warn('Blocked invalid navigation URL:', targetUrl, error);
+    }
+  };
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (new URL(url, startUrl).origin !== startOrigin) openExternalUrl(url);
+    return { action: 'deny' };
+  });
+  mainWindow.webContents.on('will-navigate', (event, targetUrl) => {
+    if (new URL(targetUrl, startUrl).origin === startOrigin) return;
+    event.preventDefault();
+    openExternalUrl(targetUrl);
+  });
 
   let loadError = null;
   try {

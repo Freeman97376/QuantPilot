@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
+import quantpilot_market_data.providers.baostock as baostock_module
 from quantpilot_market_data.providers.baostock import (
     baostock_code,
     baostock_volume_hands,
@@ -103,3 +107,40 @@ def test_baostock_ignores_etf_is_st_flag() -> None:
         ]
     )
     assert bars[0].is_st is False
+
+
+def test_baostock_sdk_sessions_are_serialized(monkeypatch) -> None:
+    active = 0
+    peak_active = 0
+    state_lock = threading.Lock()
+
+    def fake_fetch(*_args):
+        nonlocal active, peak_active
+        with state_lock:
+            active += 1
+            peak_active = max(peak_active, active)
+        time.sleep(0.03)
+        with state_lock:
+            active -= 1
+        return []
+
+    monkeypatch.setattr(
+        baostock_module,
+        "_fetch_baostock_history_records_unlocked",
+        fake_fetch,
+    )
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(
+                baostock_module.fetch_baostock_history_records,
+                "sh.600519",
+                "d",
+                "2026-01-01",
+                "2026-01-31",
+                "2",
+            )
+            for _ in range(4)
+        ]
+        assert [future.result() for future in futures] == [[], [], [], []]
+
+    assert peak_active == 1

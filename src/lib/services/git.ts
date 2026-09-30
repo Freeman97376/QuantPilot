@@ -36,6 +36,17 @@ const DEFAULT_GITIGNORE_ENTRIES = [
   'pnpm-debug.log*',
 ];
 
+function redactGitCredentials(value: string): string {
+  return value.replace(/(https?:\/\/)[^@\s/'"]+@/giu, '$1***@');
+}
+
+function redactKnownSecrets(value: string, secrets: readonly string[] = []): string {
+  return secrets.reduce(
+    (redacted, secret) => secret ? redacted.split(secret).join('[redacted]') : redacted,
+    value,
+  );
+}
+
 function ensureGitignore(repoPath: string) {
   const gitignorePath = path.join(repoPath, '.gitignore');
   if (!fs.existsSync(repoPath)) {
@@ -73,16 +84,24 @@ function ensureGitignore(repoPath: string) {
   fs.writeFileSync(gitignorePath, nextContents, 'utf8');
 }
 
-function runGit(args: string[], cwd: string): string {
+function runGit(
+  args: string[],
+  cwd: string,
+  options: { env?: Record<string, string | undefined>; secrets?: readonly string[] } = {},
+): string {
   const result = spawnSync('git', args, {
     cwd,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     maxBuffer: 1024 * 1024 * 20, // allow larger git output before hitting ENOBUFS
+    env: { ...process.env, ...options.env },
   });
 
   if (result.error) {
-    throw new GitError(`Git command failed: ${result.error.message}`, result.stderr || result.stdout || undefined);
+    throw new GitError(
+      `Git command failed: ${redactKnownSecrets(redactGitCredentials(result.error.message), options.secrets)}`,
+      redactKnownSecrets(redactGitCredentials(result.stderr || result.stdout || ''), options.secrets) || undefined
+    );
   }
 
   if (result.status !== 0) {
@@ -92,7 +111,10 @@ function runGit(args: string[], cwd: string): string {
         : typeof result.stdout === 'string'
         ? result.stdout
         : undefined);
-    throw new GitError(`Git command failed: git ${args.join(' ')}`, output);
+    throw new GitError(
+      `Git command failed: git ${redactKnownSecrets(redactGitCredentials(args.join(' ')), options.secrets)}`,
+      output ? redactKnownSecrets(redactGitCredentials(output), options.secrets) : undefined
+    );
   }
 
   return result.stdout.trim();
@@ -164,18 +186,24 @@ export function pushToRemote(
   repoPath: string,
   remoteName = 'origin',
   branch = 'main',
-  remoteUrl?: string,
+  options: { remoteUrl?: string; bearerToken?: string } = {},
 ) {
-  const remote = remoteUrl || remoteName;
-  try {
-    runGit(['push', '-u', remote, branch], repoPath);
-  } catch (error) {
-    if (error instanceof GitError) {
-      runGit(['push', '-u', '--force', remote, branch], repoPath);
-    } else {
-      throw error;
-    }
+  const remote = options.remoteUrl || remoteName;
+  const bearerToken = options.bearerToken?.trim();
+  if (bearerToken && /[\r\n]/u.test(bearerToken)) {
+    throw new GitError('Git bearer token contains invalid control characters.');
   }
+  runGit(['push', '-u', remote, branch], repoPath, bearerToken
+    ? {
+        env: {
+          GIT_CONFIG_COUNT: '1',
+          GIT_CONFIG_KEY_0: 'http.extraHeader',
+          GIT_CONFIG_VALUE_0: `Authorization: Bearer ${bearerToken}`,
+          GIT_TERMINAL_PROMPT: '0',
+        },
+        secrets: [bearerToken],
+      }
+    : { env: { GIT_TERMINAL_PROMPT: '0' } });
 }
 
 export function ensureGitRepository(repoPath: string) {

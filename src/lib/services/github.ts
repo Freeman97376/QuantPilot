@@ -247,8 +247,10 @@ export async function pushProjectToGitHub(projectId: string) {
       return;
     }
 
-    const authenticatedUrl = String(data.clone_url).replace('https://', `https://${data.owner}:${token}@`);
-    pushToRemote(repoPath, 'origin', data.default_branch || 'main', authenticatedUrl);
+    pushToRemote(repoPath, 'origin', data.default_branch || 'main', {
+      remoteUrl: String(data.clone_url),
+      bearerToken: token,
+    });
 
     await updateProjectServiceData(projectId, 'github', {
       last_pushed_at: new Date().toISOString(),

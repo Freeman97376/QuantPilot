@@ -1,7 +1,9 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs/promises';
 import path from 'path';
-import { getProjectById } from '@/lib/services/project';
+import { getProjectById, isSafeProjectId } from '@/lib/services/project';
+import { ImageValidationError, validateImageBytes } from '@/lib/security/image-files';
+import { ensureSafeChildDirectory } from '@/lib/security/safe-filesystem';
 
 interface RouteContext {
   params: Promise<{ project_id: string; filename: string }>;
@@ -12,27 +14,39 @@ const PROJECTS_DIR_ABSOLUTE = path.isAbsolute(PROJECTS_DIR)
   ? PROJECTS_DIR
   : path.resolve(/*turbopackIgnore: true*/ process.cwd(), PROJECTS_DIR);
 
-function inferContentType(filename: string): string {
-  const ext = path.extname(filename).toLowerCase();
-  switch (ext) {
-    case '.png':
-      return 'image/png';
-    case '.jpg':
-    case '.jpeg':
-      return 'image/jpeg';
-    case '.gif':
-      return 'image/gif';
-    case '.webp':
-      return 'image/webp';
-    case '.svg':
-      return 'image/svg+xml';
-    default:
-      return 'application/octet-stream';
+const SAFE_FILENAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/;
+
+async function resolveSafeAssetFile(projectId: string, filename: string): Promise<string | null> {
+  if (!SAFE_FILENAME_PATTERN.test(filename)) return null;
+  const assetsDir = await ensureSafeChildDirectory(
+    PROJECTS_DIR_ABSOLUTE,
+    [projectId, 'assets'],
+  );
+  const candidatePath = path.resolve(assetsDir, filename);
+  const [realAssetsDir, realFilePath] = await Promise.all([
+    fs.realpath(assetsDir).catch(() => null),
+    fs.realpath(candidatePath).catch(() => null),
+  ]);
+  if (!realAssetsDir || !realFilePath) return null;
+
+  const relativePath = path.relative(realAssetsDir, realFilePath);
+  if (
+    relativePath.startsWith('..')
+    || path.isAbsolute(relativePath)
+    || relativePath === ''
+  ) {
+    return null;
   }
+  return realFilePath;
 }
+
 
 export async function GET(_request: Request, { params }: RouteContext) {
   const { project_id, filename } = await params;
+  if (!isSafeProjectId(project_id)) {
+    return NextResponse.json({ success: false, error: 'Invalid asset path' }, { status: 400 });
+  }
+
 
   try {
 
@@ -49,7 +63,10 @@ export async function GET(_request: Request, { params }: RouteContext) {
       return NextResponse.json({ success: false, error: 'Project not found' }, { status: 404 });
     }
 
-    const filePath = path.join(PROJECTS_DIR_ABSOLUTE, project_id, 'assets', filename);
+    const filePath = await resolveSafeAssetFile(project_id, filename);
+    if (!filePath) {
+      return NextResponse.json({ success: false, error: 'Image not found' }, { status: 404 });
+    }
     console.log('📸 Checking file path:', {
       filePath,
       exists: await fs.access(filePath).then(() => true).catch(() => false)
@@ -82,19 +99,23 @@ export async function GET(_request: Request, { params }: RouteContext) {
     }
 
     const fileBuffer = await fs.readFile(filePath);
+    const imageType = validateImageBytes(fileBuffer);
     const response = new NextResponse(fileBuffer as unknown as BodyInit);
-    response.headers.set('Content-Type', inferContentType(filename));
+    response.headers.set('Content-Type', imageType.mimeType);
     response.headers.set('Cache-Control', 'public, max-age=31536000, immutable');
 
     console.log('📸 Asset serving success:', {
       filename,
       size: fileBuffer.length,
-      contentType: inferContentType(filename),
+      contentType: imageType.mimeType,
       project_id
     });
 
     return response;
   } catch (error) {
+    if (error instanceof ImageValidationError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 415 });
+    }
     console.error('[Assets Get] Failed:', error);
     console.error('[Assets Get] Error details:', {
       project_id,

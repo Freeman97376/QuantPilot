@@ -39,6 +39,9 @@ jobs:
       - name: Type check
         run: npm run type-check
 
+      - name: Skill package integrity
+        run: npm run check:skills
+
       - name: Quant guardrails
         run: npm run check:quant-guardrails
 
@@ -48,11 +51,22 @@ jobs:
       - name: Service catalog guardrails
         run: npm run check:service-catalog
 
+      - name: Security boundary guardrails
+        run: npm run check:security-boundaries
+
       - name: Build
         run: npm run build
 
       - name: Validate Docker Compose configuration
         run: docker compose config --quiet
+
+      - name: Validate production Docker Compose merge
+        run: >-
+          docker compose
+          --env-file deploy/server/quantpilot.env.example
+          -f docker-compose.yml
+          -f deploy/server/docker-compose.server.yml
+          config --quiet
 
   backend-market-data:
     name: Backend Market Data

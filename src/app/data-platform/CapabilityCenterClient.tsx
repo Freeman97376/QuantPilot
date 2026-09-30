@@ -394,7 +394,7 @@ export default function CapabilityCenterClient({ initialData }: Props) {
         }
       />
 
-      <main className="mx-auto max-w-7xl space-y-6 px-4 py-6 lg:px-6">
+      <div className="mx-auto max-w-7xl space-y-6 px-4 py-6 lg:px-6">
         {/* Toast */}
         {toast && (
           <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 shadow-sm">{toast}</div>
@@ -504,7 +504,7 @@ export default function CapabilityCenterClient({ initialData }: Props) {
 
         {/* Capability detail sheet */}
         <CapabilitySheet cap={selectedCap} open={sheetOpen} onOpenChange={setSheetOpen} />
-      </main>
+      </div>
     </div>
   );
 }

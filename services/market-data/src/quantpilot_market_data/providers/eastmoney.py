@@ -250,7 +250,7 @@ class EastMoneyClient:
                     )
                     response.raise_for_status()
                     return parse_a_share_list_payload(page, response.json())
-                except (httpx.HTTPError, EastMoneyError) as error:
+                except (httpx.HTTPError, EastMoneyError, ValueError) as error:
                     errors.append(f"{base_url}: {error}")
         raise EastMoneyError(f"东方财富 A 股列表请求失败：{'；'.join(errors)}")
 
@@ -281,7 +281,7 @@ class EastMoneyClient:
                     )
                     response.raise_for_status()
                     return parse_etf_list_payload(page, response.json())
-                except (httpx.HTTPError, EastMoneyError) as error:
+                except (httpx.HTTPError, EastMoneyError, ValueError) as error:
                     errors.append(f"{base_url}: {error}")
         raise EastMoneyError(f"东方财富 ETF 列表请求失败：{'；'.join(errors)}")
 
@@ -710,6 +710,11 @@ def parse_security_list_payload(
             )
         )
 
+    if total > 0 and not results:
+        raise EastMoneyError(
+            f"EastMoney reported {total} securities but returned no usable rows "
+            f"for page {page}."
+        )
     return total, results
 
 

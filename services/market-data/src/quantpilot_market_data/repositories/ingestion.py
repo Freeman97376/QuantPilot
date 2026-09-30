@@ -161,6 +161,7 @@ async def update_ingestion_job_progress(
     *,
     job_id: str,
     status: str | None = None,
+    total_symbols: int | None = None,
     completed_symbols: int | None = None,
     failed_symbols: int | None = None,
     rows_received: int | None = None,
@@ -173,6 +174,7 @@ async def update_ingestion_job_progress(
         await get_duckdb_repository().update_ingestion_job(
             job_id,
             status=status,
+            total_symbols=total_symbols,
             completed_symbols=completed_symbols,
             failed_symbols=failed_symbols,
             rows_received=rows_received,
@@ -187,6 +189,9 @@ async def update_ingestion_job_progress(
     if status is not None:
         updates.append("status = %s")
         params.append(status)
+    if total_symbols is not None:
+        updates.append("total_symbols = %s")
+        params.append(total_symbols)
     if completed_symbols is not None:
         updates.append("completed_symbols = %s")
         params.append(completed_symbols)
@@ -359,6 +364,7 @@ async def reconcile_stale_ingestion_jobs(
 async def list_ingestion_jobs(
     *,
     universe_id: str | None = None,
+    provider: str | None = None,
     limit: int = 20,
 ) -> list[IngestionJobSummary]:
     normalized_limit = max(1, min(limit, 100))
@@ -366,16 +372,20 @@ async def list_ingestion_jobs(
         await reconcile_stale_ingestion_jobs(universe_id=universe_id)
         rows = await get_duckdb_repository().list_ingestion_jobs(
             universe_id=universe_id,
+            provider=provider,
             limit=normalized_limit,
         )
         return [ingestion_job_summary_from_row(row) for row in rows]
-    params: tuple[Any, ...]
-    where_sql = ""
+    filters: list[str] = []
+    params: list[Any] = []
     if universe_id:
-        where_sql = "WHERE universe_id = %s"
-        params = (universe_id, normalized_limit)
-    else:
-        params = (normalized_limit,)
+        filters.append("universe_id = %s")
+        params.append(universe_id)
+    if provider:
+        filters.append("provider = %s")
+        params.append(provider)
+    where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
+    params.append(normalized_limit)
 
     await reconcile_stale_ingestion_jobs(universe_id=universe_id)
 
@@ -405,7 +415,7 @@ async def list_ingestion_jobs(
                 ORDER BY created_at DESC
                 LIMIT %s
                 """,
-            params,
+            tuple(params),
         )
         rows = await cursor.fetchall()
 

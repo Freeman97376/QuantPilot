@@ -617,6 +617,7 @@ export interface StrategyResearchState {
   coverage: StrategyDataCoverageItem[];
   ingestionPlan: StrategyIngestionPlan;
   source: 'market-api' | 'fallback';
+  warnings: string[];
   error?: string | null;
 }
 
@@ -682,6 +683,12 @@ export interface StrategyIngestionJob {
   batchSize?: number | null;
   nextOffset?: number | null;
   universeTotalSymbols?: number | null;
+  currentPage?: number | null;
+  nextPage?: number | null;
+  totalPages?: number | null;
+  importedSymbols?: number | null;
+  lastSuccessfulPage?: number | null;
+  autoResume: boolean;
   startedAt?: string | null;
   completedAt?: string | null;
   createdAt: string;
@@ -699,6 +706,8 @@ export interface StrategyIngestionJobControlResult {
 export interface StrategyIngestionJobsResponse {
   jobs: StrategyIngestionJob[];
   fetchedAt: string;
+  warnings: string[];
+  error?: string | null;
 }
 
 export interface StrategyAShareUniverseImportResult {
@@ -707,6 +716,14 @@ export interface StrategyAShareUniverseImportResult {
   totalPages: number;
   importedCount: number;
   completedPages: number;
+}
+
+export interface StrategyMarketBootstrapResult {
+  catalogJobId: string;
+  catalogStatus: string;
+  historyJobId: string | null;
+  reusedExistingJob: boolean;
+  state: 'catalog_running' | 'catalog_partial' | 'history_running' | 'completed';
 }
 
 export interface StrategyMarketProviderState {

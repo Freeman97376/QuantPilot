@@ -73,6 +73,14 @@ DuckDB size and free disk, job progress, and `missing`, `partial`, `stale`, and
 `ready` coverage. Full-market readiness is the default execution gate; using a
 ready subset requires an explicit switch.
 
+The initialization action only creates or reuses the persisted catalog job; it
+does not keep a Next.js request open for the complete import. The bundled
+sidecar stores catalog checkpoints in DuckDB ingestion-job metadata and resumes
+`running`/`partial` jobs after a desktop restart. An explicitly stopped job is
+not resumed. The UI polls catalog and history progress independently and uses
+the readiness coverage, not member-preview success, as the screening gate.
+
+
 ## Release and update
 
 Set `package.json` to the release version and push the matching public tag, for

@@ -22,6 +22,7 @@ import {
   Target,
   Zap,
   Loader2,
+  Menu,
   Newspaper,
 } from "lucide-react";
 import GlobalSettings from "@/components/settings/GlobalSettings";
@@ -63,6 +64,15 @@ import {
   type QuantCapabilityId,
 } from "@/lib/quant/capabilities";
 import { cn } from "@/lib/utils";
+
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
+} from '@/components/ui/sheet';
 
 const fetchAPI = globalThis.fetch || fetch;
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "";
@@ -115,6 +125,7 @@ export default function HomePage() {
   // --- State ---
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [showGlobalSettings, setShowGlobalSettings] = useState(false);
+  const [mobilePlatformNavOpen, setMobilePlatformNavOpen] = useState(false);
   const [editingProject, setEditingProject] = useState<ProjectSummary | null>(null);
   const [deleteModal, setDeleteModal] = useState<{
     isOpen: boolean;
@@ -626,6 +637,7 @@ export default function HomePage() {
             onClick={() => setTaskDrawerOpen(true)}
             variant="ghost"
             size="sm"
+            aria-label="打开最近任务"
             className="gap-1.5 px-2 text-xs sm:px-3"
           >
             <Clock3 className="h-3.5 w-3.5" />
@@ -638,29 +650,68 @@ export default function HomePage() {
           </Button>
         </div>
 
-        <div className="flex items-center gap-1.5">
-          {PLATFORM_NAV_ITEMS.map((item) => {
-            const Icon = item.icon;
-            const isLoading = navigatingPath === item.href || (isRoutePending && navigatingPath === item.href);
-            return (
-              <Button
-                key={item.href}
-                type="button"
-                onClick={() => navigateToPlatform(item.href)}
-                onPointerEnter={() => prefetchPlatformRoute(item.href)}
-                onFocus={() => prefetchPlatformRoute(item.href)}
-                variant="ghost"
-                size="sm"
-                aria-busy={isLoading}
-                className="gap-1.5 px-2 text-xs sm:px-3"
-              >
-                {isLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className="h-3.5 w-3.5" />}
-                <span className="hidden sm:inline">{item.label}</span>
-              </Button>
-            );
-          })}
+        <div className="flex min-w-0 items-center gap-1.5">
+          <div className="hidden items-center gap-1.5 lg:flex">
+            {PLATFORM_NAV_ITEMS.map((item) => {
+              const Icon = item.icon;
+              const isLoading = navigatingPath === item.href || (isRoutePending && navigatingPath === item.href);
+              return (
+                <Button
+                  key={item.href}
+                  type="button"
+                  onClick={() => navigateToPlatform(item.href)}
+                  onPointerEnter={() => prefetchPlatformRoute(item.href)}
+                  onFocus={() => prefetchPlatformRoute(item.href)}
+                  variant="ghost"
+                  size="sm"
+                  aria-label={item.label}
+                  aria-busy={isLoading}
+                  className="gap-1.5 px-2 text-xs xl:px-3"
+                >
+                  {isLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className="h-3.5 w-3.5" />}
+                  <span className="hidden xl:inline">{item.label}</span>
+                </Button>
+              );
+            })}
+          </div>
 
-          <div className="mx-1 hidden h-4 w-px bg-border sm:block" />
+          <Sheet open={mobilePlatformNavOpen} onOpenChange={setMobilePlatformNavOpen}>
+            <SheetTrigger asChild>
+              <Button type="button" variant="ghost" size="icon" className="lg:hidden" aria-label="打开平台导航">
+                <Menu className="h-4 w-4" />
+              </Button>
+            </SheetTrigger>
+            <SheetContent side="right" className="w-[min(86vw,20rem)] p-0">
+              <SheetHeader className="border-b px-5 py-4 pr-12">
+                <SheetTitle>平台导航</SheetTitle>
+                <SheetDescription>打开 QuantPilot 的策略、研究、运维、数据与评测工作台。</SheetDescription>
+              </SheetHeader>
+              <nav className="grid gap-1 p-3" aria-label="平台导航">
+                {PLATFORM_NAV_ITEMS.map((item) => {
+                  const Icon = item.icon;
+                  const isLoading = navigatingPath === item.href || (isRoutePending && navigatingPath === item.href);
+                  return (
+                    <Button
+                      key={item.href}
+                      type="button"
+                      variant="ghost"
+                      aria-busy={isLoading}
+                      className="min-h-11 w-full justify-start"
+                      onClick={() => {
+                        setMobilePlatformNavOpen(false);
+                        navigateToPlatform(item.href);
+                      }}
+                    >
+                      {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Icon className="h-4 w-4" />}
+                      {item.label}
+                    </Button>
+                  );
+                })}
+              </nav>
+            </SheetContent>
+          </Sheet>
+
+          <div className="mx-1 hidden h-4 w-px bg-border lg:block" />
 
           <ThemeToggle compact className="sm:hidden" />
           <ThemeToggle className="hidden sm:inline-flex" />
@@ -670,11 +721,11 @@ export default function HomePage() {
             onClick={() => setShowGlobalSettings(true)}
             variant="ghost"
             size="sm"
-            className="h-9 gap-2 px-3"
+            className="h-9 gap-2 px-2 sm:px-3"
             aria-label="设置"
           >
             <Settings className="h-4 w-4" />
-            <span>设置</span>
+            <span className="hidden lg:inline">设置</span>
           </Button>
         </div>
       </header>
@@ -705,7 +756,7 @@ export default function HomePage() {
       </AnimatePresence>
 
       {/* Main content */}
-      <main className="flex flex-1 flex-col items-center px-4 pt-12 pb-16 md:pt-20 md:pb-24">
+      <div className="flex flex-1 flex-col items-center px-4 pt-12 pb-16 md:pt-20 md:pb-24">
         {/* Hero */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
@@ -833,7 +884,7 @@ export default function HomePage() {
             </div>
           ))}
         </motion.div>
-      </main>
+      </div>
 
       {/* Task drawer */}
       <TaskDrawer

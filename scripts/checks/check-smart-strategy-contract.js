@@ -60,6 +60,17 @@ async function main() {
   const strategyIntent = loadTypeScriptModule(path.join(ROOT, 'src/lib/quant/strategy-intent.ts'));
   const smartStrategy = loadTypeScriptModule(path.join(ROOT, 'src/lib/quant/smart-strategy.ts'));
 
+  const workbenchSource = fs.readFileSync(path.join(ROOT, 'src/components/quant/SmartStrategyWorkbench.tsx'), 'utf8');
+  const strategyDataSource = fs.readFileSync(path.join(ROOT, 'src/lib/quant/strategies.ts'), 'utf8');
+  assert.match(workbenchSource, /type SmartStrategyAbortSource = "timeout" \| "superseded" \| "unmount"/);
+  assert.match(workbenchSource, /controller\.abort\(smartStrategyAbortReason\(source\)\)/);
+  assert.doesNotMatch(workbenchSource, /controller\.abort\(\)/, 'Smart Strategy must never abort without an explicit reason');
+  assert.match(workbenchSource, /statusPollInFlightRef\.current/, 'data-status polling must reject overlap');
+  assert.match(workbenchSource, /initialize-market-data[\s\S]{0,500}15_000/, 'bootstrap request must use the 15-second creation timeout');
+  assert.match(strategyDataSource, /getStrategyIngestionJobs\(\{ limit: 20, timeoutMs: 4_000 \}\)/);
+  assert.match(strategyDataSource, /getStrategyMarketDataReadiness\(SAMPLE_UNIVERSE_ID, 4_000\)/);
+  assert.match(strategyDataSource, /controller\.abort\(new DOMException\('market API timeout', 'TimeoutError'\)\)/);
+
   const defaultPrompt = '选出 MACD 金叉，成交额较 20 日均额放大 1.5 倍，收盘价站上 MA20，RSI 不高于 70 的股票';
   const defaultDraft = compilePrompt(defaultPrompt, strategyIntent);
   assert.deepEqual(

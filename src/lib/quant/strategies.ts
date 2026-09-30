@@ -57,6 +57,7 @@ export type {
   StrategyIngestionJobControlResult,
   StrategyIngestionJobsResponse,
   StrategyAShareUniverseImportResult,
+  StrategyMarketBootstrapResult,
   StrategyMarketProviderState,
   StrategyMarketDataReadiness,
   SmartStrategyPageData,
@@ -127,6 +128,7 @@ import type {
   StrategyIngestionJobControlResult,
   StrategyIngestionJobsResponse,
   StrategyAShareUniverseImportResult,
+  StrategyMarketBootstrapResult,
   SmartStrategyPageData,
   StrategyFoundationComponent,
   StrategyFactorDefinition,
@@ -156,6 +158,7 @@ function assertMarketApiEnabled() {
 const FALLBACK_RESEARCH_STATE: StrategyResearchState = {
   primaryUniverseId: SAMPLE_UNIVERSE_ID,
   source: 'fallback',
+  warnings: [],
   universes: [
     {
       id: SAMPLE_UNIVERSE_ID,
@@ -1264,6 +1267,12 @@ function mapIngestionJob(value: unknown): StrategyIngestionJob {
     batchSize: asNumber(metadata.batch_size),
     nextOffset: asNumber(metadata.next_offset),
     universeTotalSymbols: asNumber(metadata.universe_total_symbols),
+    currentPage: asNumber(metadata.current_page),
+    nextPage: asNumber(metadata.next_page),
+    totalPages: asNumber(metadata.total_pages),
+    importedSymbols: asNumber(metadata.imported_symbols),
+    lastSuccessfulPage: asNumber(metadata.last_successful_page),
+    autoResume: metadata.auto_resume === true,
     startedAt: typeof record.started_at === 'string' ? record.started_at : null,
     completedAt: typeof record.completed_at === 'string' ? record.completed_at : null,
     createdAt: asString(record.created_at, new Date().toISOString()),
@@ -1276,6 +1285,8 @@ function mapIngestionJobsResponse(value: unknown): StrategyIngestionJobsResponse
   return {
     jobs: Array.isArray(record.jobs) ? record.jobs.map(mapIngestionJob) : [],
     fetchedAt: asString(record.fetched_at, new Date().toISOString()),
+    warnings: Array.isArray(record.warnings) ? record.warnings.map(String) : [],
+    error: typeof record.error === 'string' ? record.error : null,
   };
 }
 
@@ -1384,7 +1395,7 @@ async function fetchMarketApiJson<T>(
   assertMarketApiEnabled();
   const controller = options.timeoutMs ? new AbortController() : null;
   const timeout = controller && options.timeoutMs
-    ? setTimeout(() => controller.abort(), options.timeoutMs)
+    ? setTimeout(() => controller.abort(new DOMException('market API timeout', 'TimeoutError')), options.timeoutMs)
     : null;
   try {
     const response = await marketApiFetch(pathName, {
@@ -1397,7 +1408,7 @@ async function fetchMarketApiJson<T>(
     }
     return response.json() as Promise<T>;
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
+    if (controller?.signal.aborted || (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError'))) {
       throw new Error(`market API timeout after ${options.timeoutMs}ms: ${pathName}`);
     }
     throw error;
@@ -1460,7 +1471,7 @@ export async function runTechnicalScreener(params: {
   assertMarketApiEnabled();
   const controller = params.timeoutMs ? new AbortController() : null;
   const timeout = controller && params.timeoutMs
-    ? setTimeout(() => controller.abort(), params.timeoutMs)
+    ? setTimeout(() => controller.abort(new DOMException('technical screener timeout', 'TimeoutError')), params.timeoutMs)
     : null;
   try {
     const response = await marketApiFetch('/api/v1/research/screeners/a-share/technical', {
@@ -1481,7 +1492,7 @@ export async function runTechnicalScreener(params: {
     }
     return mapTechnicalScreenerResponse(await response.json());
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
+    if (controller?.signal.aborted || (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError'))) {
       throw new Error(`market API timeout after ${params.timeoutMs}ms: technical screener`);
     }
     throw error;
@@ -1493,13 +1504,17 @@ export async function runTechnicalScreener(params: {
 export async function getStrategyIngestionJobs(params: {
   universeId?: string;
   limit?: number;
+  timeoutMs?: number;
 } = {}): Promise<StrategyIngestionJobsResponse> {
   const query = new URLSearchParams({
     limit: String(Math.max(1, Math.min(params.limit ?? 20, 100))),
   });
   const universeId = params.universeId?.trim();
   if (universeId) query.set('universe_id', universeId);
-  const payload = await fetchMarketApiJson<unknown>(`/api/v1/ingestion/jobs?${query.toString()}`);
+  const payload = await fetchMarketApiJson<unknown>(
+    `/api/v1/ingestion/jobs?${query.toString()}`,
+    { timeoutMs: params.timeoutMs }
+  );
   return mapIngestionJobsResponse(payload);
 }
 
@@ -1581,7 +1596,7 @@ export async function getStrategySectorCapitalFlow(params: {
 async function getStrategyResearchState(): Promise<StrategyResearchState> {
   try {
     const universesPayload = asRecord(
-      await fetchMarketApiJson<unknown>('/api/v1/research/universes/summary', { timeoutMs: 2500 })
+      await fetchMarketApiJson<unknown>('/api/v1/research/universes/summary', { timeoutMs: 4_000 })
     );
     const universes = Array.isArray(universesPayload.universes)
       ? universesPayload.universes.map(mapResearchUniverse)
@@ -1591,22 +1606,30 @@ async function getStrategyResearchState(): Promise<StrategyResearchState> {
       universes.find((universe) => universe.stockCount > 0) ??
       universes[0] ??
       FALLBACK_RESEARCH_STATE.universes[0];
-    const initialMembersPage = await getStrategyUniverseMembersPage({
-      universeId: primaryUniverse.id,
-      page: 1,
-      pageSize: 10,
-      timeoutMs: 4500,
-    });
+    let initialMembersPage: StrategyUniverseMembersPage | null = null;
+    const warnings: string[] = [];
+    try {
+      initialMembersPage = await getStrategyUniverseMembersPage({
+        universeId: primaryUniverse.id,
+        page: 1,
+        pageSize: 10,
+        timeoutMs: 4_000,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      warnings.push(`Member preview unavailable: ${message}`);
+    }
+    const previewMembers = initialMembersPage?.members ?? [];
     const hydratedUniverses = universes.map((universe) => (
       universe.id === primaryUniverse.id
         ? {
             ...universe,
-            members: initialMembersPage.members,
-            memberCount: initialMembersPage.total || universe.memberCount,
+            members: previewMembers,
+            memberCount: initialMembersPage?.total ?? universe.memberCount,
           }
         : { ...universe, members: [] }
     ));
-    const coverage = initialMembersPage.members.map((member): StrategyDataCoverageItem => ({
+    const coverage = previewMembers.map((member): StrategyDataCoverageItem => ({
       symbol: member.symbol,
       name: member.name,
       timeframe: primaryUniverse.defaultTimeframe,
@@ -1622,8 +1645,9 @@ async function getStrategyResearchState(): Promise<StrategyResearchState> {
       ...FALLBACK_RESEARCH_STATE,
       primaryUniverseId: primaryUniverse.id,
       source: 'market-api',
+      warnings,
       universes: hydratedUniverses.length ? hydratedUniverses : FALLBACK_RESEARCH_STATE.universes,
-      coverage: coverage.length ? coverage : FALLBACK_RESEARCH_STATE.coverage,
+      coverage,
       ingestionPlan: {
         ...FALLBACK_RESEARCH_STATE.ingestionPlan,
         universeId: primaryUniverse.id,
@@ -1771,14 +1795,19 @@ export async function getStrategyDashboardData(): Promise<StrategyDashboardData>
 }
 
 export async function getSmartStrategyPageData(): Promise<SmartStrategyPageData> {
-  const [research, ingestionJobs] = await Promise.all([
+  const [research, ingestionJobs, marketData] = await Promise.all([
     getStrategyResearchState(),
-    getStrategyIngestionJobs({ limit: 20 }).catch(() => ({
-      jobs: [],
-      fetchedAt: new Date().toISOString(),
-    })),
+    getStrategyIngestionJobs({ limit: 20, timeoutMs: 4_000 }).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        jobs: [],
+        fetchedAt: new Date().toISOString(),
+        warnings: [],
+        error: message,
+      };
+    }),
+    getStrategyMarketDataReadiness(SAMPLE_UNIVERSE_ID, 4_000),
   ]);
-  const marketData = await getStrategyMarketDataReadiness(research.primaryUniverseId);
   return {
     generatedAt: new Date().toISOString(),
     research,
@@ -1786,6 +1815,56 @@ export async function getSmartStrategyPageData(): Promise<SmartStrategyPageData>
     marketData,
   };
 }
+
+export async function bootstrapStrategyMarketData(params: {
+  universeId?: string;
+  timeoutMs?: number;
+} = {}): Promise<StrategyMarketBootstrapResult> {
+  assertMarketApiEnabled();
+  const timeoutMs = params.timeoutMs ?? 10_000;
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(new DOMException('market bootstrap timeout', 'TimeoutError')),
+    timeoutMs
+  );
+  try {
+    const response = await marketApiFetch('/api/v1/ingestion/a-share/bootstrap', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        universe_id: params.universeId || SAMPLE_UNIVERSE_ID,
+      }),
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      throw new Error(`market API ${response.status}: ${body.slice(0, 220)}`);
+    }
+    const payload = asRecord(await response.json());
+    const rawState = asString(payload.state, 'catalog_running');
+    const state = rawState === 'catalog_partial'
+      || rawState === 'history_running'
+      || rawState === 'completed'
+      ? rawState
+      : 'catalog_running';
+    return {
+      catalogJobId: asString(payload.catalog_job_id),
+      catalogStatus: asString(payload.catalog_status, 'running'),
+      historyJobId: typeof payload.history_job_id === 'string' ? payload.history_job_id : null,
+      reusedExistingJob: payload.reused_existing_job === true,
+      state,
+    };
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`market bootstrap did not respond within ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 
 export async function importStrategyAShareUniverse(params: {
   universeId?: string;

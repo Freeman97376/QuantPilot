@@ -11,7 +11,8 @@ WorkingDirectory=/opt/quantpilot
 EnvironmentFile=/opt/quantpilot/.env.production
 Environment=HOME=/home/ubuntu
 Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin
-ExecStart=/usr/bin/npm run start -- --hostname 127.0.0.1 --port 3000
+Environment=WEB_PORT=3000
+ExecStart=/usr/bin/npm run start -- --hostname 127.0.0.1 --port ${WEB_PORT}
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30

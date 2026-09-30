@@ -130,10 +130,13 @@ export function mapStrategyMarketDataReadiness(value: unknown): StrategyMarketDa
 
 export async function getStrategyMarketDataReadiness(
   universeId = DEFAULT_UNIVERSE_ID,
-  timeoutMs = 8_000
+  timeoutMs = 4_000
 ): Promise<StrategyMarketDataReadiness> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(
+    () => controller.abort(new DOMException('market readiness timeout', 'TimeoutError')),
+    timeoutMs
+  );
   try {
     const response = await marketApiFetch(
       `/api/v1/market-data/readiness?universe_id=${encodeURIComponent(universeId)}`,

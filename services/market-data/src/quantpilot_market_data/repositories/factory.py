@@ -18,3 +18,13 @@ def get_duckdb_repository() -> DuckDBMarketRepository:
 async def initialize_runtime_repository() -> None:
     if is_desktop_repository():
         await get_duckdb_repository().initialize()
+
+
+async def close_runtime_repository() -> None:
+    if not is_desktop_repository():
+        return
+    repository = get_duckdb_repository()
+    try:
+        await repository.close()
+    finally:
+        get_duckdb_repository.cache_clear()

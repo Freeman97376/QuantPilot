@@ -5,7 +5,7 @@
  */
 
 import { NextRequest } from 'next/server';
-import { getAllProjects, createProject } from '@/lib/services/project';
+import { getAllProjects, createProject, isSafeProjectId } from '@/lib/services/project';
 import type { CreateProjectInput } from '@/types/backend';
 import { serializeProjects, serializeProject } from '@/lib/serializers/project';
 import { getDefaultModelForCli, normalizeModelId } from '@/lib/constants/cliModels';
@@ -51,9 +51,13 @@ export async function POST(request: NextRequest) {
     };
 
     // Validation
-    if (!input.project_id || !input.name) {
-      return createErrorResponse('project_id and name are required', undefined, 400);
+    if (!isSafeProjectId(input.project_id)) {
+      return createErrorResponse('project_id is not a safe path identifier', undefined, 400);
     }
+    if (typeof input.name !== 'string' || !input.name.trim()) {
+      return createErrorResponse('name is required', undefined, 400);
+    }
+    input.name = input.name.trim();
 
     const project = await createProject(input);
     return createSuccessResponse(serializeProject(project), 201);

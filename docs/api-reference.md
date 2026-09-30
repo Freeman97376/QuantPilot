@@ -126,10 +126,21 @@
 | `/api/v1/ingestion/baostock/history` | `POST` | Baostock 单批历史增强字段补数 |
 | `/api/v1/ingestion/baostock/history/batch` | `POST` | Baostock 分批补数 |
 | `/api/v1/ingestion/baostock/history/autofill` | `POST` | 低频自动补数任务 |
+| `/api/v1/ingestion/a-share/bootstrap` | `POST` | Persisted A-share catalog bootstrap; returns `202` without waiting for catalog/history completion |
 | `/api/v1/ingestion/eastmoney/realtime-snapshot` | `POST` | 实时快照入库 |
 | `/api/v1/ingestion/jobs` | `GET` | 补数任务和日志摘要 |
 | `/api/v1/ingestion/jobs/{job_id}/control` | `POST` | 暂停、继续、停止补数任务 |
 | `/api/v1/market-data/readiness` | `GET` | 桌面运行模式、DuckDB 存储、provider 最近成败和真实覆盖分类 |
+
+`POST /api/v1/ingestion/a-share/bootstrap` accepts `{"universe_id":"..."}` and
+returns `catalog_job_id`, `catalog_status`, optional `history_job_id`,
+`reused_existing_job`, and `state`. Catalog progress is persisted in ingestion
+job metadata (`current_page`, `next_page`, `total_pages`, `imported_symbols`,
+`last_successful_page`, `auto_resume`). Repeated starts reuse the effective job.
+`running`/`partial` jobs with `auto_resume=true` resume after a sidecar restart;
+an explicitly stopped job does not. `/api/v1/research/a-share/import-batch` remains the
+low-level compatibility endpoint.
+
 
 补数规则：
 

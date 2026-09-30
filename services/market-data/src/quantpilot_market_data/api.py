@@ -1,21 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from psycopg import Error as PsycopgError
 
 from quantpilot_market_data.cache import MarketDataCache, RedisJsonCache, ttl_from_env
 from quantpilot_market_data.database_core import (
     DatabaseError,
+    connect,
     normalize_fetch_symbol,
 )
 from quantpilot_market_data.models import (
+    AShareBootstrapRequest,
+    AShareBootstrapResponse,
+    AShareUniverseBatchImportRequest,
     AutoFillIngestionStartResponse,
     HistoryAutoFillIngestionRequest,
     HistoryBatchIngestionRequest,
@@ -32,6 +38,7 @@ from quantpilot_market_data.repositories.duckdb_repository import (
     DESKTOP_COVERAGE_LOOKBACK_YEARS,
 )
 from quantpilot_market_data.repositories.factory import (
+    close_runtime_repository,
     get_duckdb_repository,
     initialize_runtime_repository,
     is_desktop_repository,
@@ -40,6 +47,7 @@ from quantpilot_market_data.repositories.ingestion import (
     create_ingestion_job,
     finish_ingestion_job,
     get_history_ingestion_preflight,
+    get_ingestion_job_control,
     list_ingestion_jobs,
     update_ingestion_job_progress,
 )
@@ -75,6 +83,10 @@ from quantpilot_market_data.services.ingestion_support import (
     wait_for_autofill_control,
 )
 from quantpilot_market_data.services.registry import ProviderRegistryTtls
+from quantpilot_market_data.services.research import (
+    get_research_data_coverage,
+    import_a_share_universe_batch,
+)
 from quantpilot_market_data.services.strategy_refresh import expected_latest_daily_date
 
 QUOTE_CACHE_TTL_SECONDS = ttl_from_env("QUANTPILOT_QUOTE_CACHE_TTL_SECONDS", 5)
@@ -83,14 +95,55 @@ KLINE_CACHE_TTL_SECONDS = ttl_from_env("QUANTPILOT_KLINE_CACHE_TTL_SECONDS", 180
 FINANCIAL_CACHE_TTL_SECONDS = ttl_from_env("QUANTPILOT_FINANCIAL_CACHE_TTL_SECONDS", 21600)
 ANNOUNCEMENT_CACHE_TTL_SECONDS = ttl_from_env("QUANTPILOT_ANNOUNCEMENT_CACHE_TTL_SECONDS", 600)
 SCREENER_CACHE_TTL_SECONDS = ttl_from_env("QUANTPILOT_SCREENER_CACHE_TTL_SECONDS", 60)
+CATALOG_RETRY_DELAYS_SECONDS = (1, 3, 8)
+
+logger = logging.getLogger(__name__)
+
 def create_app() -> FastAPI:
     desktop_runtime = (
         os.getenv("QUANTPILOT_RUNTIME_MODE", "server").strip().lower() == "desktop"
     )
+    auto_fill_tasks: set[asyncio.Task[None]] = set()
+    catalog_tasks: dict[str, asyncio.Task[None]] = {}
+    bootstrap_operation_lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        await initialize_runtime_repository()
+        for recovery_name, recover in (
+            ("A-share catalog", resume_a_share_catalog_jobs),
+            ("desktop history auto-fill", resume_desktop_autofill_jobs),
+        ):
+            try:
+                await recover()
+            except (DatabaseError, PsycopgError) as error:
+                logger.warning(
+                    "Unable to resume %s jobs during startup: %s",
+                    recovery_name,
+                    error,
+                )
+        if is_desktop_repository():
+            scheduler_task = asyncio.create_task(run_desktop_incremental_scheduler())
+            auto_fill_tasks.add(scheduler_task)
+            scheduler_task.add_done_callback(auto_fill_tasks.discard)
+
+        try:
+            yield
+        finally:
+            tasks = list(auto_fill_tasks)
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                await RedisJsonCache.close_all()
+            finally:
+                await close_runtime_repository()
     app = FastAPI(
         title="QuantPilot Market Data API",
         description="QuantPilot 量化分析 Agent 的市场数据后端",
         version="0.1.0",
+        lifespan=lifespan,
     )
     if not desktop_runtime:
         app.add_middleware(
@@ -121,7 +174,6 @@ def create_app() -> FastAPI:
     cache = MarketDataCache()
     intraday_redis_cache = RedisJsonCache()
     tushare_client = TushareClient()
-    auto_fill_tasks: set[asyncio.Task[None]] = set()
 
     async def fetch_history_with_desktop_fallback(
         symbol_or_secid: str,
@@ -190,22 +242,6 @@ def create_app() -> FastAPI:
                     f"Baostock 失败：{primary_error}；AKShare 兜底失败：{fallback_error}"
                 ) from fallback_error
 
-    @app.on_event("startup")
-    async def initialize_storage() -> None:
-        await initialize_runtime_repository()
-        if is_desktop_repository():
-            await resume_desktop_autofill_jobs()
-            scheduler_task = asyncio.create_task(run_desktop_incremental_scheduler())
-            auto_fill_tasks.add(scheduler_task)
-            scheduler_task.add_done_callback(auto_fill_tasks.discard)
-
-    @app.on_event("shutdown")
-    async def stop_desktop_background_tasks() -> None:
-        tasks = list(auto_fill_tasks)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
 
     app.include_router(analytics_router)
     app.include_router(foundation_router)
@@ -278,19 +314,56 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, object]:
         if is_desktop_repository():
             return await get_duckdb_repository().health()
-        return {"status": "ok", "engine": "timescaledb"}
+        try:
+            async with await connect() as connection:
+                await connection.execute("SELECT 1")
+        except (DatabaseError, PsycopgError) as error:
+            logger.warning("TimescaleDB health check failed: %s", error)
+            raise HTTPException(
+                status_code=503,
+                detail="TimescaleDB is unavailable.",
+            ) from error
+        return {
+            "status": "ok",
+            "engine": "timescaledb",
+            "database": "reachable",
+        }
 
     @app.get("/api/v1/market-data/readiness")
     async def market_data_readiness(
         universe_id: str = "a-share-sample-research-pool",
     ) -> dict[str, object]:
         if not is_desktop_repository():
+            coverage = await get_research_data_coverage(
+                universe_id,
+                page=1,
+                page_size=1,
+            )
+            summary = coverage.summary
             return {
                 "runtime_mode": "server",
                 "engine": "timescaledb",
                 "universe_id": universe_id,
+                "source_policy": {
+                    "catalog": "eastmoney",
+                    "history_primary": "baostock",
+                    "history_fallback": "akshare",
+                    "realtime": "eastmoney",
+                    "realtime_scope": "candidate-detail-only",
+                },
+                "storage": {},
                 "providers": [],
-                "coverage": {},
+                "coverage": {
+                    "total": summary.total,
+                    "ready": summary.ready,
+                    "partial": 0,
+                    "missing": summary.missing,
+                    "stale": summary.stale,
+                    "row_count": summary.total_rows,
+                    "lookback_years": DESKTOP_COVERAGE_LOOKBACK_YEARS,
+                    "latest_ts": summary.latest_ts,
+                },
+                "fetched_at": datetime.now(UTC),
             }
         repository = get_duckdb_repository()
         health_state, providers, coverage_rows = await asyncio.gather(
@@ -1490,22 +1563,513 @@ def create_app() -> FastAPI:
         except DatabaseError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
 
+
+    def metadata_int(
+        metadata: dict[str, object],
+        key: str,
+        default: int,
+    ) -> int:
+        try:
+            return int(metadata.get(key) or default)
+        except (TypeError, ValueError):
+            return default
+
+    async def find_history_autofill_job(universe_id: str):
+        jobs = await list_ingestion_jobs(
+            universe_id=universe_id,
+            provider="baostock-autofill",
+            limit=100,
+        )
+        running = next((job for job in jobs if job.status == "running"), None)
+        return running or next(
+            (
+                job
+                for job in jobs
+                if job.status in {"partial", "completed"}
+            ),
+            None,
+        )
+
+    async def ensure_history_autofill_job(universe_id: str):
+        existing = await find_history_autofill_job(universe_id)
+        if existing is not None and existing.status in {"running", "completed"}:
+            return existing
+        return await start_baostock_history_autofill(
+            HistoryAutoFillIngestionRequest(
+                universe_id=universe_id,
+                period="daily",
+                adjustment="qfq",
+                batch_size=25,
+                lookback_years=5,
+            )
+        )
+
+    async def run_a_share_catalog_bootstrap(
+        *,
+        catalog_job_id: str,
+        request: AShareBootstrapRequest,
+        resume_job: object | None,
+    ) -> None:
+        metadata = dict(getattr(resume_job, "metadata", {}) or {})
+        last_successful_page = metadata_int(metadata, "last_successful_page", 0)
+        if (
+            "next_page" in metadata
+            and metadata.get("next_page") is None
+            and last_successful_page > 0
+        ):
+            current_page = last_successful_page + 1
+        else:
+            current_page = max(1, metadata_int(metadata, "next_page", 1))
+        imported_symbols = max(
+            int(getattr(resume_job, "completed_symbols", 0) or 0),
+            metadata_int(metadata, "imported_symbols", 0),
+        )
+        total_pages = metadata_int(metadata, "total_pages", 0)
+        total_symbols = int(getattr(resume_job, "total_symbols", 0) or 0)
+
+        try:
+            while not total_pages or current_page <= total_pages:
+                while True:
+                    control = await get_ingestion_job_control(catalog_job_id)
+                    if control == "stop":
+                        await update_ingestion_job_progress(
+                            job_id=catalog_job_id,
+                            status="partial",
+                            total_symbols=total_symbols,
+                            completed_symbols=imported_symbols,
+                            error="Catalog bootstrap was stopped.",
+                            metadata={
+                                "current_page": current_page,
+                                "next_page": current_page,
+                                "total_pages": total_pages or None,
+                                "imported_symbols": imported_symbols,
+                                "last_successful_page": last_successful_page or None,
+                                "auto_resume": False,
+                                "stop_reason": "stopped",
+                                "last_heartbeat_at": datetime.now(UTC).isoformat(),
+                            },
+                        )
+                        return
+                    if control != "pause":
+                        break
+                    await update_ingestion_job_progress(
+                        job_id=catalog_job_id,
+                        status="running",
+                        total_symbols=total_symbols,
+                        completed_symbols=imported_symbols,
+                        metadata={
+                            "current_page": current_page,
+                            "next_page": current_page,
+                            "total_pages": total_pages or None,
+                            "imported_symbols": imported_symbols,
+                            "last_successful_page": last_successful_page or None,
+                            "auto_resume": True,
+                            "paused_at": datetime.now(UTC).isoformat(),
+                            "last_heartbeat_at": datetime.now(UTC).isoformat(),
+                        },
+                    )
+                    await asyncio.sleep(1)
+
+                await update_ingestion_job_progress(
+                    job_id=catalog_job_id,
+                    status="running",
+                    total_symbols=total_symbols,
+                    completed_symbols=imported_symbols,
+                    metadata={
+                        "current_page": current_page,
+                        "next_page": current_page,
+                        "total_pages": total_pages or None,
+                        "imported_symbols": imported_symbols,
+                        "last_successful_page": last_successful_page or None,
+                        "auto_resume": True,
+                        "last_heartbeat_at": datetime.now(UTC).isoformat(),
+                    },
+                )
+                page_result = None
+                last_error: Exception | None = None
+                retry_delays = CATALOG_RETRY_DELAYS_SECONDS
+                for attempt in range(len(retry_delays) + 1):
+                    if attempt:
+                        delay = retry_delays[attempt - 1]
+                        await update_ingestion_job_progress(
+                            job_id=catalog_job_id,
+                            status="running",
+                            total_symbols=total_symbols,
+                            completed_symbols=imported_symbols,
+                            metadata={
+                                "current_page": current_page,
+                                "next_page": current_page,
+                                "total_pages": total_pages or None,
+                                "imported_symbols": imported_symbols,
+                                "last_successful_page": last_successful_page or None,
+                                "retry_attempt": attempt,
+                                "retry_delay_seconds": delay,
+                                "last_error": str(last_error) if last_error else None,
+                                "last_heartbeat_at": datetime.now(UTC).isoformat(),
+                            },
+                        )
+                        await asyncio.sleep(delay)
+                    try:
+                        page_result = await import_a_share_universe_batch(
+                            client,
+                            AShareUniverseBatchImportRequest(
+                                universe_id=request.universe_id,
+                                page=current_page,
+                                page_size=100,
+                            ),
+                        )
+                        break
+                    except (DatabaseError, EastMoneyError, ValueError) as error:
+                        last_error = error
+
+                if page_result is None:
+                    message = str(last_error or "Catalog page import failed.")
+                    await update_ingestion_job_progress(
+                        job_id=catalog_job_id,
+                        status="partial",
+                        total_symbols=total_symbols,
+                        completed_symbols=imported_symbols,
+                        error=message,
+                        metadata={
+                            "current_page": current_page,
+                            "next_page": current_page,
+                            "total_pages": total_pages or None,
+                            "imported_symbols": imported_symbols,
+                            "last_successful_page": last_successful_page or None,
+                            "auto_resume": True,
+                            "stop_reason": "page_failed",
+                            "last_error": message,
+                            "last_heartbeat_at": datetime.now(UTC).isoformat(),
+                        },
+                    )
+                    return
+
+                total_pages = page_result.total_pages
+                total_symbols = page_result.total_available
+                imported_symbols += page_result.imported_count
+                last_successful_page = current_page
+                next_page = page_result.next_page
+                await update_ingestion_job_progress(
+                    job_id=catalog_job_id,
+                    status="running",
+                    total_symbols=total_symbols,
+                    completed_symbols=imported_symbols,
+                    error="",
+                    metadata={
+                        "current_page": current_page,
+                        "next_page": next_page,
+                        "total_pages": total_pages,
+                        "imported_symbols": imported_symbols,
+                        "last_successful_page": last_successful_page,
+                        "auto_resume": True,
+                        "stop_reason": None,
+                        "retry_attempt": 0,
+                        "last_error": None,
+                        "last_heartbeat_at": datetime.now(UTC).isoformat(),
+                    },
+                )
+                if next_page is None:
+                    break
+                current_page = next_page
+
+            completed_at = datetime.now(UTC)
+            await update_ingestion_job_progress(
+                job_id=catalog_job_id,
+                status="completed",
+                total_symbols=total_symbols,
+                completed_symbols=imported_symbols,
+                error="",
+                metadata={
+                    "current_page": last_successful_page,
+                    "next_page": None,
+                    "total_pages": total_pages,
+                    "imported_symbols": imported_symbols,
+                    "last_successful_page": last_successful_page,
+                    "auto_resume": False,
+                    "control": "idle",
+                    "stop_reason": "completed",
+                    "last_error": None,
+                    "last_heartbeat_at": completed_at.isoformat(),
+                },
+                completed_at=completed_at,
+            )
+            async with bootstrap_operation_lock:
+                await ensure_history_autofill_job(request.universe_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await update_ingestion_job_progress(
+                job_id=catalog_job_id,
+                status="partial",
+                total_symbols=total_symbols,
+                completed_symbols=imported_symbols,
+                error=str(error),
+                metadata={
+                    "current_page": current_page,
+                    "next_page": current_page,
+                    "total_pages": total_pages or None,
+                    "imported_symbols": imported_symbols,
+                    "last_successful_page": last_successful_page or None,
+                    "auto_resume": True,
+                    "stop_reason": "error",
+                    "last_error": str(error),
+                    "last_heartbeat_at": datetime.now(UTC).isoformat(),
+                },
+            )
+
+    async def spawn_catalog_task(
+        *,
+        catalog_job_id: str,
+        request: AShareBootstrapRequest,
+        resume_job: object | None,
+    ) -> bool:
+        existing_task = catalog_tasks.get(catalog_job_id)
+        if existing_task is not None and not existing_task.done():
+            return False
+
+        metadata = dict(getattr(resume_job, "metadata", {}) or {})
+        preserved_control = "pause" if metadata.get("control") == "pause" else "run"
+        resumed_at = datetime.now(UTC)
+        await update_ingestion_job_progress(
+            job_id=catalog_job_id,
+            status="running",
+            error="",
+            metadata={
+                "request": request.model_dump(mode="json"),
+                "auto_resume": True,
+                "control": preserved_control,
+                "stop_reason": None,
+                "resumed_at": resumed_at.isoformat(),
+                "last_heartbeat_at": resumed_at.isoformat(),
+            },
+        )
+        task = asyncio.create_task(
+            run_a_share_catalog_bootstrap(
+                catalog_job_id=catalog_job_id,
+                request=request,
+                resume_job=resume_job,
+            )
+        )
+        catalog_tasks[catalog_job_id] = task
+        auto_fill_tasks.add(task)
+
+        def discard_catalog_task(completed_task: asyncio.Task[None]) -> None:
+            auto_fill_tasks.discard(completed_task)
+            if catalog_tasks.get(catalog_job_id) is completed_task:
+                catalog_tasks.pop(catalog_job_id, None)
+
+        task.add_done_callback(discard_catalog_task)
+        return True
+
+    async def resume_a_share_catalog_jobs() -> bool:
+        resumed = False
+        resumed_universes: set[str] = set()
+        jobs = await list_ingestion_jobs(
+            provider="eastmoney-catalog",
+            limit=100,
+        )
+        for job in jobs:
+            metadata = job.metadata
+            universe_id = job.universe_id or ""
+            if (
+                job.provider != "eastmoney-catalog"
+                or job.status not in {"running", "partial"}
+                or not universe_id
+                or universe_id in resumed_universes
+                or not metadata.get("auto_resume")
+                or metadata.get("control") == "stop"
+                or metadata.get("stop_reason") == "stopped"
+            ):
+                continue
+            request_payload = metadata.get("request")
+            if not isinstance(request_payload, dict):
+                request_payload = {"universe_id": universe_id}
+            try:
+                request = AShareBootstrapRequest.model_validate(request_payload)
+                await spawn_catalog_task(
+                    catalog_job_id=job.id,
+                    request=request,
+                    resume_job=job,
+                )
+                resumed_universes.add(universe_id)
+                resumed = True
+            except (DatabaseError, ValueError):
+                continue
+        return resumed
+
+    @app.post(
+        "/api/v1/ingestion/a-share/bootstrap",
+        response_model=AShareBootstrapResponse,
+        status_code=202,
+    )
+    async def start_a_share_bootstrap(
+        request: AShareBootstrapRequest,
+    ) -> AShareBootstrapResponse:
+        request = request.model_copy(update={"universe_id": request.universe_id.strip()})
+        if not request.universe_id:
+            raise HTTPException(status_code=400, detail="universe_id is required.")
+
+        async with bootstrap_operation_lock:
+            jobs = await list_ingestion_jobs(
+                universe_id=request.universe_id,
+                provider="eastmoney-catalog",
+                limit=100,
+            )
+            catalog_job = next(
+                (
+                    job
+                    for job in jobs
+                    if job.provider == "eastmoney-catalog"
+                    and job.status in {"running", "partial", "completed"}
+                ),
+                None,
+            )
+            reused_existing_job = catalog_job is not None
+            if catalog_job is None:
+                started_at = datetime.now(UTC)
+                catalog_job_id = (
+                    f"ingest-eastmoney-catalog-{started_at.strftime('%Y%m%d%H%M%S')}-"
+                    f"{uuid4().hex[:8]}"
+                )
+                await create_ingestion_job(
+                    job_id=catalog_job_id,
+                    universe_id=request.universe_id,
+                    provider="eastmoney-catalog",
+                    timeframe="daily",
+                    adjustment="qfq",
+                    total_symbols=0,
+                    metadata={
+                        "request": request.model_dump(mode="json"),
+                        "current_page": 0,
+                        "next_page": 1,
+                        "total_pages": None,
+                        "imported_symbols": 0,
+                        "last_successful_page": None,
+                        "auto_resume": True,
+                        "control": "run",
+                        "source_strategy": "eastmoney-catalog-bootstrap",
+                        "page_size": 100,
+                        "history_batch_size": 25,
+                        "lookback_years": 5,
+                        "last_heartbeat_at": started_at.isoformat(),
+                    },
+                )
+                await spawn_catalog_task(
+                    catalog_job_id=catalog_job_id,
+                    request=request,
+                    resume_job=None,
+                )
+                catalog_status = "running"
+            else:
+                catalog_job_id = catalog_job.id
+                catalog_status = catalog_job.status
+                if catalog_job.status != "completed":
+                    await spawn_catalog_task(
+                        catalog_job_id=catalog_job_id,
+                        request=request,
+                        resume_job=catalog_job,
+                    )
+                    catalog_status = "running"
+
+            history_job = await find_history_autofill_job(request.universe_id)
+            if catalog_status == "completed":
+                history_job = await ensure_history_autofill_job(request.universe_id)
+
+            history_job_id = (
+                str(getattr(history_job, "id", None) or getattr(history_job, "job_id", ""))
+                or None
+            )
+            history_status = str(getattr(history_job, "status", "") or "")
+            if catalog_status != "completed":
+                state = (
+                    "catalog_partial"
+                    if catalog_status == "partial"
+                    else "catalog_running"
+                )
+            elif history_status == "completed":
+                state = "completed"
+            else:
+                state = "history_running"
+
+            return AShareBootstrapResponse(
+                catalog_job_id=catalog_job_id,
+                catalog_status=catalog_status,
+                history_job_id=history_job_id,
+                reused_existing_job=reused_existing_job,
+                state=state,
+            )
+
+
+    async def finish_recovered_autofill_job(job: object) -> None:
+        completed_at = datetime.now(UTC)
+        completed_symbols = int(getattr(job, "completed_symbols", 0) or 0)
+        failed_symbols = int(getattr(job, "failed_symbols", 0) or 0)
+        final_status = (
+            "failed"
+            if completed_symbols == 0 and failed_symbols > 0
+            else "partial"
+            if failed_symbols > 0
+            else "completed"
+        )
+        await update_ingestion_job_progress(
+            job_id=str(job.id),
+            status=final_status,
+            error=getattr(job, "error", None),
+            metadata={
+                "control": "idle",
+                "auto_resume": False,
+                "stop_reason": "completed",
+                "recovered_at": completed_at.isoformat(),
+                "last_heartbeat_at": completed_at.isoformat(),
+            },
+            completed_at=completed_at,
+        )
+
     async def resume_desktop_autofill_jobs() -> bool:
         resumed = False
         resumed_scopes: set[str] = set()
-        jobs = await list_ingestion_jobs(limit=100)
+        jobs = await list_ingestion_jobs(
+            provider="baostock-autofill",
+            limit=100,
+        )
         for job in jobs:
             metadata = job.metadata
             next_offset = int(metadata.get("next_offset") or 0)
+            completed_batches = int(metadata.get("completed_batches") or 0)
+            stop_reason = metadata.get("stop_reason")
+            recovering_interrupted_job = (
+                job.status == "running" or stop_reason == "stale_heartbeat"
+            )
+            zero_offset_in_flight = (
+                next_offset == 0
+                and completed_batches == 0
+                and recovering_interrupted_job
+            )
+            zero_offset_finished = (
+                next_offset == 0
+                and completed_batches > 0
+                and not metadata.get("active_child_job_id")
+                and recovering_interrupted_job
+            )
             resume_scope = job.universe_id or job.id
             if (
                 job.provider != "baostock-autofill"
                 or job.status not in {"running", "partial"}
                 or not metadata.get("auto_resume")
-                or next_offset <= 0
+                or metadata.get("control") == "stop"
+                or (
+                    next_offset <= 0
+                    and not zero_offset_in_flight
+                    and not zero_offset_finished
+                )
                 or metadata.get("stop_reason") == "stopped"
                 or resume_scope in resumed_scopes
             ):
+                continue
+            if zero_offset_finished:
+                await finish_recovered_autofill_job(job)
+                resumed_scopes.add(resume_scope)
+                resumed = True
                 continue
             request_payload = metadata.get("request")
             if not isinstance(request_payload, dict):
@@ -1524,15 +2088,25 @@ def create_app() -> FastAPI:
                     all_targets = await get_universe_fetch_targets(request.universe_id)
                 if not all_targets:
                     continue
-                effective_offset = next_offset if next_offset < len(all_targets) else 0
-                if effective_offset == 0:
+                if next_offset < 0:
+                    continue
+                batch_offset = int(metadata.get("batch_offset") or 0)
+                processed_in_batch = int(
+                    metadata.get("current_batch_completed_symbols") or 0
+                )
+                effective_offset = next_offset
+                if next_offset == batch_offset:
+                    effective_offset += processed_in_batch
+                if effective_offset >= len(all_targets):
+                    await finish_recovered_autofill_job(job)
+                    resumed_scopes.add(resume_scope)
+                    resumed = True
                     continue
                 calculated_batches = max(
                     1,
                     ((len(all_targets) - effective_offset) + request.batch_size - 1)
                     // request.batch_size,
                 )
-                completed_batches = int(metadata.get("completed_batches") or 0)
                 max_batches = completed_batches + calculated_batches
                 resumed_at = datetime.now(UTC)
                 await update_ingestion_job_progress(
@@ -1577,10 +2151,12 @@ def create_app() -> FastAPI:
         if not targets:
             return
         target_end = expected_latest_daily_date().isoformat()
-        jobs = await list_ingestion_jobs(universe_id=universe_id, limit=100)
+        jobs = await list_ingestion_jobs(
+            universe_id=universe_id,
+            provider="baostock-autofill",
+            limit=100,
+        )
         for job in jobs:
-            if job.provider != "baostock-autofill":
-                continue
             request_payload = job.metadata.get("request")
             request_end = (
                 request_payload.get("end")

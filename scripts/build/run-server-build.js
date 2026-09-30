@@ -38,6 +38,21 @@ if (prismaResult.status !== 0) {
   process.exit(prismaResult.status ?? 1);
 }
 
+// The shared Next.js route graph contains a runtime-selected desktop client.
+// Generate it for module resolution, even though server mode never opens SQLite.
+const desktopPrismaResult = spawnSync(
+  process.execPath,
+  [require.resolve('prisma/build/index.js'), 'generate', '--schema', 'prisma/schema.desktop.prisma'],
+  {
+    cwd: rootDir,
+    env: { ...process.env, DESKTOP_DATABASE_URL: 'file:./prisma/data/server-build-unused.db' },
+    stdio: 'inherit',
+  }
+);
+if (desktopPrismaResult.status !== 0) {
+  process.exit(desktopPrismaResult.status ?? 1);
+}
+
 const result = spawnSync(process.execPath, [path.join(__dirname, 'run-build.js')], {
   cwd: rootDir,
   env: process.env,

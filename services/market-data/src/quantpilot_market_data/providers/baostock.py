@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
@@ -19,6 +20,7 @@ from quantpilot_market_data.providers.eastmoney import (
 )
 
 PERCENT_QUANT = Decimal("0.00000001")
+BAOSTOCK_SESSION_LOCK = threading.Lock()
 
 
 class BaoStockError(RuntimeError):
@@ -98,6 +100,23 @@ class BaoStockClient:
 
 
 def fetch_baostock_history_records(
+    code: str,
+    frequency: str,
+    start_date: str,
+    end_date: str,
+    adjustflag: str,
+) -> list[dict[str, Any]]:
+    with BAOSTOCK_SESSION_LOCK:
+        return _fetch_baostock_history_records_unlocked(
+            code,
+            frequency,
+            start_date,
+            end_date,
+            adjustflag,
+        )
+
+
+def _fetch_baostock_history_records_unlocked(
     code: str,
     frequency: str,
     start_date: str,

@@ -422,7 +422,7 @@ export default function StrategyPlatformClient({ initialData }: Props) {
         }
       />
 
-      <main className="mx-auto w-full max-w-[1900px] space-y-5 px-3 py-6 lg:px-4">
+      <div className="mx-auto w-full max-w-[1900px] space-y-5 px-3 py-6 lg:px-4">
         {toast && (
           <div className={cn("rounded-md border px-4 py-3 text-sm shadow-sm",
             toast.type === "success" ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-red-200 bg-red-50 text-red-700"
@@ -1012,7 +1012,7 @@ export default function StrategyPlatformClient({ initialData }: Props) {
         ) : null}
           </>
         )}
-      </main>
+      </div>
     </div>
   );
 }

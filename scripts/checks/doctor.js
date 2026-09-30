@@ -17,13 +17,43 @@ function addCheck(name, status, summary, details = []) {
   checks.push({ name, status, summary, details: details.filter(Boolean) });
 }
 
+function resolveWindowsCommandWrapper(command) {
+  if (process.platform !== 'win32') return null;
+  if (/\.(?:cmd|bat)$/i.test(command) && fs.existsSync(command)) return command;
+  if (/[\\/]/.test(command)) return null;
+
+  const located = spawnSync('where.exe', [command], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    shell: false,
+  });
+  if (located.status !== 0) return null;
+  return (located.stdout || '')
+    .split(/\r?\n/u)
+    .map((entry) => entry.trim())
+    .find((entry) => /\.(?:cmd|bat)$/i.test(entry)) || null;
+}
+
 function run(command, args = [], options = {}) {
-  const result = spawnSync(command, args, {
+  const spawnOptions = {
     cwd: options.cwd ?? ROOT,
     encoding: 'utf8',
     shell: false,
     env: { ...process.env, ...(options.env ?? {}) },
-  });
+  };
+  let result = spawnSync(command, args, spawnOptions);
+  if (result.error && process.platform === 'win32') {
+    const wrapper = resolveWindowsCommandWrapper(command);
+    if (wrapper) {
+      // Node cannot execute .cmd files with shell:false. Resolve the exact
+      // wrapper first, then let cmd.exe call only that trusted path.
+      result = spawnSync(
+        process.env.ComSpec || 'cmd.exe',
+        ['/d', '/s', '/c', 'call', wrapper, ...args],
+        spawnOptions,
+      );
+    }
+  }
   return {
     status: result.status ?? 1,
     stdout: (result.stdout ?? '').trim(),
@@ -303,11 +333,11 @@ async function main() {
   const codexVersion = commandOutput(codexExecutable, ['--version']);
   addCheck(
     'Agent CLI',
-    claudeVersion ? 'ok' : 'fail',
-    `claude=${claudeVersion || '-'} codex=${codexVersion || 'optional-missing'}`,
+    claudeVersion || codexVersion ? 'ok' : 'fail',
+    `claude=${claudeVersion || '-'} codex=${codexVersion || '-'}`,
     [
-      claudeVersion ? null : 'Claude Code CLI 不可用。',
-      codexVersion ? null : 'Codex CLI 不可用；如不使用 Codex 可忽略。',
+      claudeVersion ? null : 'Claude Code CLI 不可用；当前可使用其他已安装的 Agent CLI。',
+      codexVersion ? null : 'Codex CLI 不可用；当前可使用其他已安装的 Agent CLI。',
       hasCodexApiKey() ? null : 'Codex API Key 未配置；如不使用 Codex 可忽略。',
     ]
   );

@@ -12,12 +12,10 @@ import {
   TECHNICAL_SCREENER_ALLOWED_SORT_FIELDS,
 } from '@/lib/quant/strategy-intent';
 import {
+  bootstrapStrategyMarketData,
   controlStrategyIngestionJob,
   getSmartStrategyPageData,
-  getStrategyIngestionJobs,
-  importStrategyAShareUniverse,
   runTechnicalScreener,
-  startStrategyUniverseHistoryAutoFill,
 } from '@/lib/quant/strategies';
 import type { StrategyDataProfileId } from '@/lib/quant/strategies';
 import { refreshStrategyData } from '@/lib/quant/strategy-data-refresh';
@@ -193,24 +191,17 @@ export async function POST(request: NextRequest) {
     if (action === 'initialize-market-data') {
       const input = z.object({ universeId: universeIdSchema }).safeParse(body);
       if (!input.success) return invalidRequest(firstIssue(input.error));
-      const universeId = input.data.universeId;
-      const catalog = await importStrategyAShareUniverse({ universeId });
-      const jobs = await getStrategyIngestionJobs({ universeId, limit: 20 });
-      const activeJob = jobs.jobs.find((job) => (
-        job.provider === 'baostock-autofill' && job.status === 'running'
-      ));
-      const autofill = activeJob ?? await startStrategyUniverseHistoryAutoFill({
-        universeId,
-        batchSize: 25,
-        lookbackYears: 5,
-        period: 'daily',
-        adjustment: 'qfq',
+      const bootstrap = await bootstrapStrategyMarketData({
+        universeId: input.data.universeId,
+        timeoutMs: 10_000,
       });
       return createSuccessResponse({
-        catalog,
-        autofill,
+        catalogJobId: bootstrap.catalogJobId,
+        catalogStatus: bootstrap.catalogStatus,
+        historyJobId: bootstrap.historyJobId,
+        reusedExistingJob: bootstrap.reusedExistingJob,
         state: await getSmartStrategyPageData(),
-      }, 201);
+      }, 202);
     }
 
     if (action === 'control-data-task') {

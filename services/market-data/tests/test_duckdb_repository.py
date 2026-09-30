@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from fastapi.testclient import TestClient
 
 from quantpilot_market_data.api import create_app
@@ -214,10 +216,41 @@ def test_duckdb_repository_contracts_and_round_trip(tmp_path) -> None:
         assert controlled["metadata"]["control"] == "pause"
         jobs = await repository.list_ingestion_jobs(
             universe_id="fixture-universe",
+            provider="baostock-autofill",
             limit=10,
         )
         assert jobs[0]["id"] == "fixture-job"
         assert jobs[0]["metadata"]["auto_resume"] is True
+
+    asyncio.run(run())
+
+
+def test_backtest_save_rolls_back_run_when_order_is_invalid(tmp_path) -> None:
+    repository = DuckDBMarketRepository(tmp_path / "atomic-backtest.duckdb")
+
+    async def run() -> None:
+        await repository.initialize()
+        with pytest.raises(KeyError, match="ts"):
+            await repository.save_backtest(
+                {"id": "rollback-run", "status": "completed"},
+                [
+                    {
+                        "id": "invalid-order",
+                        "symbol": "600519.SH",
+                        "side": "buy",
+                    }
+                ],
+            )
+        connection = repository._connect()
+        try:
+            count = connection.execute(
+                "SELECT count(*) FROM quant.backtest_runs WHERE id = ?",
+                ["rollback-run"],
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        assert count == 0
+        await repository.close()
 
     asyncio.run(run())
 
@@ -253,3 +286,59 @@ def test_desktop_readiness_endpoint_reports_duckdb_contract(tmp_path, monkeypatc
         assert payload["source_policy"]["history_fallback"] == "akshare"
     finally:
         get_duckdb_repository.cache_clear()
+def test_duckdb_long_write_keeps_event_loop_responsive(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    repository = DuckDBMarketRepository(tmp_path / "responsive.duckdb")
+
+    class SlowConnection:
+        def __init__(self, connection) -> None:
+            self.connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def executemany(self, *args, **kwargs):
+            time.sleep(0.2)
+            return self.connection.executemany(*args, **kwargs)
+
+    async def run() -> None:
+        await repository.initialize()
+        real_connect = repository._connect
+
+        def slow_connect():
+            return SlowConnection(real_connect())
+
+        monkeypatch.setattr(repository, "_connect", slow_connect)
+        heartbeat_ticks = 0
+
+        async def heartbeat() -> None:
+            nonlocal heartbeat_ticks
+            deadline = asyncio.get_running_loop().time() + 0.18
+            while asyncio.get_running_loop().time() < deadline:
+                heartbeat_ticks += 1
+                await asyncio.sleep(0.01)
+
+        write_task = asyncio.create_task(
+            repository.upsert_kline(
+                daily_fixture(),
+                universe_id="responsive-universe",
+                lookback_years=None,
+            )
+        )
+        await asyncio.sleep(0.01)
+        health_task = asyncio.create_task(repository.health())
+        summary_task = asyncio.create_task(repository.universe_summaries())
+        _, _, health, summaries = await asyncio.wait_for(asyncio.gather(
+            write_task,
+            heartbeat(),
+            health_task,
+            summary_task,
+        ), timeout=10)
+
+        assert heartbeat_ticks >= 8
+        assert health["status"] == "ok"
+        assert any(item["id"] == "responsive-universe" for item in summaries)
+
+    asyncio.run(run())

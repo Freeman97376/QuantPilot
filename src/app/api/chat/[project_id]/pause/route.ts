@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { cancelAgentRuns } from '@/lib/services/agent-runtime';
 import { markActiveUserRequestsAsCancelled, markUserRequestAsCancelled } from '@/lib/services/user-requests';
 import { streamManager } from '@/lib/services/stream';
-import { getProjectById } from '@/lib/services/project';
+import { getProjectById, isSafeProjectId } from '@/lib/services/project';
 import { markQuantGenerationQueueCancelled } from '@/lib/quant/generation-queue';
 import path from 'path';
 
@@ -13,6 +13,9 @@ interface RouteContext {
 export async function POST(request: NextRequest, { params }: RouteContext) {
   try {
     const { project_id } = await params;
+    if (!isSafeProjectId(project_id)) {
+      return NextResponse.json({ success: false, error: 'Invalid project ID' }, { status: 400 });
+    }
     const body = await request.json().catch(() => ({}));
     const requestId =
       typeof body.requestId === 'string' && body.requestId.trim()

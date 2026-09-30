@@ -9,6 +9,7 @@ const { spawn } = require('child_process');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
 
@@ -19,6 +20,7 @@ process.env.QUANTPILOT_RUNTIME_MODE = 'desktop';
 process.env.QUANTPILOT_DEPLOYMENT = 'desktop';
 process.env.NEXT_PUBLIC_RUNTIME_MODE = 'desktop';
 process.env.DESKTOP_DATABASE_URL = `file:${path.join(desktopDataDir, 'app.db').replace(/\\/g, '/')}`;
+process.env.QUANTPILOT_LAUNCH_TOKEN = crypto.randomBytes(32).toString('base64url');
 
 const { parseCliArgs, startWebDevServer } = require('./run-web');
 

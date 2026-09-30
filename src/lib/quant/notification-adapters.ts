@@ -44,6 +44,13 @@ const DEFAULT_WEBHOOK_ENV: Record<string, string> = {
   discord: 'QUANTPILOT_DISCORD_RESEARCH_WEBHOOK',
 };
 
+const WEBHOOK_ALLOWED_HOSTS: Record<string, readonly string[]> = {
+  wxwork: ['qyapi.weixin.qq.com'],
+  feishu: ['open.feishu.cn', 'open.larksuite.com'],
+  dingtalk: ['oapi.dingtalk.com'],
+  discord: ['discord.com', 'discordapp.com'],
+};
+
 function asRecord(value: unknown): JsonRecord {
   if (value && typeof value === 'object' && !Array.isArray(value)) return value as JsonRecord;
   return {};
@@ -69,6 +76,25 @@ function resolveWebhookUrl(channel: ResearchNotificationChannelInput) {
   const envName = asString(config.webhookEnv) || asString(config.webhook_env) || DEFAULT_WEBHOOK_ENV[channel.channelType];
   if (!envName) return { url: '', source: 'unsupported' };
   return { url: process.env[envName]?.trim() ?? '', source: envName };
+}
+
+function validateWebhookUrl(channelType: string, value: string): string {
+  const allowedHosts = WEBHOOK_ALLOWED_HOSTS[channelType];
+  if (!allowedHosts) throw new Error(`Unsupported webhook channel type: ${channelType}`);
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('Webhook URL is invalid.');
+  }
+  if (url.protocol !== 'https:' || url.username || url.password) {
+    throw new Error('Webhook URL must use HTTPS and must not contain credentials.');
+  }
+  if (!allowedHosts.includes(url.hostname.toLowerCase())) {
+    throw new Error(`Webhook host is not allowed for ${channelType}.`);
+  }
+  return url.toString();
 }
 
 function renderPlainText(report: ResearchNotificationReportInput) {
@@ -165,11 +191,13 @@ async function postWebhook(
   const timeout = setTimeout(() => controller.abort(), 8000);
 
   try {
-    const response = await fetch(webhookUrl, {
+    const safeWebhookUrl = validateWebhookUrl(channel.channelType, webhookUrl);
+    const response = await fetch(safeWebhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload.body),
       signal: controller.signal,
+      redirect: 'error',
     });
     const responseText = await response.text().catch(() => '');
     let responseJson: unknown = null;

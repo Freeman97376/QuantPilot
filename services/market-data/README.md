@@ -166,6 +166,30 @@ curl 'http://127.0.0.1:8000/api/v1/quotes/history/600519?period=daily&adjustment
 
 说明：东方财富历史 K 线外部源可能偶发断连。策略平台的长期本地研究优先读取 `quant.stock_bars`，缺失字段通过 Baostock / AKShare 补数端点补齐。
 
+## Persisted A-share bootstrap
+
+Start or reuse the full-market preparation workflow without waiting for all
+catalog pages:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/ingestion/a-share/bootstrap \\
+  -H 'Content-Type: application/json' \\
+  -d '{"universe_id":"a-share-sample-research-pool"}'
+```
+
+The endpoint returns HTTP `202`. It imports EastMoney catalog pages in the
+market-data process, persists `current_page`, `next_page`, `total_pages`,
+`imported_symbols`, `last_successful_page`, and `auto_resume` in the existing
+ingestion job metadata, then creates at most one `baostock-autofill` history
+job. Each catalog page gets three retries with 1/3/8-second backoff. A persistent
+page failure leaves a `partial` job and keeps all imported members; the next
+manual start or sidecar restart resumes from `next_page`. Pause/resume/stop use
+`/api/v1/ingestion/jobs/{job_id}/control`; explicitly stopped work is not
+auto-resumed.
+
+The legacy `/api/v1/research/a-share/import-batch` contract remains available
+for low-level paged callers.
+
 ### 历史 K 线字段补数
 
 Baostock / AKShare 补数端点用于把 `amount`、`amplitude`、`change_percent`、`change_amount`、`turnover`、停牌/ST 和涨跌停字段写入正式列。它不会删除已有更早历史，稀疏源也不会覆盖已有非空增强字段。当前本地优先使用 Baostock，因为它不依赖东方财富历史域名。估值因子默认不参与日常增量补数，需要时传 `include_valuation_factors=true` 单独纳入完整性检查。

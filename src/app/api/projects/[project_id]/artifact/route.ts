@@ -1,7 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { NextRequest, NextResponse } from 'next/server';
-import { getProjectById } from '@/lib/services/project';
+import { getProjectById, isSafeProjectId } from '@/lib/services/project';
 
 interface RouteContext {
   params: Promise<{ project_id: string }>;
@@ -11,6 +11,10 @@ const PROJECTS_DIR = process.env.PROJECTS_DIR || './data/projects';
 const PROJECTS_DIR_ABSOLUTE = path.isAbsolute(PROJECTS_DIR)
   ? PROJECTS_DIR
   : path.resolve(/*turbopackIgnore: true*/ process.cwd(), PROJECTS_DIR);
+
+const MAX_ARTIFACT_BYTES = 20 * 1024 * 1024;
+
+class ArtifactPathError extends Error {}
 
 function contentType(filePath: string) {
   const extension = path.extname(filePath).toLowerCase();
@@ -29,19 +33,38 @@ function resolveProjectPath(projectId: string, repoPath?: string | null) {
   return path.join(PROJECTS_DIR_ABSOLUTE, projectId);
 }
 
-function resolveSafeArtifactPath(projectPath: string, relativePath: string) {
-  const root = path.resolve(projectPath);
-  const normalizedRelativePath = relativePath.replace(/\\/g, '/').replace(/^\/+/, '');
-  const resolved = path.resolve(root, normalizedRelativePath);
-  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
-    throw new Error('Path traversal is not allowed');
+async function resolveSafeArtifactPath(projectPath: string, relativePath: string): Promise<string | null> {
+  const root = await fs.realpath(path.resolve(projectPath)).catch(() => null);
+  if (!root) {
+    return null;
   }
+
+  const normalizedRelativePath = relativePath.replace(/\\/g, '/').replace(/^\/+/, '');
+  const candidate = path.resolve(root, normalizedRelativePath);
+  const resolved = await fs.realpath(candidate).catch(() => null);
+  if (!resolved) {
+    return null;
+  }
+
+  const relative = path.relative(root, resolved);
+  if (
+    relative === '..'
+    || relative.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relative)
+  ) {
+    throw new ArtifactPathError('Path traversal is not allowed');
+  }
+
   return resolved;
 }
 
 export async function GET(request: NextRequest, { params }: RouteContext) {
   try {
     const { project_id } = await params;
+    if (!isSafeProjectId(project_id)) {
+      return NextResponse.json({ success: false, error: 'Invalid project ID' }, { status: 400 });
+    }
+
     const project = await getProjectById(project_id);
     if (!project) {
       return NextResponse.json({ success: false, error: 'Project not found' }, { status: 404 });
@@ -53,10 +76,19 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
     }
 
     const projectPath = resolveProjectPath(project_id, project.repoPath);
-    const absolutePath = resolveSafeArtifactPath(projectPath, artifactPath);
+    const absolutePath = await resolveSafeArtifactPath(projectPath, artifactPath);
+    if (!absolutePath) {
+      return NextResponse.json({ success: false, error: 'Artifact not found' }, { status: 404 });
+    }
     const stat = await fs.stat(absolutePath).catch(() => null);
     if (!stat?.isFile()) {
       return NextResponse.json({ success: false, error: 'Artifact not found' }, { status: 404 });
+    }
+    if (stat.size > MAX_ARTIFACT_BYTES) {
+      return NextResponse.json(
+        { success: false, error: 'Artifact exceeds the 20 MB download limit' },
+        { status: 413 },
+      );
     }
 
     const body = await fs.readFile(absolutePath);
@@ -65,6 +97,9 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
     response.headers.set('Cache-Control', 'no-store');
     return response;
   } catch (error) {
+    if (error instanceof ArtifactPathError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: 400 });
+    }
     console.error('[API] Failed to read project artifact:', error);
     return NextResponse.json(
       {

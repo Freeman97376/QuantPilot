@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import os
@@ -7,8 +8,11 @@ import shutil
 import threading
 from collections import defaultdict
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from functools import wraps
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -29,6 +33,34 @@ SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 DESKTOP_COVERAGE_LOOKBACK_YEARS = 5
 DESKTOP_COVERAGE_MIN_RATIO = 0.85
 DESKTOP_COVERAGE_MAX_LAG_DAYS = 4
+
+
+def _serialized_duckdb_method(method: Any) -> Any:
+    """Run synchronous DuckDB work on the repository's single worker."""
+
+    @wraps(method)
+    async def wrapped(
+        self: DuckDBMarketRepository,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        if self._closed:
+            raise RuntimeError("DuckDB repository is closed.")
+        if threading.get_ident() == self._worker_thread_id:
+            return await method(self, *args, **kwargs)
+
+        async with self._worker_lock:
+            if self._closed:
+                raise RuntimeError("DuckDB repository is closed.")
+            loop = asyncio.get_running_loop()
+
+            def invoke() -> Any:
+                self._worker_thread_id = threading.get_ident()
+                return asyncio.run(method(self, *args, **kwargs))
+
+            return await loop.run_in_executor(self._worker_executor, invoke)
+
+    return wrapped
 
 
 def _json_object(value: Any) -> dict[str, Any]:
@@ -150,6 +182,13 @@ class DuckDBMarketRepository:
     def __init__(self, database_path: Path) -> None:
         self.database_path = database_path
         self._lock = threading.RLock()
+        self._worker_lock = asyncio.Lock()
+        self._worker_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="quantpilot-duckdb",
+        )
+        self._worker_thread_id: int | None = None
+        self._closed = False
         self._initialized = False
 
     @classmethod
@@ -163,6 +202,7 @@ class DuckDBMarketRepository:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         return duckdb.connect(str(self.database_path))
 
+    @_serialized_duckdb_method
     async def initialize(self) -> None:
         with self._lock:
             if self._initialized:
@@ -279,6 +319,7 @@ class DuckDBMarketRepository:
                 connection.close()
             self._initialized = True
 
+    @_serialized_duckdb_method
     async def record_provider_attempt(
         self,
         *,
@@ -334,6 +375,7 @@ class DuckDBMarketRepository:
             finally:
                 connection.close()
 
+    @_serialized_duckdb_method
     async def provider_states(self) -> list[dict[str, Any]]:
         await self.initialize()
         with self._lock:
@@ -375,6 +417,7 @@ class DuckDBMarketRepository:
             row["metadata"] = _json_object(row.get("metadata"))
         return rows
 
+    @_serialized_duckdb_method
     async def health(self) -> dict[str, Any]:
         await self.initialize()
         with self._lock:
@@ -399,6 +442,7 @@ class DuckDBMarketRepository:
             "writable": os.access(self.database_path.parent, os.W_OK),
         }
 
+    @_serialized_duckdb_method
     async def upsert_kline(
         self,
         kline: Any,
@@ -528,6 +572,7 @@ class DuckDBMarketRepository:
                 connection.close()
         return symbol, len(rows), first_date, last_date
 
+    @_serialized_duckdb_method
     async def local_kline_rows(
         self, *, symbol: str, timeframe: str, adjustment: str, provider: str | None, limit: int
     ) -> list[dict[str, Any]]:
@@ -622,6 +667,7 @@ class DuckDBMarketRepository:
             ),
         )
 
+    @_serialized_duckdb_method
     async def coverage(self, *, universe_id: str | None = None) -> list[dict[str, Any]]:
         await self.initialize()
         query = "SELECT * FROM quant.market_data_sync_state"
@@ -638,6 +684,7 @@ class DuckDBMarketRepository:
             finally:
                 connection.close()
 
+    @_serialized_duckdb_method
     async def coverage_rows(
         self,
         *,
@@ -752,6 +799,7 @@ class DuckDBMarketRepository:
             row["data_status"] = _desktop_coverage_status(row)
         return rows
 
+    @_serialized_duckdb_method
     async def universe_summaries(self) -> list[dict[str, Any]]:
         await self.initialize()
         with self._lock:
@@ -869,6 +917,7 @@ class DuckDBMarketRepository:
             metadata["coverage_counts"] = coverage_counts
         return rows
 
+    @_serialized_duckdb_method
     async def universe_member_rows(
         self,
         *,
@@ -1076,6 +1125,7 @@ class DuckDBMarketRepository:
             row["data_status"] = _desktop_coverage_status(row)
         return rows, total, total_pages, current_page
 
+    @_serialized_duckdb_method
     async def ingestion_preflight(
         self,
         *,
@@ -1189,6 +1239,7 @@ class DuckDBMarketRepository:
             }
         return result
 
+    @_serialized_duckdb_method
     async def universe_symbols(self, universe_id: str) -> list[str]:
         await self.initialize()
         with self._lock:
@@ -1201,6 +1252,7 @@ class DuckDBMarketRepository:
             finally:
                 connection.close()
 
+    @_serialized_duckdb_method
     async def universe_fetch_targets(self, universe_id: str) -> list[dict[str, str]]:
         await self.initialize()
         with self._lock:
@@ -1225,6 +1277,7 @@ class DuckDBMarketRepository:
             for row in rows
         ]
 
+    @_serialized_duckdb_method
     async def add_securities_to_universe(
         self, *, universe_id: str, securities: list[Any], role: str, added_source: str
     ) -> list[dict[str, Any]]:
@@ -1330,6 +1383,7 @@ class DuckDBMarketRepository:
                 connection.close()
         return members
 
+    @_serialized_duckdb_method
     async def technical_screener_rows(
         self,
         *,
@@ -1479,6 +1533,7 @@ class DuckDBMarketRepository:
             row["scanned_symbols"] = len(result)
         return resolved_date, result
 
+    @_serialized_duckdb_method
     async def create_ingestion_job(self, **job: Any) -> None:
         await self.initialize()
         with self._lock:
@@ -1496,9 +1551,10 @@ class DuckDBMarketRepository:
             finally:
                 connection.close()
 
+    @_serialized_duckdb_method
     async def update_ingestion_job(self, job_id: str, **updates: Any) -> None:
         await self.initialize()
-        allowed = {"status", "completed_symbols", "failed_symbols", "rows_received", "rows_upserted", "error", "completed_at"}
+        allowed = {"status", "total_symbols", "completed_symbols", "failed_symbols", "rows_received", "rows_upserted", "error", "completed_at"}
         values = {key: value for key, value in updates.items() if key in allowed and value is not None}
         with self._lock:
             connection = self._connect()
@@ -1521,6 +1577,7 @@ class DuckDBMarketRepository:
             finally:
                 connection.close()
 
+    @_serialized_duckdb_method
     async def ingestion_control(self, job_id: str) -> str | None:
         await self.initialize()
         with self._lock:
@@ -1534,6 +1591,7 @@ class DuckDBMarketRepository:
             finally:
                 connection.close()
 
+    @_serialized_duckdb_method
     async def control_ingestion_job(
         self,
         *,
@@ -1587,6 +1645,7 @@ class DuckDBMarketRepository:
         rows[0]["metadata"] = _json_object(rows[0].get("metadata"))
         return rows[0]
 
+    @_serialized_duckdb_method
     async def reconcile_stale_ingestion_jobs(
         self,
         *,
@@ -1658,43 +1717,41 @@ class DuckDBMarketRepository:
                 connection.close()
         return reconciled
 
+    @_serialized_duckdb_method
     async def list_ingestion_jobs(
         self,
         *,
         universe_id: str | None,
+        provider: str | None = None,
         limit: int,
     ) -> list[dict[str, Any]]:
         await self.initialize()
         with self._lock:
             connection = self._connect()
             try:
+                filters: list[str] = []
+                params: list[Any] = []
                 if universe_id:
-                    cursor = connection.execute(
-                        """
-                        SELECT id, universe_id, provider, timeframe, adjustment, status,
-                          total_symbols, completed_symbols, failed_symbols, rows_received,
-                          rows_upserted, error, metadata, started_at, completed_at,
-                          created_at, updated_at
-                        FROM quant.market_data_ingestion_jobs
-                        WHERE universe_id=?
-                        ORDER BY created_at DESC
-                        LIMIT ?
-                        """,
-                        [universe_id, limit],
-                    )
-                else:
-                    cursor = connection.execute(
-                        """
-                        SELECT id, universe_id, provider, timeframe, adjustment, status,
-                          total_symbols, completed_symbols, failed_symbols, rows_received,
-                          rows_upserted, error, metadata, started_at, completed_at,
-                          created_at, updated_at
-                        FROM quant.market_data_ingestion_jobs
-                        ORDER BY created_at DESC
-                        LIMIT ?
-                        """,
-                        [limit],
-                    )
+                    filters.append("universe_id=?")
+                    params.append(universe_id)
+                if provider:
+                    filters.append("provider=?")
+                    params.append(provider)
+                where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
+                params.append(limit)
+                cursor = connection.execute(
+                    f"""
+                    SELECT id, universe_id, provider, timeframe, adjustment, status,
+                      total_symbols, completed_symbols, failed_symbols, rows_received,
+                      rows_upserted, error, metadata, started_at, completed_at,
+                      created_at, updated_at
+                    FROM quant.market_data_ingestion_jobs
+                    {where_sql}
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    params,
+                )
                 rows = _dict_rows(cursor)
             finally:
                 connection.close()
@@ -1702,11 +1759,13 @@ class DuckDBMarketRepository:
             row["metadata"] = _json_object(row.get("metadata"))
         return rows
 
+    @_serialized_duckdb_method
     async def save_backtest(self, run: dict[str, Any], orders: Iterable[dict[str, Any]]) -> None:
         await self.initialize()
         with self._lock:
             connection = self._connect()
             try:
+                connection.execute("BEGIN TRANSACTION")
                 connection.execute(
                     "INSERT OR REPLACE INTO quant.backtest_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, now(), now())",
                     [run["id"], run.get("strategy_id"), run.get("status", "completed"),
@@ -1724,8 +1783,26 @@ class DuckDBMarketRepository:
                         "INSERT OR REPLACE INTO quant.backtest_orders VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, now())",
                         rows,
                     )
+                connection.execute("COMMIT")
+            except Exception:
+                with suppress(Exception):
+                    connection.execute("ROLLBACK")
+                raise
             finally:
                 connection.close()
+
+    async def close(self) -> None:
+        """Stop the dedicated DuckDB worker after all scheduled work completes."""
+
+        async with self._worker_lock:
+            if self._closed:
+                return
+            self._closed = True
+        await asyncio.to_thread(
+            self._worker_executor.shutdown,
+            wait=True,
+            cancel_futures=True,
+        )
 
     async def ensure_disk_capacity(self, required_bytes: int) -> None:
         usage = shutil.disk_usage(self.database_path.parent)

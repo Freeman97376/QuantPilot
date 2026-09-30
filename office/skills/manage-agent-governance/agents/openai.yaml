@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage Agent Governance"
+  short_description: "Govern project agent instructions and audit records"
+  default_prompt: "Use $manage-agent-governance to initialize or audit this project's office governance."

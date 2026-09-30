@@ -12,6 +12,7 @@ import { getProjectById, updateProject, updateProjectStatus } from './project';
 import { ensureQuantDashboardTemplate, scaffoldBasicNextApp } from '@/lib/utils/scaffold';
 import { PREVIEW_CONFIG } from '@/lib/config/constants';
 import { getInternalPreviewUrl, getPreviewBasePath } from '@/lib/config/preview-paths';
+import { normalizeLoopbackPreviewUrl } from '@/lib/security/preview-url';
 
 const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const pnpmCommand = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
@@ -1119,26 +1120,14 @@ class PreviewManager {
     }
 
     if (overrides.url) {
-      try {
-        const parsed = new URL(overrides.url);
-        if (parsed.port) {
-          const parsedPort = parsePort(parsed.port);
-          if (
-            parsedPort &&
-            (parsedPort < previewBounds.start ||
-              parsedPort > previewBounds.end)
-          ) {
-            queueLog(
-              `Ignoring project-specified NEXT_PUBLIC_APP_URL (${overrides.url}) because port ${parsed.port} is outside the allowed preview range ${previewBounds.start}-${previewBounds.end}.`
-            );
-            delete overrides.url;
-          }
-        }
-      } catch {
+      const safeOverride = normalizeLoopbackPreviewUrl(overrides.url, previewBounds);
+      if (!safeOverride) {
         queueLog(
-          `Ignoring project-specified NEXT_PUBLIC_APP_URL (${overrides.url}) because it could not be parsed as a valid URL.`
+          'Ignoring project-specified NEXT_PUBLIC_APP_URL because previews must use HTTP on a loopback host and an allowed preview port.'
         );
         delete overrides.url;
+      } else {
+        overrides.url = safeOverride;
       }
     }
 
@@ -1159,7 +1148,16 @@ class PreviewManager {
     const previewBasePath = getPreviewBasePath(effectivePort);
     let resolvedUrl: string = getInternalPreviewUrl(effectivePort);
     if (!previewBasePath && typeof overrides.url === 'string' && overrides.url.trim().length > 0) {
-      resolvedUrl = overrides.url.trim();
+      const safeOverride = normalizeLoopbackPreviewUrl(
+        overrides.url,
+        previewBounds,
+        effectivePort,
+      );
+      if (safeOverride) {
+        resolvedUrl = safeOverride;
+      } else {
+        log(Buffer.from('[PreviewManager] Ignoring project NEXT_PUBLIC_APP_URL because its port does not match the preview process.'));
+      }
     } else if (previewBasePath && overrides.url) {
       log(Buffer.from('[PreviewManager] Ignoring project NEXT_PUBLIC_APP_URL because the server preview proxy is enabled.'));
     }

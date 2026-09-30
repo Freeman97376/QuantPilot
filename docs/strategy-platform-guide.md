@@ -113,6 +113,15 @@ MA5 > MA10 > MA20 > MA30 > MA60；
 
 同一页面也负责桌面端首次数据准备。用户无需安装 Docker，也无需先进入数据平台：点击“导入全 A 股并开始补数”后，页面导入东方财富证券目录并启动可暂停、继续、停止和重启续跑的后台任务。页面必须显示 DuckDB 文件与容量、完整/部分/过期/缺失数量、Baostock 和 AKShare 的实际使用状态及最近错误。默认等待全市场 `ready` 后执行；用户只有显式打开“仅筛选已就绪标的”才能提前运行。实时行情只对日线筛选后的候选详情按需请求。
 
+Initialization is asynchronous: the page calls the market-data bootstrap
+endpoint, receives a persisted catalog job within the request window, and polls
+catalog and history stages without overlapping requests. A catalog page is
+retried with 1/3/8-second backoff, and a partial job resumes from `next_page`.
+Closing or restarting the desktop app preserves imported symbols and resumes
+eligible work; Stop disables automatic restart. Member-preview timeouts are
+non-blocking warnings and never replace the real universe/readiness counts.
+
+
 第一批白名单指标包括：
 
 - 趋势：`ma5/10/20/30/60/120/250`、`ma5_slope_5d_pct`、`ma10_slope_5d_pct`、`ma20_slope_5d_pct`、`ma60_slope_20d_pct`、`ema12`、`ema26`、`close_to_ma120_pct`

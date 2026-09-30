@@ -64,6 +64,10 @@ jobs:
         run: npm run release:check
 
       - name: Build server web candidate
+        env:
+          # This job only verifies that the server bundle compiles. Real
+          # deployments still provide an untracked .env.production file.
+          QUANTPILOT_SERVER_ENV_FILE: deploy/server/quantpilot.env.example
         run: npm run build:server
 
       - name: Build signed Windows x64 artifacts

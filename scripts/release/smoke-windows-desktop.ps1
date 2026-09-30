@@ -97,6 +97,9 @@ try {
     throw 'Sidecar authenticated health check was not observed in the startup log.'
   }
 
+  $bootstrapSmokeScript = Join-Path $PSScriptRoot 'smoke-windows-bootstrap-resume.ps1'
+  $resumeSmoke = & $bootstrapSmokeScript -BuildRoot $build -LocalAppDataRoot $smokeRoot -TimeoutSeconds $TimeoutSeconds
+
   [pscustomobject]@{
     MainProcessId = $main.Id
     ProcessCount = $processCount
@@ -104,6 +107,7 @@ try {
     ListenerPorts = @($listeners.LocalPort)
     DataRoot = $dataRoot
     OfflineUpdateCheckDisabled = $true
+    BootstrapResume = $resumeSmoke
   } | ConvertTo-Json -Depth 4
 } finally {
   Restore-Environment

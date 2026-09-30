@@ -423,10 +423,32 @@ export async function publishSkillVersion(params: PublishSkillVersionParams): Pr
 }
 
 async function runCommand(command: string, args: string[], cwd: string) {
+  let executable = command;
+  let commandArgs = args;
+  if (process.platform === 'win32' && command.toLowerCase() === 'npm') {
+    const npmCliCandidates = [
+      process.env.npm_execpath,
+      path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+      process.env.ProgramFiles
+        ? path.join(process.env.ProgramFiles, 'nodejs', 'node_modules', 'npm', 'bin', 'npm-cli.js')
+        : null,
+    ];
+    let npmCliPath: string | null = null;
+    for (const candidate of npmCliCandidates) {
+      if (!candidate) continue;
+      if (await fs.access(candidate).then(() => true, () => false)) {
+        npmCliPath = candidate;
+        break;
+      }
+    }
+    if (!npmCliPath) throw new Error('Unable to locate npm-cli.js for safe execution.');
+    executable = process.execPath;
+    commandArgs = [npmCliPath, ...args];
+  }
   const result = await new Promise<{ code: number | null; output: string }>((resolve, reject) => {
-    const child = spawn(command, args, {
+    const child = spawn(executable, commandArgs, {
       cwd,
-      shell: process.platform === 'win32',
+      shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env },
     });

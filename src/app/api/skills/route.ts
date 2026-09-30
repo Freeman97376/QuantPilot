@@ -1,5 +1,13 @@
 import { NextResponse } from 'next/server';
 import { getSkillsDashboardData } from '@/lib/quant/skills-dashboard';
+import {
+  readLimitedFormData,
+  readLimitedJson,
+  RequestBodyError,
+} from '@/lib/security/request-body';
+
+const MAX_SKILL_PACKAGE_REQUEST_BYTES = 6 * 1024 * 1024;
+const MAX_SKILL_JSON_REQUEST_BYTES = 1024 * 1024;
 
 export async function GET() {
   return NextResponse.json({
@@ -36,7 +44,7 @@ export async function POST(request: Request) {
   try {
     const skillsAdmin = await import('@/lib/quant/skills-admin');
     if (contentType.includes('multipart/form-data')) {
-      const form = await request.formData();
+      const form = await readLimitedFormData(request, MAX_SKILL_PACKAGE_REQUEST_BYTES);
       const action = String(form.get('action') ?? '');
       if (action !== 'upload-package') {
         return errorResponse('不支持的 multipart action。');
@@ -56,7 +64,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: true, data });
     }
 
-    const body = await request.json().catch(() => ({}));
+    const body = await readLimitedJson(request, MAX_SKILL_JSON_REQUEST_BYTES) as Record<string, unknown>;
     const action = String(body.action ?? '');
     if (action === 'read-source') {
       const source = await skillsAdmin.readSkillSource(String(body.skillId ?? ''));
@@ -130,6 +138,9 @@ export async function POST(request: Request) {
 
     return errorResponse('不支持的 action。');
   } catch (error) {
+    if (error instanceof RequestBodyError) {
+      return errorResponse(error, error.status);
+    }
     return errorResponse(error);
   }
 }

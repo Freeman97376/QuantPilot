@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import weakref
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import redis.asyncio as redis
 from redis.exceptions import RedisError
@@ -182,6 +183,8 @@ class MarketDataCache:
 class RedisJsonCache:
     """Redis-backed JSON cache with graceful fallback when Redis is unavailable."""
 
+    _instances: ClassVar[weakref.WeakSet[RedisJsonCache]] = weakref.WeakSet()
+
     def __init__(
         self,
         *,
@@ -198,6 +201,7 @@ class RedisJsonCache:
             os.getenv("QUANTPILOT_RUNTIME_MODE", "server").strip().lower() == "desktop"
         )
         self._local_cache = MarketDataCache(root=default_cache_root() / "runtime-cache")
+        self._instances.add(self)
 
     @property
     def configured(self) -> bool:
@@ -281,6 +285,12 @@ class RedisJsonCache:
             return
         await self._client.aclose()
         self._client = None
+        self._available = True
+
+    @classmethod
+    async def close_all(cls) -> None:
+        for instance in tuple(cls._instances):
+            await instance.close()
 
     def _get_client(self) -> redis.Redis:
         if self._client is None:

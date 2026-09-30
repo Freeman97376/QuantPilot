@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { POST as executeChatAction } from '@/app/api/chat/[project_id]/act/route';
 import { getDefaultModelForCli, normalizeModelId } from '@/lib/constants/cliModels';
 import { serializeProject } from '@/lib/serializers/project';
 import { streamManager } from '@/lib/services/stream';
-import { getProjectById, updateProject } from '@/lib/services/project';
+import { getProjectById, isSafeProjectId, updateProject } from '@/lib/services/project';
 import { generateProjectId } from '@/lib/utils';
-import { withApiBase } from '@/lib/config/public-paths';
 
 interface RouteContext {
   params: Promise<{ project_id: string }>;
@@ -13,6 +13,13 @@ interface RouteContext {
 export async function POST(request: NextRequest, { params }: RouteContext) {
   try {
     const { project_id } = await params;
+    if (!isSafeProjectId(project_id)) {
+      return NextResponse.json(
+        { success: false, error: 'Invalid project ID' },
+        { status: 400 },
+      );
+    }
+
     const body = await request.json().catch(() => ({}));
     const project = await getProjectById(project_id);
 
@@ -63,19 +70,25 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
       },
     });
 
-    const actUrl = new URL(withApiBase(`/api/chat/${project_id}/act`), request.url);
-    const actResponse = await fetch(actUrl, {
+    const actBody = JSON.stringify({
+      instruction,
+      displayInstruction: instruction,
+      images: [],
+      isInitialPrompt: true,
+      cliPreference,
+      selectedModel,
+      requestId,
+    });
+    const actRequest = new NextRequest('http://quantpilot.internal/api/chat/action', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        instruction,
-        displayInstruction: instruction,
-        images: [],
-        isInitialPrompt: true,
-        cliPreference,
-        selectedModel,
-        requestId,
-      }),
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': String(Buffer.byteLength(actBody, 'utf8')),
+      },
+      body: actBody,
+    });
+    const actResponse = await executeChatAction(actRequest, {
+      params: Promise.resolve({ project_id }),
     });
 
     const actPayload = await actResponse.json().catch(() => null);

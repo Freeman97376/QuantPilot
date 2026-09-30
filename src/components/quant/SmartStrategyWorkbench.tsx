@@ -78,6 +78,51 @@ type WorkflowError = {
   message: string;
 };
 
+type SmartStrategyAbortSource = "timeout" | "superseded" | "unmount";
+
+class SmartStrategyRequestError extends Error {
+  constructor(
+    readonly source: SmartStrategyAbortSource,
+    message: string
+  ) {
+    super(message);
+    this.name = "SmartStrategyRequestError";
+  }
+}
+
+function smartStrategyAbortReason(source: SmartStrategyAbortSource) {
+  return new DOMException(
+    `smart-strategy:${source}`,
+    source === "timeout" ? "TimeoutError" : "AbortError"
+  );
+}
+
+function abortSmartStrategyRequest(
+  controller: AbortController | null,
+  source: SmartStrategyAbortSource
+) {
+  if (controller && !controller.signal.aborted) {
+    controller.abort(smartStrategyAbortReason(source));
+  }
+}
+
+function smartStrategyAbortSource(reason: unknown): SmartStrategyAbortSource | null {
+  if (!(reason instanceof DOMException)) return null;
+  const match = /^smart-strategy:(timeout|superseded|unmount)$/.exec(reason.message);
+  return (match?.[1] as SmartStrategyAbortSource | undefined) ?? null;
+}
+
+function smartStrategyAbortMessage(source: SmartStrategyAbortSource) {
+  if (source === "timeout") {
+    return "\u8bf7\u6c42\u8d85\u65f6\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
+  }
+  if (source === "superseded") {
+    return "\u8bf7\u6c42\u5df2\u88ab\u65b0\u7684\u64cd\u4f5c\u66ff\u6362\u3002";
+  }
+  return "\u9875\u9762\u5df2\u79bb\u5f00\uff0c\u8bf7\u6c42\u5df2\u53d6\u6d88\u3002";
+}
+
+
 type IndicatorGroupId = "trend" | "momentum" | "candle" | "volume" | "risk";
 
 type IndicatorGroup = {
@@ -108,6 +153,19 @@ type MinuteAnalysisEstimate = {
   estimatedPeakMemoryBytes: number;
 };
 
+type MinuteAnalysisRequestContext = {
+  universeId?: string;
+  symbol: string;
+  profile: MinuteProfileId;
+  tradeDate?: string | null;
+  limit: number;
+  spec: TechnicalScreenerDraft["spec"];
+};
+
+type PendingMinuteAnalysisEstimate = MinuteAnalysisEstimate & {
+  requestContext: MinuteAnalysisRequestContext;
+};
+
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
@@ -125,6 +183,15 @@ function formatStatusTime(value?: string | null): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(parsed);
+}
+
+function ingestionStatusLabel(status?: string | null): string {
+  if (status === "running") return "\u8fd0\u884c\u4e2d";
+  if (status === "partial") return "\u90e8\u5206\u5b8c\u6210";
+  if (status === "completed") return "\u5df2\u5b8c\u6210";
+  if (status === "failed") return "\u5931\u8d25";
+  if (status === "stopped") return "\u5df2\u505c\u6b62";
+  return "\u7b49\u5f85\u542f\u52a8";
 }
 
 const MINUTE_PROFILE_OPTIONS: Array<{
@@ -174,6 +241,8 @@ const QUICK_TEMPLATES = [
 const DEFAULT_SMART_STRATEGY_PROMPT = QUICK_TEMPLATES[0].prompt;
 const CLIENT_DRAFT_TIMEOUT_MS = 38_000;
 const CLIENT_RUN_TIMEOUT_MS = 20_000;
+const CLIENT_MINUTE_ESTIMATE_TIMEOUT_MS = 20_000;
+const CLIENT_MINUTE_PREPARE_TIMEOUT_MS = 90_000;
 
 const INDICATOR_GROUPS: IndicatorGroup[] = [
   {
@@ -375,10 +444,16 @@ function draftReviewMessage(value: TechnicalScreenerDraft) {
 }
 
 function workflowErrorMessage(error: unknown, stage: "draft" | "run") {
-  if (error instanceof Error && error.name === "AbortError") {
+  const timedOut = error instanceof SmartStrategyRequestError
+    ? error.source === "timeout"
+    : error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+  if (timedOut) {
     return stage === "draft"
       ? "策略解析等待时间过长，请重试；DeepSeek 不可用时服务端会自动切换到本地解析。"
       : "行情筛选等待时间过长，请确认 market-data 服务后重试。";
+  }
+  if (error instanceof SmartStrategyRequestError) {
+    return error.message;
   }
   const message = error instanceof Error ? error.message : String(error);
   if (/failed to fetch|networkerror|network request/i.test(message)) {
@@ -390,15 +465,39 @@ function workflowErrorMessage(error: unknown, stage: "draft" | "run") {
   return message;
 }
 
+function minuteAnalysisErrorMessage(error: unknown) {
+  if (error instanceof SmartStrategyRequestError && error.source === "timeout") {
+    return "分钟行情准备等待时间过长，请稍后重试或缩小分析范围。";
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  if (/failed to fetch|networkerror|network request/i.test(message)) {
+    return "无法连接行情服务，请确认 market-data 服务仍在运行后重试。";
+  }
+  return message;
+}
+
 async function postSmartStrategy<T>(
   body: Record<string, unknown>,
   externalSignal: AbortSignal,
   timeoutMs: number
 ) {
   const controller = new AbortController();
-  const abort = () => controller.abort();
-  externalSignal.addEventListener("abort", abort, { once: true });
-  const timeout = window.setTimeout(abort, timeoutMs);
+  let abortSource: SmartStrategyAbortSource | null = null;
+  const abortFromExternalSignal = () => {
+    abortSource = smartStrategyAbortSource(externalSignal.reason) ?? "superseded";
+    abortSmartStrategyRequest(controller, abortSource);
+  };
+  let listeningForExternalAbort = false;
+  if (externalSignal.aborted) {
+    abortFromExternalSignal();
+  } else {
+    externalSignal.addEventListener("abort", abortFromExternalSignal, { once: true });
+    listeningForExternalAbort = true;
+  }
+  const timeout = window.setTimeout(() => {
+    abortSource = "timeout";
+    abortSmartStrategyRequest(controller, "timeout");
+  }, timeoutMs);
   try {
     const response = await fetch(`${API_BASE}/api/quant/smart-strategy`, {
       method: "POST",
@@ -416,9 +515,20 @@ async function postSmartStrategy<T>(
       throw new Error(payload.message || payload.error || `请求失败（HTTP ${response.status}）`);
     }
     return payload.data;
+  } catch (error) {
+    const source = abortSource ?? smartStrategyAbortSource(controller.signal.reason);
+    if (source) {
+      throw new SmartStrategyRequestError(source, smartStrategyAbortMessage(source));
+    }
+    if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+      throw new SmartStrategyRequestError("timeout", smartStrategyAbortMessage("timeout"));
+    }
+    throw error;
   } finally {
     window.clearTimeout(timeout);
-    externalSignal.removeEventListener("abort", abort);
+    if (listeningForExternalAbort) {
+      externalSignal.removeEventListener("abort", abortFromExternalSignal);
+    }
   }
 }
 
@@ -482,6 +592,7 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
   const [marketState, setMarketState] = useState(data);
   const [dataActionPhase, setDataActionPhase] = useState<DataActionPhase>("idle");
   const [dataError, setDataError] = useState<string | null>(null);
+  const [statusPollError, setStatusPollError] = useState<string | null>(null);
   const [allowReadySubset, setAllowReadySubset] = useState(false);
   const [prompt, setPrompt] = useState(DEFAULT_SMART_STRATEGY_PROMPT);
   const [universeId, setUniverseId] = useState(defaultUniverseId);
@@ -497,12 +608,16 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
   const [copied, setCopied] = useState(false);
   const [minuteProfile, setMinuteProfile] = useState<MinuteProfileId>("minute1_entry");
   const [minuteResult, setMinuteResult] = useState<StrategyRefreshResponse | null>(null);
-  const [minuteEstimate, setMinuteEstimate] = useState<MinuteAnalysisEstimate | null>(null);
+  const [minuteEstimate, setMinuteEstimate] = useState<PendingMinuteAnalysisEstimate | null>(null);
   const [isMinuteLoading, setIsMinuteLoading] = useState(false);
   const [minuteError, setMinuteError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const activeRequestRef = useRef<AbortController | null>(null);
+  const activeDataRequestRef = useRef<AbortController | null>(null);
+  const activeMinuteRequestRef = useRef<AbortController | null>(null);
+  const statusPollInFlightRef = useRef(false);
   const requestSequenceRef = useRef(0);
+  const minuteRequestSequenceRef = useRef(0);
   const resultsPanelRef = useRef<HTMLDivElement | null>(null);
 
   const parsedLimit = useMemo(() => {
@@ -521,9 +636,9 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
   const resultHitRate = hitRate(result);
   const workflowBusy = workflowPhase !== "idle";
   const reviewMessage = draft ? draftReviewMessage(draft) : null;
-  const memberCount = selectedUniverse?.memberCount ?? 0;
-  const readyCount = selectedUniverse?.readyCount ?? 0;
   const marketReadiness = marketState.marketData;
+  const memberCount = Math.max(selectedUniverse?.memberCount ?? 0, marketReadiness.coverage.total);
+  const readyCount = marketReadiness.coverage.ready;
   const partialCount = marketReadiness.coverage.partial;
   const staleCount = marketReadiness.coverage.stale;
   const missingCount = marketReadiness.coverage.missing;
@@ -560,25 +675,47 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
   const marketDataReady = !marketState.research.error
     && !marketReadiness.error
     && (fullMarketReady || (allowReadySubset && readyCount > 0));
-  const activeIngestionJob = marketState.ingestionJobs.jobs.find((job) => (
+  const activeCatalogJob = marketState.ingestionJobs.jobs.find((job) => (
+    job.provider === "eastmoney-catalog" && job.status === "running"
+  )) ?? null;
+  const latestCatalogJob = activeCatalogJob ?? marketState.ingestionJobs.jobs.find((job) => (
+    job.provider === "eastmoney-catalog"
+  )) ?? null;
+
+  const activeHistoryJob = marketState.ingestionJobs.jobs.find((job) => (
     job.provider === "baostock-autofill" && job.status === "running"
   )) ?? null;
-  const latestIngestionJob = activeIngestionJob ?? marketState.ingestionJobs.jobs.find((job) => (
+  const latestHistoryJob = activeHistoryJob ?? marketState.ingestionJobs.jobs.find((job) => (
     job.provider === "baostock-autofill"
   )) ?? null;
-  const activeIngestionJobId = activeIngestionJob?.id ?? null;
+  const latestIngestionJob = latestHistoryJob;
+  const activeIngestionJob = activeCatalogJob ?? activeHistoryJob;
+  const activeIngestionJobId = [activeCatalogJob?.id, activeHistoryJob?.id]
+    .filter(Boolean)
+    .join(":") || null;
   const ingestionControl = typeof activeIngestionJob?.metadata.control === "string"
     ? activeIngestionJob.metadata.control
     : "run";
-  const ingestionProcessed = latestIngestionJob
-    ? latestIngestionJob.completedSymbols + latestIngestionJob.failedSymbols
+  const catalogCompletedPages = latestCatalogJob?.lastSuccessfulPage ?? 0;
+  const catalogTotalPages = latestCatalogJob?.totalPages ?? 0;
+  const catalogProgress = catalogTotalPages > 0
+    ? Math.min(100, (catalogCompletedPages / catalogTotalPages) * 100)
+    : 0;
+
+  const ingestionProcessed = latestHistoryJob
+    ? latestHistoryJob.completedSymbols + latestHistoryJob.failedSymbols
     : readyCount;
-  const ingestionTotal = latestIngestionJob?.universeTotalSymbols
-    ?? latestIngestionJob?.totalSymbols
+  const ingestionTotal = latestHistoryJob?.universeTotalSymbols
+    ?? latestHistoryJob?.totalSymbols
     ?? memberCount;
   const ingestionProgress = ingestionTotal > 0
     ? Math.min(100, (ingestionProcessed / ingestionTotal) * 100)
     : 0;
+  const statusWarnings = Array.from(new Set([
+    ...marketState.research.warnings,
+    ...marketState.ingestionJobs.warnings,
+  ]));
+
   const conditions = useMemo(
     () => draft?.spec.conditions.map((condition, index) => ({
       id: `${condition.field}-${condition.operator}-${index}`,
@@ -611,39 +748,63 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
   }, [draft?.recommendedDataProfile]);
 
   useEffect(() => {
+    minuteRequestSequenceRef.current += 1;
+    abortSmartStrategyRequest(activeMinuteRequestRef.current, "superseded");
+    activeMinuteRequestRef.current = null;
+    setIsMinuteLoading(false);
     setMinuteResult(null);
+    setMinuteEstimate(null);
     setMinuteError(null);
-  }, [selectedSymbol]);
+  }, [minuteProfile, selectedSymbol]);
 
-  useEffect(() => () => activeRequestRef.current?.abort(), []);
+  useEffect(() => () => {
+    requestSequenceRef.current += 1;
+    minuteRequestSequenceRef.current += 1;
+    abortSmartStrategyRequest(activeRequestRef.current, "unmount");
+    abortSmartStrategyRequest(activeDataRequestRef.current, "unmount");
+    abortSmartStrategyRequest(activeMinuteRequestRef.current, "unmount");
+    activeRequestRef.current = null;
+    activeDataRequestRef.current = null;
+    activeMinuteRequestRef.current = null;
+  }, []);
 
   useEffect(() => {
-    if (!activeIngestionJobId) return;
+    if (!activeIngestionJobId) {
+      setStatusPollError(null);
+      return;
+    }
     const controller = new AbortController();
     const refresh = async () => {
+      if (statusPollInFlightRef.current) return;
+      statusPollInFlightRef.current = true;
       try {
         const nextState = await postSmartStrategy<SmartStrategyPageData>(
           { action: "data-status" },
           controller.signal,
-          10_000
+          4_000
         );
         setMarketState(nextState);
+        setStatusPollError(null);
       } catch (refreshError) {
         if (!controller.signal.aborted) {
-          setDataError(refreshError instanceof Error ? refreshError.message : String(refreshError));
+          setStatusPollError(refreshError instanceof Error ? refreshError.message : String(refreshError));
         }
+      } finally {
+        statusPollInFlightRef.current = false;
       }
     };
+    void refresh();
     const interval = window.setInterval(() => void refresh(), 2_500);
     return () => {
-      controller.abort();
+      abortSmartStrategyRequest(controller, "unmount");
+      statusPollInFlightRef.current = false;
       window.clearInterval(interval);
     };
   }, [activeIngestionJobId]);
 
   const cancelActiveWorkflow = () => {
     requestSequenceRef.current += 1;
-    activeRequestRef.current?.abort();
+    abortSmartStrategyRequest(activeRequestRef.current, "superseded");
     activeRequestRef.current = null;
     setWorkflowPhase("idle");
   };
@@ -675,7 +836,7 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
   };
 
   const beginWorkflow = (phase: WorkflowPhase) => {
-    activeRequestRef.current?.abort();
+    abortSmartStrategyRequest(activeRequestRef.current, "superseded");
     const controller = new AbortController();
     activeRequestRef.current = controller;
     const requestId = requestSequenceRef.current + 1;
@@ -784,27 +945,42 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
   };
 
   const initializeMarketData = async () => {
+    abortSmartStrategyRequest(activeDataRequestRef.current, "superseded");
     const controller = new AbortController();
+    activeDataRequestRef.current = controller;
     setDataActionPhase("initializing");
     setDataError(null);
     try {
-      const response = await postSmartStrategy<{ state: SmartStrategyPageData }>(
+      const response = await postSmartStrategy<{
+        catalogJobId: string;
+        catalogStatus: string;
+        historyJobId: string | null;
+        reusedExistingJob: boolean;
+        state: SmartStrategyPageData;
+      }>(
         { action: "initialize-market-data", universeId: requestUniverseId },
         controller.signal,
-        240_000
+        15_000
       );
       setMarketState(response.state);
       router.refresh();
     } catch (initializationError) {
-      setDataError(initializationError instanceof Error ? initializationError.message : String(initializationError));
+      if (activeDataRequestRef.current === controller) {
+        setDataError(initializationError instanceof Error ? initializationError.message : String(initializationError));
+      }
     } finally {
-      setDataActionPhase("idle");
+      if (activeDataRequestRef.current === controller) {
+        activeDataRequestRef.current = null;
+        setDataActionPhase("idle");
+      }
     }
   };
 
   const controlDataTask = async (taskAction: "pause" | "resume" | "stop") => {
     if (!activeIngestionJob) return;
+    abortSmartStrategyRequest(activeDataRequestRef.current, "superseded");
     const controller = new AbortController();
+    activeDataRequestRef.current = controller;
     setDataActionPhase("controlling");
     setDataError(null);
     try {
@@ -819,69 +995,119 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
       );
       setMarketState(nextState);
     } catch (controlError) {
-      setDataError(controlError instanceof Error ? controlError.message : String(controlError));
+      if (activeDataRequestRef.current === controller) {
+        setDataError(controlError instanceof Error ? controlError.message : String(controlError));
+      }
     } finally {
-      setDataActionPhase("idle");
+      if (activeDataRequestRef.current === controller) {
+        activeDataRequestRef.current = null;
+        setDataActionPhase("idle");
+      }
     }
   };
 
-  const prepareMinuteAnalysis = async (estimateId: string) => {
-    if (!selectedCandidate || !draft || !result) return null;
-    const response = await fetch(`${API_BASE}/api/quant/smart-strategy`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action: "prepare-analysis",
-        estimateId,
-        confirmed: true,
-        universeId: requestUniverseId,
-        symbols: [selectedCandidate.symbol],
-        profile: minuteProfile,
-        tradeDate: result.tradeDate,
-        limit: parsedLimit,
-        spec: draft.spec,
-      }),
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok || !payload.success) {
-      throw new Error(payload.message || payload.error || "分钟行情准备失败");
-    }
-    return payload.data as StrategyRefreshResponse;
-  };
-
-  const runMinuteAnalysis = async () => {
-    if (!selectedCandidate || !draft || !result) return;
+  const beginMinuteRequest = () => {
+    abortSmartStrategyRequest(activeMinuteRequestRef.current, "superseded");
+    const controller = new AbortController();
+    activeMinuteRequestRef.current = controller;
+    const requestId = minuteRequestSequenceRef.current + 1;
+    minuteRequestSequenceRef.current = requestId;
     setIsMinuteLoading(true);
     setMinuteError(null);
+    return { controller, requestId };
+  };
+
+  const currentMinuteRequestContext = (): MinuteAnalysisRequestContext | null => {
+    if (!selectedCandidate || !draft || !result) return null;
+    return {
+      universeId: requestUniverseId,
+      symbol: selectedCandidate.symbol,
+      profile: minuteProfile,
+      tradeDate: result.tradeDate,
+      limit: parsedLimit,
+      spec: draft.spec,
+    };
+  };
+
+  const prepareMinuteAnalysis = (
+    estimateId: string,
+    context: MinuteAnalysisRequestContext,
+    signal: AbortSignal
+  ) => postSmartStrategy<StrategyRefreshResponse>(
+    {
+      action: "prepare-analysis",
+      estimateId,
+      confirmed: true,
+      universeId: context.universeId,
+      symbols: [context.symbol],
+      profile: context.profile,
+      tradeDate: context.tradeDate,
+      limit: context.limit,
+      spec: context.spec,
+    },
+    signal,
+    CLIENT_MINUTE_PREPARE_TIMEOUT_MS
+  );
+
+  const runMinuteAnalysis = async () => {
+    const requestContext = currentMinuteRequestContext();
+    if (!requestContext) return;
+    const { controller, requestId } = beginMinuteRequest();
     setMinuteEstimate(null);
     try {
-      const response = await fetch(`${API_BASE}/api/quant/smart-strategy`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const estimate = await postSmartStrategy<MinuteAnalysisEstimate>(
+        {
           action: "estimate-analysis",
-          universeId: requestUniverseId,
-          symbols: [selectedCandidate.symbol],
-          profile: minuteProfile,
-          tradeDate: result.tradeDate,
-          limit: parsedLimit,
-          spec: draft.spec,
-        }),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok || !payload.success) {
-        throw new Error(payload.message || payload.error || "分钟行情准备失败");
-      }
-      const estimate = payload.data as MinuteAnalysisEstimate;
+          universeId: requestContext.universeId,
+          symbols: [requestContext.symbol],
+          profile: requestContext.profile,
+          tradeDate: requestContext.tradeDate,
+          limit: requestContext.limit,
+          spec: requestContext.spec,
+        },
+        controller.signal,
+        CLIENT_MINUTE_ESTIMATE_TIMEOUT_MS
+      );
+      if (minuteRequestSequenceRef.current !== requestId) return;
       if (estimate.requiresConfirmation) {
-        setMinuteEstimate(estimate);
+        setMinuteEstimate({ ...estimate, requestContext });
       } else {
-        setMinuteResult(await prepareMinuteAnalysis(estimate.estimateId));
+        const nextResult = await prepareMinuteAnalysis(estimate.estimateId, requestContext, controller.signal);
+        if (minuteRequestSequenceRef.current !== requestId) return;
+        setMinuteResult(nextResult);
       }
     } catch (err) {
-      setMinuteError(err instanceof Error ? err.message : String(err));
+      if (minuteRequestSequenceRef.current !== requestId) return;
+      setMinuteError(minuteAnalysisErrorMessage(err));
     } finally {
-      setIsMinuteLoading(false);
+      if (minuteRequestSequenceRef.current === requestId) {
+        activeMinuteRequestRef.current = null;
+        setIsMinuteLoading(false);
+      }
+    }
+  };
+
+  const confirmMinuteAnalysis = async () => {
+    const pendingEstimate = minuteEstimate;
+    if (!pendingEstimate) return;
+    const { controller, requestId } = beginMinuteRequest();
+    try {
+      const nextResult = await prepareMinuteAnalysis(
+        pendingEstimate.estimateId,
+        pendingEstimate.requestContext,
+        controller.signal
+      );
+      if (minuteRequestSequenceRef.current !== requestId) return;
+      setMinuteResult(nextResult);
+      setMinuteEstimate(null);
+    } catch (err) {
+      if (minuteRequestSequenceRef.current !== requestId) return;
+      setMinuteError(minuteAnalysisErrorMessage(err));
+    } finally {
+      if (minuteRequestSequenceRef.current === requestId) {
+        activeMinuteRequestRef.current = null;
+        setIsMinuteLoading(false);
+      }
     }
   };
 
@@ -933,7 +1159,7 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
   };
 
   return (
-    <main className="mx-auto w-full max-w-[1900px] space-y-4 px-3 py-5 lg:px-4">
+    <div className="mx-auto w-full max-w-[1900px] space-y-4 px-3 py-5 lg:px-4">
       <section className="rounded-md border border-slate-200 bg-white">
         <div className="flex flex-col gap-3 border-b border-slate-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="min-w-0">
@@ -961,10 +1187,12 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
               <KeyRound className="h-3.5 w-3.5" />
               {runtimeStatus.configured ? "管理 DeepSeek" : "配置 DeepSeek"}
             </Button>
-            <Link href="/data-platform" className="inline-flex h-9 items-center gap-1 rounded-md border border-slate-200 px-3 text-xs font-medium text-slate-600 hover:bg-slate-50">
-              高级数据管理
-              <ArrowRight className="h-3.5 w-3.5" />
-            </Link>
+            <Button asChild type="button" variant="outline" size="sm" className="h-9">
+              <Link href="/data-platform">
+                高级数据管理
+                <ArrowRight className="h-3.5 w-3.5" />
+              </Link>
+            </Button>
           </div>
         </div>
 
@@ -1027,6 +1255,72 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
             })}
           </div>
 
+          <div className="grid gap-3 lg:grid-cols-2">
+            <section className="rounded-lg border border-slate-200 bg-white p-3" aria-label="目录导入阶段">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold text-slate-900">{"\u76ee\u5f55\u5bfc\u5165"}</p>
+                  <p className="mt-0.5 text-[11px] text-slate-500">{"\u4e1c\u65b9\u8d22\u5bcc \u00b7 \u6bcf\u9875 100 \u652f"}</p>
+                </div>
+                <Badge variant="outline">{ingestionStatusLabel(latestCatalogJob?.status)}</Badge>
+              </div>
+              <div className="mt-3 flex items-center justify-between gap-3 text-xs">
+                <span className="text-slate-600">
+                  {"\u7b2c "}{(latestCatalogJob?.currentPage ?? latestCatalogJob?.lastSuccessfulPage ?? 0).toLocaleString("zh-CN")} / {catalogTotalPages || "\u2014"}{" \u9875"}
+                </span>
+                <span className="tabular-nums text-slate-500">{catalogProgress.toFixed(1)}%</span>
+              </div>
+              <div
+                className="mt-1.5 h-2 overflow-hidden rounded-full bg-slate-100"
+                role="progressbar"
+                aria-label="目录导入进度"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Number(catalogProgress.toFixed(1))}
+              >
+                <div className="h-full rounded-full bg-cyan-600 transition-[width]" style={{ width: `${catalogProgress}%` }} />
+              </div>
+              <p className="mt-2 text-[11px] text-slate-500">
+                {"\u5df2\u5bfc\u5165 "}{(latestCatalogJob?.importedSymbols ?? memberCount).toLocaleString("zh-CN")}{" \u652f\u8bc1\u5238"}
+              </p>
+              {latestCatalogJob?.status === "partial" ? (
+                <p className="mt-1 text-xs font-medium text-amber-700">
+                  {"\u53ef\u4ece\u7b2c "}{(latestCatalogJob.nextPage ?? latestCatalogJob.currentPage ?? catalogCompletedPages + 1).toLocaleString("zh-CN")}{" \u9875\u91cd\u8bd5"}
+                </p>
+              ) : null}
+              {latestCatalogJob?.error ? (
+                <p className="mt-1 break-words text-xs leading-5 text-red-600">{"\u6700\u540e\u9519\u8bef\uff1a"}{latestCatalogJob.error}</p>
+              ) : null}
+            </section>
+
+            <section className="rounded-lg border border-slate-200 bg-white p-3" aria-label="历史补数阶段">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold text-slate-900">{"\u5386\u53f2\u8865\u6570"}</p>
+                  <p className="mt-0.5 text-[11px] text-slate-500">{"Baostock \u00b7 25 \u652f/\u6279 \u00b7 5 \u5e74\u524d\u590d\u6743\u65e5\u7ebf"}</p>
+                </div>
+                <Badge variant="outline">{ingestionStatusLabel(latestHistoryJob?.status)}</Badge>
+              </div>
+              <div className="mt-3 flex items-center justify-between gap-3 text-xs">
+                <span className="text-slate-600">{ingestionProcessed.toLocaleString("zh-CN")} / {ingestionTotal.toLocaleString("zh-CN")}{" \u652f"}</span>
+                <span className="tabular-nums text-slate-500">{ingestionProgress.toFixed(1)}%</span>
+              </div>
+              <div
+                className="mt-1.5 h-2 overflow-hidden rounded-full bg-slate-100"
+                role="progressbar"
+                aria-label="历史补数进度"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Number(ingestionProgress.toFixed(1))}
+              >
+                <div className="h-full rounded-full bg-blue-600 transition-[width]" style={{ width: `${ingestionProgress}%` }} />
+              </div>
+              {latestHistoryJob?.error ? (
+                <p className="mt-2 break-words text-xs leading-5 text-red-600">{"\u6700\u540e\u9519\u8bef\uff1a"}{latestHistoryJob.error}</p>
+              ) : null}
+            </section>
+          </div>
+
           <div>
             <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 text-xs">
               <span className="font-medium text-slate-700">
@@ -1036,7 +1330,14 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
               </span>
               <span className="tabular-nums text-slate-500">{ingestionProgress.toFixed(1)}%</span>
             </div>
-            <div className="h-2 overflow-hidden rounded-full bg-slate-100" aria-label={`补数进度 ${ingestionProgress.toFixed(1)}%`}>
+            <div
+              className="h-2 overflow-hidden rounded-full bg-slate-100"
+              role="progressbar"
+              aria-label="补数总进度"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Number(ingestionProgress.toFixed(1))}
+            >
               <div className="h-full rounded-full bg-blue-600 transition-[width]" style={{ width: `${ingestionProgress}%` }} />
             </div>
             {latestIngestionJob?.error ? (
@@ -1044,10 +1345,20 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
             ) : null}
           </div>
 
-          {dataError || marketState.research.error || marketReadiness.error ? (
+          {dataError || statusPollError || marketState.research.error || marketState.ingestionJobs.error || marketReadiness.error ? (
             <div role="alert" className="flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-700">
               <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-              <p className="min-w-0 break-words leading-5">{dataError ?? marketState.research.error ?? marketReadiness.error}</p>
+              <p className="min-w-0 break-words leading-5">{dataError ?? statusPollError ?? marketState.research.error ?? marketState.ingestionJobs.error ?? marketReadiness.error}</p>
+            </div>
+          ) : null}
+
+          {statusWarnings.length > 0 ? (
+            <div role="status" className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div className="min-w-0 space-y-1">
+                <p className="font-medium">{"\u90e8\u5206\u72b6\u6001\u6682\u65f6\u4e0d\u53ef\u7528\uff0c\u5df2\u4fdd\u7559\u771f\u5b9e\u7edf\u8ba1\u3002"}</p>
+                {statusWarnings.map((warning) => <p key={warning} className="break-words leading-5">{warning}</p>)}
+              </div>
             </div>
           ) : null}
 
@@ -1076,7 +1387,9 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
                 {dataActionPhase === "initializing" ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
                 {dataActionPhase === "initializing"
                   ? "正在导入全 A 股目录"
-                  : memberCount === 0
+                  : latestCatalogJob?.status === "partial"
+                    ? `\u4ece\u7b2c ${latestCatalogJob.nextPage ?? latestCatalogJob.currentPage ?? catalogCompletedPages + 1} \u9875\u91cd\u8bd5`
+                    : memberCount === 0
                     ? "导入全 A 股并开始补数"
                     : fullMarketReady
                       ? "刷新目录并增量补数"
@@ -1687,6 +2000,7 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
                       <p className="mb-1.5 text-[11px] font-medium text-slate-500">分析档位</p>
                       <Select
                         value={minuteProfile}
+                        disabled={isMinuteLoading}
                         onValueChange={(value) => {
                           setMinuteProfile(value as MinuteProfileId);
                           setMinuteResult(null);
@@ -1752,25 +2066,14 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
                         <Button
                           type="button"
                           disabled={isMinuteLoading}
-                          onClick={async () => {
-                            setIsMinuteLoading(true);
-                            setMinuteError(null);
-                            try {
-                              setMinuteResult(await prepareMinuteAnalysis(minuteEstimate.estimateId));
-                              setMinuteEstimate(null);
-                            } catch (err) {
-                              setMinuteError(err instanceof Error ? err.message : String(err));
-                            } finally {
-                              setIsMinuteLoading(false);
-                            }
-                          }}
+                          onClick={() => void confirmMinuteAnalysis()}
                         >确认并下载</Button>
                       </div>
                     </div>
                   ) : null}
 
                   {minuteError ? (
-                    <div className="mx-3 mb-3 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs leading-5 text-red-700">
+                    <div role="alert" className="mx-3 mb-3 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs leading-5 text-red-700">
                       <WifiOff className="mt-0.5 h-4 w-4 shrink-0" />
                       <div>
                         <p className="font-semibold">分钟源不可用，已保留日线筛选结果</p>
@@ -1884,6 +2187,6 @@ export function SmartStrategyWorkbench({ data, runtimeStatus }: Props) {
           router.refresh();
         }}
       />
-    </main>
+    </div>
   );
 }

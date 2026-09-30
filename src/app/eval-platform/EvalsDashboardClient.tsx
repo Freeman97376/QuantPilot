@@ -318,7 +318,7 @@ export default function EvalsDashboardClient({ data }: Props) {
         </header>
 
         {/* Main content */}
-        <main className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto">
           <div className="mx-auto max-w-[1400px] space-y-5 px-6 py-5">
             {/* Toast */}
             <AnimatePresence>
@@ -402,7 +402,7 @@ export default function EvalsDashboardClient({ data }: Props) {
             )}
 
           </div>
-        </main>
+        </div>
       </div>
     </div>
   );

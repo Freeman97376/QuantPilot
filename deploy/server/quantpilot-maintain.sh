@@ -10,6 +10,9 @@ BRANCH="${QUANTPILOT_DEPLOY_BRANCH:-main}"
 MODE="${1:-update}"
 TARGET_REVISION="${2:-}"
 ENV_FILE="${QUANTPILOT_ENV_FILE:-${APP_DIR}/.env.production}"
+DEPLOY_USER="$(id -un)"
+DEPLOY_GROUP="$(id -gn)"
+DEPLOY_USER_HOME="${QUANTPILOT_DEPLOY_USER_HOME:-${HOME}}"
 LOCK_FILE="${QUANTPILOT_DEPLOY_LOCK_FILE:-/tmp/quantpilot-maintain.lock}"
 MIN_FREE_DISK_MB="${QUANTPILOT_MIN_FREE_DISK_MB:-4096}"
 BACKUP_DIR="${QUANTPILOT_BACKUP_DIR:-/var/backups/quantpilot}"
@@ -55,6 +58,7 @@ Optional environment variables:
   QUANTPILOT_APP_DIR=/opt/quantpilot
   QUANTPILOT_DEPLOY_BRANCH=main
   QUANTPILOT_ENV_FILE=/opt/quantpilot/.env.production
+  QUANTPILOT_DEPLOY_USER_HOME=/home/ubuntu
   QUANTPILOT_BACKUP_DIR=/var/backups/quantpilot
   QUANTPILOT_BACKUP_KEEP=7
 EOF
@@ -84,9 +88,14 @@ require_layout() {
   [[ -f "${ENV_FILE}" ]] || die "Environment file not found: ${ENV_FILE}"
   [[ -f "${APP_DIR}/docker-compose.yml" ]] || die "docker-compose.yml is missing."
   [[ -f "${APP_DIR}/deploy/server/docker-compose.server.yml" ]] || die "server Compose override is missing."
+  [[ ${APP_DIR} =~ ^/[A-Za-z0-9._/@:+-]+$ && ${APP_DIR} != / ]] || die "QUANTPILOT_APP_DIR must be an absolute non-root path without whitespace."
+  [[ ${ENV_FILE} =~ ^/[A-Za-z0-9._/@:+-]+$ && ${ENV_FILE} != / ]] || die "QUANTPILOT_ENV_FILE must be an absolute non-root path without whitespace."
+  [[ ${DEPLOY_USER_HOME} =~ ^/[A-Za-z0-9._/@:+-]+$ && ${DEPLOY_USER_HOME} != / ]] || die "QUANTPILOT_DEPLOY_USER_HOME must be an absolute non-root path without whitespace."
+  [[ ${DEPLOY_USER} =~ ^[A-Za-z0-9_.-]+$ ]] || die "Deployment user contains unsupported characters."
+  [[ ${DEPLOY_GROUP} =~ ^[A-Za-z0-9_.-]+$ ]] || die "Deployment group contains unsupported characters."
 
   local command
-  for command in git docker node npm npx uv curl systemctl sudo flock df awk find sort sha256sum; do
+  for command in git docker node npm npx uv curl systemctl sudo flock df awk find sort sha256sum sed; do
     require_command "${command}"
   done
   docker compose version >/dev/null
@@ -349,20 +358,43 @@ reexec_updated_library_script() {
   exec env QUANTPILOT_PREVIOUS_REVISION="${PREVIOUS_REVISION}" "${target_script}" update
 }
 
+escape_sed_replacement() {
+  local value=$1
+  value=${value//\\/\\\\}
+  value=${value//&/\\&}
+  value=${value//|/\\|}
+  printf '%s' "${value}"
+}
+
+install_runtime_unit() {
+  local unit_name=$1
+  local source="${APP_DIR}/deploy/server/systemd/${unit_name}"
+  local target="/etc/systemd/system/${unit_name}"
+  local app_dir
+  local env_file
+  local deploy_user_home
+  local web_port="${WEB_PORT:-3000}"
+  [[ ${web_port} =~ ^[0-9]+$ ]] && (( web_port >= 1 && web_port <= 65535 )) || \
+    die "WEB_PORT must be an integer between 1 and 65535."
+  app_dir="$(escape_sed_replacement "${APP_DIR}")"
+  env_file="$(escape_sed_replacement "${ENV_FILE}")"
+  deploy_user_home="$(escape_sed_replacement "${DEPLOY_USER_HOME}")"
+  sed \
+    -e "s|^User=ubuntu$|User=${DEPLOY_USER}|" \
+    -e "s|^Group=ubuntu$|Group=${DEPLOY_GROUP}|" \
+    -e "s|/opt/quantpilot|${app_dir}|g" \
+    -e "s|^EnvironmentFile=.*$|EnvironmentFile=${env_file}|" \
+    -e "s|/home/ubuntu|${deploy_user_home}|g" \
+    -e "s|^Environment=WEB_PORT=3000$|Environment=WEB_PORT=${web_port}|" \
+    "${source}" | sudo install -m 0644 /dev/stdin "${target}"
+}
+
 install_runtime_units() {
-  log "Installing systemd units and timers..."
-  sudo install -m 0644 \
-    "${APP_DIR}/deploy/server/systemd/quantpilot-market-data.service" \
-    /etc/systemd/system/quantpilot-market-data.service
-  sudo install -m 0644 \
-    "${APP_DIR}/deploy/server/systemd/quantpilot-web.service" \
-    /etc/systemd/system/quantpilot-web.service
-  sudo install -m 0644 \
-    "${APP_DIR}/deploy/server/systemd/quantpilot-market-refresh@.service" \
-    /etc/systemd/system/quantpilot-market-refresh@.service
-  sudo install -m 0644 \
-    "${APP_DIR}/deploy/server/systemd/quantpilot-diagnostics-cleanup.service" \
-    /etc/systemd/system/quantpilot-diagnostics-cleanup.service
+  log "Installing systemd units and timers for ${DEPLOY_USER} at ${APP_DIR}..."
+  install_runtime_unit quantpilot-market-data.service
+  install_runtime_unit quantpilot-web.service
+  install_runtime_unit quantpilot-market-refresh@.service
+  install_runtime_unit quantpilot-diagnostics-cleanup.service
 
   local timer
   for timer in "${TIMER_UNITS[@]}"; do

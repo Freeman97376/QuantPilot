@@ -5,6 +5,7 @@ import type { Socket } from 'net';
 import { ensureHeartbeat, websocketManager } from '@/lib/server/websocket-manager';
 import { APP_BASE_PATH } from '@/lib/config/public-paths';
 
+import { isSafeProjectId } from '@/lib/services/project';
 type NextApiResponseWithSocket = NextApiResponse & {
   socket: Socket & {
     server: HTTPServer & {
@@ -19,6 +20,45 @@ export const config = {
     bodyParser: false,
   },
 };
+
+const DESKTOP_COOKIE_NAME = 'quantpilot_launch';
+
+function tokensEqual(actual: string | undefined, expected: string): boolean {
+  if (!actual || actual.length !== expected.length) return false;
+  let mismatch = 0;
+  for (let index = 0; index < expected.length; index += 1) {
+    mismatch |= actual.charCodeAt(index) ^ expected.charCodeAt(index);
+  }
+  return mismatch === 0;
+}
+
+function cookieValue(cookieHeader: string | undefined, name: string): string | undefined {
+  for (const part of cookieHeader?.split(';') ?? []) {
+    const separator = part.indexOf('=');
+    if (separator < 0 || part.slice(0, separator).trim() !== name) continue;
+    return part.slice(separator + 1).trim();
+  }
+  return undefined;
+}
+
+function isAuthorizedDesktopUpgrade(request: IncomingMessage): boolean {
+  const runtimeMode = (
+    process.env.QUANTPILOT_RUNTIME_MODE || process.env.QUANTPILOT_DEPLOYMENT || 'server'
+  ).trim().toLowerCase();
+  if (runtimeMode !== 'desktop') return true;
+
+  const expectedToken = process.env.QUANTPILOT_LAUNCH_TOKEN?.trim();
+  const actualToken = cookieValue(request.headers.cookie, DESKTOP_COOKIE_NAME);
+  const host = request.headers.host;
+  const origin = request.headers.origin;
+  if (!expectedToken || !host || !origin || !tokensEqual(actualToken, expectedToken)) return false;
+  try {
+    const originUrl = new URL(origin);
+    return originUrl.host === host && ['127.0.0.1', 'localhost'].includes(originUrl.hostname);
+  } catch {
+    return false;
+  }
+}
 
 export default function handler(req: NextApiRequest, res: NextApiResponseWithSocket) {
   // Initialize a shared WebSocket server on the underlying HTTP server once.
@@ -41,7 +81,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponseWithSoc
       const segment = requestUrl.pathname.split('/').filter(Boolean).pop();
       const projectId = segment ? decodeURIComponent(segment) : null;
 
-      if (!projectId) {
+      if (!isSafeProjectId(projectId)) {
         websocket.close(1008, 'Project ID required');
         return;
       }
@@ -61,6 +101,14 @@ export default function handler(req: NextApiRequest, res: NextApiResponseWithSoc
         const websocketPrefixes = [`${APP_BASE_PATH}/api/ws/`, '/api/ws/'];
         if (!websocketPrefixes.some((prefix) => upgradeUrl.pathname.startsWith(prefix))) {
           return; // Let Next.js handle other upgrades (HMR, etc.)
+        }
+
+        if (!isAuthorizedDesktopUpgrade(request)) {
+          socket.write(
+            'HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'
+          );
+          socket.destroy();
+          return;
         }
 
         wss.handleUpgrade(request, socket, head, (websocket: WebSocket) => {

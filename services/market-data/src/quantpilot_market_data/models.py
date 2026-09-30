@@ -609,6 +609,28 @@ class AShareUniverseBatchImportResponse(BaseModel):
     fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+class AShareBootstrapRequest(BaseModel):
+    universe_id: str = Field(
+        default="a-share-sample-research-pool",
+        min_length=1,
+        max_length=120,
+        description="Target A-share universe managed by the background bootstrap job.",
+    )
+
+
+class AShareBootstrapResponse(BaseModel):
+    catalog_job_id: str
+    catalog_status: str
+    history_job_id: str | None = None
+    reused_existing_job: bool = False
+    state: Literal[
+        "catalog_running",
+        "catalog_partial",
+        "history_running",
+        "completed",
+    ]
+
+
 class ETFUniverseBatchImportRequest(AShareUniverseBatchImportRequest):
     universe_id: str = Field(
         default="etf-index-pool",

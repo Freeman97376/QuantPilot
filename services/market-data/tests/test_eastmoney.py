@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -13,6 +15,8 @@ from quantpilot_market_data.cache import MarketDataCache
 from quantpilot_market_data.fundamentals import build_fundamental_indicators
 from quantpilot_market_data.indicators import build_technical_indicators
 from quantpilot_market_data.providers.eastmoney import (
+    EastMoneyClient,
+    EastMoneyConfig,
     infer_asset_type,
     normalize_secid,
     parse_a_share_list_payload,
@@ -641,3 +645,84 @@ def test_realtime_quote_endpoint_uses_cache(
     assert first.json()["fetch"]["cache_status"] == "miss"
     assert second.json()["fetch"]["cache_status"] == "hit"
     assert call_count == 1
+
+def test_a_share_catalog_falls_back_from_primary_302_to_delay_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_hosts.append(request.url.host)
+        if request.url.host == "primary.test":
+            return httpx.Response(302, headers={"location": "https://redirect.invalid"})
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "total": 1,
+                    "diff": [
+                        {
+                            "f12": "600519",
+                            "f13": 1,
+                            "f14": "fixture",
+                        }
+                    ],
+                }
+            },
+        )
+
+    client = EastMoneyClient(
+        EastMoneyConfig(
+            base_urls=("https://primary.test", "https://delay.test"),
+        )
+    )
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        client,
+        "_create_http_client",
+        lambda **_kwargs: httpx.AsyncClient(transport=transport),
+    )
+
+    total, symbols = asyncio.run(client.list_a_share_symbols(page=1, page_size=100))
+
+    assert total == 1
+    assert symbols[0].symbol == "600519"
+    assert requested_hosts == ["primary.test", "delay.test"]
+
+
+def test_a_share_catalog_falls_back_from_malformed_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_hosts.append(request.url.host)
+        if request.url.host == "primary.test":
+            return httpx.Response(200, text="not-json")
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "total": 1,
+                    "diff": [{"f12": "600519", "f13": 1, "f14": "fixture"}],
+                }
+            },
+        )
+
+    client = EastMoneyClient(
+        EastMoneyConfig(
+            base_urls=("https://primary.test", "https://delay.test"),
+        )
+    )
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        client,
+        "_create_http_client",
+        lambda **_kwargs: httpx.AsyncClient(transport=transport),
+    )
+
+    total, symbols = asyncio.run(client.list_a_share_symbols(page=1, page_size=100))
+
+    assert total == 1
+    assert symbols[0].symbol == "600519"
+    assert requested_hosts == ["primary.test", "delay.test"]

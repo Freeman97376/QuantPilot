@@ -374,7 +374,7 @@ export default function ResearchReportsClient({ initialData }: ResearchReportsCl
   }
 
   return (
-    <main className="min-h-screen bg-slate-50 text-slate-950 dark:bg-slate-950 dark:text-slate-50">
+    <div className="min-h-screen bg-slate-50 text-slate-950 dark:bg-slate-950 dark:text-slate-50">
       <div className="mx-auto flex w-full max-w-[1680px] flex-col gap-6 px-6 py-6">
         <header className="flex flex-wrap items-center justify-between gap-4">
           <div>
@@ -438,6 +438,6 @@ export default function ResearchReportsClient({ initialData }: ResearchReportsCl
           </div>
         )}
       </div>
-    </main>
+    </div>
   );
 }

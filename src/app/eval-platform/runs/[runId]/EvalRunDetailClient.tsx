@@ -140,7 +140,7 @@ export default function EvalRunDetailClient({ run }: Props) {
         </div>
       </header>
 
-      <main className="mx-auto max-w-7xl px-6 py-8">
+      <div className="mx-auto max-w-7xl px-6 py-8">
         <section className="grid gap-4 md:grid-cols-5">
           <Card>
             <CardHeader className="pb-3">
@@ -464,7 +464,7 @@ export default function EvalRunDetailClient({ run }: Props) {
             ))}
           </div>
         </section>
-      </main>
+      </div>
     </div>
   );
 }

@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { isUtf8 } = require('buffer');
 
 const root = process.cwd();
 const registryPath = path.join(root, '.claude', 'skills.registry.json');
@@ -44,6 +45,14 @@ function listFiles(dir) {
   }).sort();
 }
 
+function readPortableSourceFile(filePath) {
+  const content = fs.readFileSync(filePath);
+  if (content.includes(0) || !isUtf8(content)) {
+    return content;
+  }
+  return Buffer.from(content.toString('utf8').replace(/\r\n/g, '\n'), 'utf8');
+}
+
 function hashSkillSource(skillId) {
   const sourceDir = path.join(skillsDir, skillId);
   const files = listFiles(sourceDir);
@@ -52,7 +61,7 @@ function hashSkillSource(skillId) {
     const relativePath = path.relative(sourceDir, filePath).replaceAll(path.sep, '/');
     hash.update(relativePath);
     hash.update('\0');
-    hash.update(fs.readFileSync(filePath));
+    hash.update(readPortableSourceFile(filePath));
     hash.update('\0');
   }
   return {

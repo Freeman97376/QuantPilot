@@ -9,6 +9,7 @@ import {
   getProjectById,
   updateProject,
   updateProjectActivity,
+  isSafeProjectId,
 } from "@/lib/services/project";
 import { createMessage } from "@/lib/services/message";
 import {
@@ -45,6 +46,15 @@ import {
   finishQuantGenerationQueueItem,
   runQuantGenerationQueued,
 } from "@/lib/quant/generation-queue";
+import {
+  ImageValidationError,
+  MAX_IMAGE_ATTACHMENTS,
+  MAX_IMAGE_BYTES,
+  validateImageBytes,
+} from "@/lib/security/image-files";
+
+import { readLimitedJson, RequestBodyError } from '@/lib/security/request-body';
+import { ensureSafeChildDirectory } from '@/lib/security/safe-filesystem';
 
 interface RouteContext {
   params: Promise<{ project_id: string }>;
@@ -105,24 +115,47 @@ const PROJECTS_DIR_ABSOLUTE = path.isAbsolute(PROJECTS_DIR)
   ? PROJECTS_DIR
   : path.resolve(/*turbopackIgnore: true*/ process.cwd(), PROJECTS_DIR);
 
+const MAX_CHAT_BODY_BYTES =
+  Math.ceil((MAX_IMAGE_BYTES * 4) / 3) * MAX_IMAGE_ATTACHMENTS + 2 * 1024 * 1024;
+
 function resolveAssetsPath(projectId: string): string {
   return path.join(PROJECTS_DIR_ABSOLUTE, projectId, "assets");
 }
 
-function ensureAbsoluteAssetPath(projectId: string, inputPath: string): string {
-  const normalized = path.normalize(inputPath);
-  if (path.isAbsolute(normalized)) {
-    return normalized;
-  }
-  const resolvedFromCwd = path.resolve(
-    /*turbopackIgnore: true*/ process.cwd(),
-    normalized,
+async function resolveSafeAssetsPath(projectId: string): Promise<string> {
+  return ensureSafeChildDirectory(PROJECTS_DIR_ABSOLUTE, [
+    projectId,
+    path.basename(resolveAssetsPath(projectId)),
+  ]);
+}
+
+function isInsidePath(rootPath: string, candidatePath: string): boolean {
+  const relativePath = path.relative(rootPath, candidatePath);
+  return (
+    relativePath === "" ||
+    (!relativePath.startsWith("..") && !path.isAbsolute(relativePath))
   );
-  if (resolvedFromCwd.startsWith(PROJECTS_DIR_ABSOLUTE)) {
-    return resolvedFromCwd;
+}
+
+async function resolveSafeAssetPath(
+  projectId: string,
+  inputPath: string,
+): Promise<string> {
+  const assetRoot = await resolveSafeAssetsPath(projectId);
+  const normalized = path.normalize(inputPath);
+  const candidatePath = path.isAbsolute(normalized)
+    ? path.resolve(normalized)
+    : path.resolve(assetRoot, normalized);
+  const [realAssetRoot, realCandidatePath] = await Promise.all([
+    fs.realpath(assetRoot),
+    fs.realpath(candidatePath),
+  ]);
+  if (!isInsidePath(realAssetRoot, realCandidatePath)) {
+    throw new ImageValidationError(
+      "Attachment path must stay inside the current project assets directory.",
+    );
   }
-  const projectBase = path.join(PROJECTS_DIR_ABSOLUTE, projectId);
-  return path.resolve(projectBase, normalized);
+  return realCandidatePath;
 }
 
 function resolveProjectRoot(
@@ -748,7 +781,10 @@ async function mirrorAssetToPublic(
   let hostPublicPath: string | null = null;
 
   try {
-    await fs.mkdir(hostUploadsDir, { recursive: true });
+    await ensureSafeChildDirectory(
+      /*turbopackIgnore: true*/ process.cwd(),
+      ['public', 'uploads'],
+    );
     const destinationPath = path.join(hostUploadsDir, filename);
     try {
       await fs.access(destinationPath);
@@ -765,7 +801,7 @@ async function mirrorAssetToPublic(
 
   try {
     const uploadsDir = path.join(projectRoot, "public", "uploads");
-    await fs.mkdir(uploadsDir, { recursive: true });
+    await ensureSafeChildDirectory(projectRoot, ['public', 'uploads']);
     const destinationPath = path.join(uploadsDir, filename);
     try {
       await fs.access(destinationPath);
@@ -788,16 +824,6 @@ async function mirrorAssetToPublic(
   }
 }
 
-function inferExtensionFromMime(mime?: string): string {
-  if (!mime) return ".png";
-  const normalized = mime.toLowerCase();
-  if (normalized.includes("png")) return ".png";
-  if (normalized.includes("jpeg") || normalized.includes("jpg")) return ".jpg";
-  if (normalized.includes("gif")) return ".gif";
-  if (normalized.includes("webp")) return ".webp";
-  if (normalized.includes("svg")) return ".svg";
-  return ".png";
-}
 
 async function materializeBase64Image(
   projectId: string,
@@ -809,13 +835,15 @@ async function materializeBase64Image(
   absolutePath: string;
   filename: string;
   publicUrl: string | null;
+  mimeType: string;
 }> {
   const buffer = Buffer.from(base64, "base64");
-  const extension = inferExtensionFromMime(mimeType);
+  const imageType = validateImageBytes(buffer, mimeType);
+  const extension = imageType.extension;
   const safeName =
     nameHint && nameHint.trim() ? nameHint.trim() : `image-${randomUUID()}`;
   const filename = `${safeName.replace(/[^a-zA-Z0-9-_]/g, "-") || "image"}-${randomUUID()}${extension}`;
-  const assetsDir = resolveAssetsPath(projectId);
+  const assetsDir = await resolveSafeAssetsPath(projectId);
   await fs.mkdir(assetsDir, { recursive: true });
   const absolutePath = path.join(assetsDir, filename);
   await fs.writeFile(absolutePath, buffer);
@@ -824,6 +852,7 @@ async function materializeBase64Image(
     absolutePath,
     filename,
     publicUrl: mirror.publicUrl,
+    mimeType: imageType.mimeType,
   };
 }
 
@@ -862,7 +891,7 @@ async function normalizeImageAttachment(
 
   const pathValue =
     typeof raw.path === "string" && raw.path.trim().length > 0
-      ? ensureAbsoluteAssetPath(projectId, raw.path.trim())
+      ? raw.path.trim()
       : null;
 
   const base64DataCandidate =
@@ -881,57 +910,61 @@ async function normalizeImageAttachment(
 
   if (pathValue) {
     try {
-      const stat = await fs.stat(pathValue);
-      const filename = path.basename(pathValue);
+      const safePath = await resolveSafeAssetPath(projectId, pathValue);
+      const stat = await fs.stat(safePath);
+      if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_IMAGE_BYTES) {
+        throw new ImageValidationError(
+          "Attachment must be a non-empty image no larger than 10 MB.",
+        );
+      }
+      const imageBuffer = await fs.readFile(safePath);
+      const imageType = validateImageBytes(imageBuffer, mimeTypeCandidate);
+      const filename = path.basename(safePath);
       let effectivePublicUrl = providedPublicUrl;
       if (!effectivePublicUrl) {
         const mirror = await mirrorAssetToPublic(
           projectRoot,
           filename,
-          pathValue,
+          safePath,
         );
         effectivePublicUrl = mirror.publicUrl ?? undefined;
       }
       return {
         name,
-        path: pathValue,
+        path: safePath,
         url: providedUrl ?? withApiBase(`/api/assets/${projectId}/${filename}`),
         publicUrl: effectivePublicUrl,
         originalName:
           typeof raw.original_name === "string" ? raw.original_name : undefined,
-        mimeType:
-          typeof raw.mime_type === "string"
-            ? raw.mime_type
-            : typeof raw.mimeType === "string"
-              ? raw.mimeType
-              : undefined,
+        mimeType: imageType.mimeType,
         size: stat.size,
       };
-    } catch {
-      // fall through and try to materialize if base64 present
+    } catch (error) {
+      if (!base64DataCandidate) {
+        if (error instanceof ImageValidationError) throw error;
+        throw new ImageValidationError(
+          "Attachment path is unavailable or cannot be read.",
+        );
+      }
     }
   }
 
   if (base64DataCandidate) {
-    try {
-      const materialized = await materializeBase64Image(
-        projectId,
-        projectRoot,
-        base64DataCandidate,
-        name,
-        mimeTypeCandidate,
-      );
-      return {
-        name,
-        path: materialized.absolutePath,
-        url: providedUrl ?? withApiBase(`/api/assets/${projectId}/${materialized.filename}`),
-        publicUrl: providedPublicUrl ?? materialized.publicUrl ?? undefined,
-        mimeType: mimeTypeCandidate,
-      };
-    } catch (error) {
-      console.error("[API] Failed to materialize base64 image:", error);
-      return null;
-    }
+    const materialized = await materializeBase64Image(
+      projectId,
+      projectRoot,
+      base64DataCandidate,
+      name,
+      mimeTypeCandidate,
+    );
+    return {
+      name,
+      path: materialized.absolutePath,
+      url: providedUrl ?? withApiBase(`/api/assets/${projectId}/${materialized.filename}`),
+      publicUrl: providedPublicUrl ?? materialized.publicUrl ?? undefined,
+      mimeType: materialized.mimeType,
+      size: Buffer.byteLength(base64DataCandidate, "base64"),
+    };
   }
 
   return null;
@@ -1038,8 +1071,25 @@ ${imageList}`;
  */
 export async function POST(request: NextRequest, { params }: RouteContext) {
   try {
+    const declaredLength = Number.parseInt(
+      request.headers.get("content-length") || "0",
+      10,
+    );
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_CHAT_BODY_BYTES) {
+      return NextResponse.json(
+        { success: false, error: "Chat request exceeds the attachment size limit" },
+        { status: 413 },
+      );
+    }
+
     const { project_id } = await params;
-    const rawBody = await request.json().catch(() => ({}));
+    if (!isSafeProjectId(project_id)) {
+      return NextResponse.json(
+        { success: false, error: "Invalid project ID" },
+        { status: 400 },
+      );
+    }
+    const rawBody = await readLimitedJson(request, MAX_CHAT_BODY_BYTES);
     const body = (
       rawBody && typeof rawBody === "object" ? rawBody : {}
     ) as ChatActRequest & Record<string, unknown>;
@@ -1091,6 +1141,15 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
       : Array.isArray(legacyBody["images"])
         ? (legacyBody["images"] as RawImageAttachment[])
         : [];
+    if (rawImages.length > MAX_IMAGE_ATTACHMENTS) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `A maximum of ${MAX_IMAGE_ATTACHMENTS} image attachments is allowed`,
+        },
+        { status: 413 },
+      );
+    }
 
     const processedImages: ProcessedImageAttachment[] = [];
     for (let index = 0; index < rawImages.length; index += 1) {
@@ -1691,6 +1750,19 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
       conversationId: conversationId ?? null,
     });
   } catch (error) {
+    if (error instanceof RequestBodyError) {
+      return NextResponse.json(
+        { success: false, error: error.message },
+        { status: error.status },
+      );
+    }
+    if (error instanceof ImageValidationError) {
+      return NextResponse.json(
+        { success: false, error: error.message },
+        { status: 400 },
+      );
+    }
+
     console.error("[API] Failed to execute AI:", error);
     return NextResponse.json(
       {

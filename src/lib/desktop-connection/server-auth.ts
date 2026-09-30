@@ -3,6 +3,10 @@ import { hash, verify } from '@node-rs/argon2';
 import type { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db/client';
 import { isServerRuntime } from '@/lib/runtime/mode';
+import {
+  readLimitedJson as readBoundedJson,
+  RequestBodyError,
+} from '@/lib/security/request-body';
 
 export const ACCESS_TOKEN_TTL_MS = 15 * 60 * 1000;
 export const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -61,18 +65,13 @@ export function tokenHash(token: string): string {
 }
 
 export async function readLimitedJson(request: NextRequest): Promise<unknown> {
-  const declared = Number.parseInt(request.headers.get('content-length') || '0', 10);
-  if (Number.isFinite(declared) && declared > MAX_REQUEST_BYTES) {
-    throw new DesktopConnectionError('Request body is too large.', 413);
-  }
-  const text = await request.text();
-  if (Buffer.byteLength(text, 'utf8') > MAX_REQUEST_BYTES) {
-    throw new DesktopConnectionError('Request body is too large.', 413);
-  }
   try {
-    return JSON.parse(text || '{}');
-  } catch {
-    throw new DesktopConnectionError('Invalid JSON body.');
+    return await readBoundedJson(request, MAX_REQUEST_BYTES);
+  } catch (error) {
+    if (error instanceof RequestBodyError) {
+      throw new DesktopConnectionError(error.message, error.status);
+    }
+    throw error;
   }
 }
 
@@ -232,9 +231,22 @@ export async function revokeDesktopSession(request: NextRequest): Promise<void> 
 
 type LimitBucket = { count: number; resetAt: number };
 const rateLimits = new Map<string, LimitBucket>();
+const MAX_RATE_LIMIT_BUCKETS = 10_000;
+
+function pruneRateLimits(now: number): void {
+  for (const [key, bucket] of rateLimits) {
+    if (bucket.resetAt <= now) rateLimits.delete(key);
+  }
+  while (rateLimits.size >= MAX_RATE_LIMIT_BUCKETS) {
+    const oldestKey = rateLimits.keys().next().value as string | undefined;
+    if (!oldestKey) break;
+    rateLimits.delete(oldestKey);
+  }
+}
 
 export function enforceRateLimit(key: string, limit: number, windowMs: number): void {
   const now = Date.now();
+  if (rateLimits.size >= MAX_RATE_LIMIT_BUCKETS) pruneRateLimits(now);
   const current = rateLimits.get(key);
   if (!current || current.resetAt <= now) {
     rateLimits.set(key, { count: 1, resetAt: now + windowMs });
@@ -247,7 +259,11 @@ export function enforceRateLimit(key: string, limit: number, windowMs: number): 
 }
 
 export function requestIp(request: NextRequest): string {
-  return (request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown')
-    .split(',')[0]
-    .trim();
+  const realIp = request.headers.get('x-real-ip')?.trim();
+  if (realIp) return realIp;
+  const forwarded = request.headers.get('x-forwarded-for')
+    ?.split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return forwarded?.at(-1) || 'unknown';
 }

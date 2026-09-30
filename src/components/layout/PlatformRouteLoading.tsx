@@ -11,7 +11,7 @@ function SkeletonBlock({ className = '' }: { className?: string }) {
 
 export function PlatformRouteLoading({ title, subtitle }: PlatformRouteLoadingProps) {
   return (
-    <main className="min-h-screen bg-slate-50 px-4 py-5 text-slate-900 md:px-6">
+    <div className="min-h-screen bg-slate-50 px-4 py-5 text-slate-900 md:px-6">
       <div className="mx-auto max-w-[1500px] space-y-5">
         <header className="flex flex-wrap items-center justify-between gap-3">
           <div>
@@ -55,6 +55,6 @@ export function PlatformRouteLoading({ title, subtitle }: PlatformRouteLoadingPr
           </div>
         </section>
       </div>
-    </main>
+    </div>
   );
 }

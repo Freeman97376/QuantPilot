@@ -15,6 +15,44 @@ const PROJECTS_DIR = process.env.PROJECTS_DIR || './data/projects';
 const PROJECTS_DIR_ABSOLUTE = path.isAbsolute(PROJECTS_DIR)
   ? PROJECTS_DIR
   : path.resolve(/*turbopackIgnore: true*/ process.cwd(), PROJECTS_DIR);
+const PROJECT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const WINDOWS_RESERVED_PROJECT_ID = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
+
+function isPathWithin(rootPath: string, candidatePath: string): boolean {
+  const relative = path.relative(rootPath, candidatePath);
+  return (
+    relative.length > 0
+    && !relative.startsWith('..')
+    && !path.isAbsolute(relative)
+  );
+}
+
+async function resolveManagedProjectPathForDeletion(candidatePath: string): Promise<string | null> {
+  const resolvedCandidate = path.resolve(candidatePath);
+  try {
+    const [canonicalRoot, canonicalCandidate] = await Promise.all([
+      fs.realpath(PROJECTS_DIR_ABSOLUTE),
+      fs.realpath(resolvedCandidate),
+    ]);
+    return isPathWithin(canonicalRoot, canonicalCandidate) ? canonicalCandidate : null;
+  } catch {
+    return null;
+  }
+}
+
+export function isSafeProjectId(value: unknown): value is string {
+  return typeof value === 'string'
+    && PROJECT_ID_PATTERN.test(value)
+    && !WINDOWS_RESERVED_PROJECT_ID.test(value);
+}
+
+function assertSafeProjectId(value: unknown): asserts value is string {
+  if (!isSafeProjectId(value)) {
+    throw new Error(
+      'project_id must be a 1-128 character path-safe identifier using letters, numbers, dot, underscore, or hyphen.'
+    );
+  }
+}
 
 function mergeProjectSettings(existing: string | null | undefined, quantCapabilityId?: string | null): string {
   let parsed: Record<string, unknown> = {};
@@ -152,6 +190,9 @@ export async function getAllProjects(): Promise<Project[]> {
  * Retrieve project by ID
  */
 export async function getProjectById(id: string): Promise<Project | null> {
+  if (!isSafeProjectId(id)) {
+    return null;
+  }
   const project = await prisma.project.findUnique({
     where: { id },
   });
@@ -166,6 +207,7 @@ export async function getProjectById(id: string): Promise<Project | null> {
  * Create new project
  */
 export async function createProject(input: CreateProjectInput): Promise<Project> {
+  assertSafeProjectId(input.project_id);
   // Create project directory
   const projectPath = path.join(PROJECTS_DIR_ABSOLUTE, input.project_id);
   await fs.mkdir(projectPath, { recursive: true });
@@ -219,6 +261,7 @@ export async function updateProject(
   id: string,
   input: UpdateProjectInput
 ): Promise<Project> {
+  assertSafeProjectId(id);
   const existing = await prisma.project.findUnique({
     where: { id },
     select: { preferredCli: true },
@@ -250,13 +293,19 @@ export async function updateProject(
  * Delete project
  */
 export async function deleteProject(id: string): Promise<void> {
+  assertSafeProjectId(id);
   // Delete project directory
   const project = await getProjectById(id);
   if (project?.repoPath) {
-    try {
-      await fs.rm(project.repoPath, { recursive: true, force: true });
-    } catch (error) {
-      console.warn(`[ProjectService] Failed to delete project directory:`, error);
+    const managedProjectPath = await resolveManagedProjectPathForDeletion(project.repoPath);
+    if (!managedProjectPath) {
+      console.warn('[ProjectService] Refusing to delete a project directory outside the managed projects root.');
+    } else {
+      try {
+        await fs.rm(managedProjectPath, { recursive: true, force: true });
+      } catch (error) {
+        console.warn('[ProjectService] Failed to delete project directory:', error);
+      }
     }
   }
 
@@ -272,6 +321,7 @@ export async function deleteProject(id: string): Promise<void> {
  * Update project activity time
  */
 export async function updateProjectActivity(id: string): Promise<void> {
+  assertSafeProjectId(id);
   await prisma.project.update({
     where: { id },
     data: {
@@ -287,6 +337,7 @@ export async function updateProjectStatus(
   id: string,
   status: 'idle' | 'running' | 'stopped' | 'error'
 ): Promise<void> {
+  assertSafeProjectId(id);
   await prisma.project.update({
     where: { id },
     data: {
@@ -304,6 +355,9 @@ export interface ProjectCliPreference {
 }
 
 export async function getProjectCliPreference(projectId: string): Promise<ProjectCliPreference | null> {
+  if (!isSafeProjectId(projectId)) {
+    return null;
+  }
   const project = await prisma.project.findUnique({
     where: { id: projectId },
     select: {
@@ -328,6 +382,7 @@ export async function updateProjectCliPreference(
   projectId: string,
   input: Partial<ProjectCliPreference>
 ): Promise<ProjectCliPreference> {
+  assertSafeProjectId(projectId);
   const existing = await prisma.project.findUnique({
     where: { id: projectId },
     select: { preferredCli: true },

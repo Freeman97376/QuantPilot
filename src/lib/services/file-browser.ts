@@ -44,22 +44,23 @@ async function resolveSafePath(base: string, target: string): Promise<string> {
   const normalizedBase = path.resolve(base);
   const resolvedTarget = path.resolve(normalizedBase, target);
 
-  // Validate base path exists
+  let canonicalBase: string;
+  let canonicalTarget: string;
   try {
-    await fs.access(normalizedBase);
+    [canonicalBase, canonicalTarget] = await Promise.all([
+      fs.realpath(normalizedBase),
+      fs.realpath(resolvedTarget),
+    ]);
   } catch {
-    throw new FileBrowserError('Base path does not exist', 400);
+    throw new FileBrowserError('Path does not exist', 404);
   }
 
-  // Validate path is within base directory
-  if (
-    resolvedTarget !== normalizedBase &&
-    !resolvedTarget.startsWith(normalizedBase + path.sep)
-  ) {
+  const relative = path.relative(canonicalBase, canonicalTarget);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
     throw new FileBrowserError('Path traversal not allowed', 400);
   }
 
-  return resolvedTarget;
+  return canonicalTarget;
 }
 
 function normalizeRelativePath(dir: string): string {
